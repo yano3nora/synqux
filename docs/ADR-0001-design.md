@@ -168,4 +168,6 @@ Decision 8 の純粋性契約により、移植元で「synced reducer が `meta
     - host migration 境界（dual-host 窓・未応答 request 引き継ぎ・host 不在滞留 → dedicated 昇格）を `synqux/testing` の memory hub で決定的にカバー
     - 意図的な移植元からの変更: host 導出に同時刻接続の tiebreak（id 辞書順）を追加（列挙順依存で端末間の結論が割れ得たため）
     - `createSimulation` は公開しない（memory hub + 自前 store 構築で成立するため。SPEC-public-api.md 参照）
-- 次: Phase 2（npm publish、`synqux/firebase` adapter 実装、テンプレ repo の synqux 依存への置換）
+- **Phase 2 synqux 側完了（2026-07-05）**: `synqux/firebase` adapter 実装（実機は未検証）、publish 可能な体裁（0.1.0）。publish 実行とテンプレ置換はユーザ側の残タスク（手順書は git 管理外の docs/local/）
+- **Phase 3 完了（2026-07-05、テンプレ置換より前倒し）**: 順序判定を host 採番 seq へ刷新（`ADR-0002-host-seq.md`、schema v2 / 0.2.0）。既知の問題②を機構ごと根絶、fork 待機のイベント駆動化で直列 2ms/req・migration 回復 10ms。前倒しの経緯と負荷実測は `TASK-synqux-phase3.md`。snapshot throttle のみ意図的に残置（帯域問題が顕在化してから）
+- 次: publish（ユーザ判断）→ テンプレ repo の置換（v2 形式へ一度で移行）

@@ -7,7 +7,7 @@ import {
   type Reducer,
   type UnknownAction,
 } from '@reduxjs/toolkit'
-import { sleepTimer, waitUntilOrFail } from '@yano3nora/ts-utils'
+import { waitUntilOrFail } from '@yano3nora/ts-utils'
 import { createOrdering, type OrderingState } from './ordering.js'
 import { selectIsHost } from './selectors.js'
 import {
@@ -34,10 +34,45 @@ import {
   type Unsubscribe,
 } from './types.js'
 
-// 同期レート、小さくすれば高負荷・高速となる (移植元踏襲)
-const REQUEST_LOOP_MS = 100
-// host 機昇格はそこまで素早く見なくていい (移植元踏襲)
-const HOST_PROMOTION_LOOP_MS = 1000
+/**
+ * 待機 fork の安全網タイムアウト (ms)
+ *
+ * fork の待機はイベント駆動 (waker) が主で、状態変化 (peer 増減・request 受信・
+ * 適用完了) の notify で即時に再評価される。このタイムアウトは「notify の
+ * 取りこぼし」に備えた保険であり、平常時のレイテンシには現れない
+ */
+const WAKE_FALLBACK_MS = 1000
+
+/**
+ * イベント駆動待機のシグナル (ADR-0002 / イベント駆動化)
+ * notify で全 waiter を起こす。timeout は安全網 (起きて再評価して損はない)
+ */
+const createWaker = () => {
+  let waiters: (() => void)[] = []
+
+  return {
+    notify(): void {
+      const pending = waiters
+      waiters = []
+      for (const resolve of pending) {
+        resolve()
+      }
+    },
+
+    wait(timeoutMs: number): Promise<void> {
+      return new Promise<void>((resolve) => {
+        const timer = setTimeout(done, timeoutMs)
+
+        function done(): void {
+          clearTimeout(timer)
+          resolve() // 二重呼び出し (notify 後の timeout 等) は no-op
+        }
+
+        waiters.push(done)
+      })
+    },
+  }
+}
 
 export type CreateSynquxConfig<
   TRoot extends { synqux: SynquxState },
@@ -138,6 +173,10 @@ export const createSynqux = <
 
   // 処理済みリスト等の同期状態はすべてインスタンス内部に持つ (Decision 3)
   const ordering = createOrdering()
+
+  // 待機 fork をイベントで起こすシグナル。notify 点は「state 変化 = 再評価に
+  // 値する事象」に限る: peer 増減 / request 受信 / 適用完了
+  const waker = createWaker()
 
   const devDeterminismCheck =
     config.devDeterminismCheck ??
@@ -390,7 +429,7 @@ export const createSynqux = <
 
           // host 昇格するまでは判定を行わない
           if (!selectIsHost(current)) {
-            await sleepTimer(HOST_PROMOTION_LOOP_MS)
+            await waker.wait(WAKE_FALLBACK_MS)
             continue
           }
 
@@ -408,7 +447,7 @@ export const createSynqux = <
               ordering.isStale(entity.seq!) && !ordering.isApplied(id)
 
             if (!isLoser) {
-              await sleepTimer(REQUEST_LOOP_MS)
+              await waker.wait(WAKE_FALLBACK_MS)
               continue
             }
           }
@@ -422,7 +461,7 @@ export const createSynqux = <
               pending.seq !== undefined && pending.seq > ordering.appliedSeq(),
           )
           if (hasInflight || ordering.hasPendingIssue()) {
-            await sleepTimer(REQUEST_LOOP_MS)
+            await waker.wait(WAKE_FALLBACK_MS)
             continue
           }
 
@@ -495,6 +534,7 @@ export const createSynqux = <
     actionCreator: synquxActions.requestAdded,
     effect: (action, listener) => {
       spawnHostFork(listener, action.payload.request.id)
+      waker.notify() // 新規 request: 直列裁定ゲートの再評価を促す
     },
   })
   // 裁定済みで届いた request (restore / 再配送) にも敗者救済の watch が要るため、
@@ -503,7 +543,18 @@ export const createSynqux = <
     actionCreator: synquxActions.requestChanged,
     effect: (action, listener) => {
       spawnHostFork(listener, action.payload.request.id)
+      waker.notify() // 裁定の到着/更新: seq 待ちと勝者判定の再評価を促す
     },
+  })
+  // peer 増減で host が変わり得るため、昇格待機中の fork を起こす
+  // (migration 回復の主経路。1000ms ポーリングは安全網に格下げ)
+  requestListener.startListening({
+    actionCreator: synquxActions.peerUpserted,
+    effect: () => waker.notify(),
+  })
+  requestListener.startListening({
+    actionCreator: synquxActions.peerRemoved,
+    effect: () => waker.notify(),
   })
 
   /**
@@ -551,13 +602,13 @@ export const createSynqux = <
           if (ordering.isStale(seq)) {
             // 正史なら isApplied で break 済み → ここに来るのは dual-host 窓の
             // 敗者。host の再裁定 (新しい seq) を待つ
-            await sleepTimer(REQUEST_LOOP_MS)
+            await waker.wait(WAKE_FALLBACK_MS)
             continue
           }
 
           // 先行する seq が未適用のあいだ待機する (順序の線形化)
           if (ordering.shouldWait(seq)) {
-            await sleepTimer(REQUEST_LOOP_MS)
+            await waker.wait(WAKE_FALLBACK_MS)
             continue
           }
 
@@ -582,7 +633,7 @@ export const createSynqux = <
 
           if (winner.id !== id) {
             // 自分は敗者候補: 勝者の適用 → 自分の再裁定を待つ
-            await sleepTimer(REQUEST_LOOP_MS)
+            await waker.wait(WAKE_FALLBACK_MS)
             continue
           }
 
@@ -590,6 +641,7 @@ export const createSynqux = <
           if (entity.result?.type === 'error' && entity.result.console) {
             console.error(entity.result.message)
             ordering.markApplied(seq, id)
+            waker.notify() // 適用完了: 次の seq を待つ fork を起こす
             break
           }
 
@@ -606,13 +658,14 @@ export const createSynqux = <
             // 他 fork が rival 消失を「自分が勝者」と誤認し得る。
             // NOTE dispatch **前**への前倒しは不可 (失敗時に seq が永久欠番になる)
             ordering.markApplied(seq, id)
+            waker.notify() // 適用完了: 次の seq を待つ fork を起こす
 
             // 内部 entities からの破棄 (同 hash の action 通過) を確認してから
             // fork を終える。通常は dispatch 内で同期完了しており即座に通る
             await waitUntilOrFail(
               () =>
                 !(listener.getState() as TRoot).synqux.requests.entities[id],
-              { intervalMillis: REQUEST_LOOP_MS },
+              { intervalMillis: WAKE_FALLBACK_MS },
             )
 
             // 決定性検出網: 実適用後の synced を host の試し実行結果と照合する

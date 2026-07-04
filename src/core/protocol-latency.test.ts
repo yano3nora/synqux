@@ -4,15 +4,13 @@ import { selectIsHost } from './selectors.js'
 import { createHubClient } from './test-fixtures.js'
 
 /**
- * プロトコルレイテンシの baseline 計測 (Phase 3 / SPEC 改善ロードマップ 4)
+ * プロトコルレイテンシの回帰ガード (Phase 3 / SPEC 改善ロードマップ 4)
  *
  * fake timers 上の「simulation 時間」で、dispatch から全端末収束までの時間を測る。
- * 現行実装は prev チェーン待機・host 昇格監視が 100ms / 1000ms のポーリングで、
- * このコストがプロトコル時間として直接現れる。イベント駆動化 (Phase 3) の
- * 前後比較のため、上限 assert を回帰ガードとして固定する
- *
- * NOTE 上限値は「現行実装で観測した値 + 余裕」。イベント駆動化で大幅に縮む想定で、
- * そのときはこの上限を新実装の観測値に合わせて締め直すこと
+ * v1 (100ms/1000ms ポーリング) の baseline は 直列 191ms/req・migration 回復
+ * 510ms だった。seq 化 + イベント駆動化 (ADR-0002) 後の観測値は 直列 2ms/req・
+ * migration 回復 10ms で、上限 assert はこの新実装基準に締めてある —
+ * 破ったらポーリング退行 (waker の notify 漏れ等) を疑うこと
  */
 
 const GROUP_ID = 'group-latency'
@@ -84,8 +82,8 @@ describe('protocol latency baseline', () => {
     console.log(
       `[baseline] serial burst ${String(COUNT)} requests: ${String(elapsed)}ms total, ${String(elapsed / COUNT)}ms/req`,
     )
-    // prev チェーン直列処理 × 100ms ポーリングの積み上がり。現行の観測値 + 余裕
-    expect(elapsed).toBeLessThanOrEqual(COUNT * 300)
+    // イベント駆動の直列適用。観測値 2ms/req + 余裕 (ポーリング退行の検出線)
+    expect(elapsed).toBeLessThanOrEqual(COUNT * 30)
   })
 
   it('交錯 dispatch: 3 端末 × 10 requests の全端末収束', async () => {
@@ -119,7 +117,7 @@ describe('protocol latency baseline', () => {
     console.log(
       `[baseline] interleaved ${String(TOTAL)} requests (3 clients): ${String(elapsed)}ms total, ${String(elapsed / TOTAL)}ms/req`,
     )
-    expect(elapsed).toBeLessThanOrEqual(TOTAL * 300)
+    expect(elapsed).toBeLessThanOrEqual(TOTAL * 30)
   })
 
   it('host migration 回復: host 離脱から滞留 request の適用まで', async () => {
@@ -144,7 +142,7 @@ describe('protocol latency baseline', () => {
     )
 
     console.log(`[baseline] host migration recovery: ${String(elapsed)}ms`)
-    // 支配項は host 昇格監視の 1000ms sleep。現行の観測値 + 余裕
-    expect(elapsed).toBeLessThanOrEqual(2500)
+    // peerRemoved の notify で即時再評価される。観測値 10ms + 余裕
+    expect(elapsed).toBeLessThanOrEqual(300)
   })
 })

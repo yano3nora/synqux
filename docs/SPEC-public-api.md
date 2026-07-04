@@ -313,17 +313,16 @@ export type SynquxTransport = SnapshotStore & {
 
   pushRequest(envelope: Omit<RequestEnvelope, 'id'>): Promise<{ id: string }>
 
-  /** host の裁定を request へ焼き込む。prev は host 観測順 (これが順序の正になる) */
+  /** host の裁定を request へ焼き込む。(epoch, seq) が適用順の正になる (ADR-0002) */
   respondRequest(
     id: string,
-    patch: { prev: string | null; responsedBy: Peer['id']; result: string | null },
+    patch: { epoch: number; seq: number; responsedBy: Peer['id']; result: string | null },
   ): Promise<void>
 
   subscribeRequests(
-    options: { after?: string },  // after: restore 時に処理済み分を再取得しない (orderByKey().startAfter 相当)
+    options: { after?: string },  // NOTE: core は v2 (seq 順序) では使わない。prune 済み transport 向けに残置 (ADR-0002 Decision 5)
     handlers: {
-      /** prevKey は「配送集合内での直前 request id、先頭は null」という infra 観測順のヒント。信頼しない (host の prev 焼き込みが正) */
-      onAdded(envelope: RequestEnvelope, prevKey: string | null): void
+      onAdded(envelope: RequestEnvelope): void
       onChanged(envelope: RequestEnvelope): void
     },
   ): Unsubscribe
@@ -344,16 +343,12 @@ export type SynquxTransport = SnapshotStore & {
 | `subscribeRequests` | `onChildAdded` / `onChildChanged` + `orderByKey().startAfter(after)` | `subscribe-requests.ts` / `game-requests-query.ts` |
 | `saveSnapshot` | `set(ref, payload)` (payload は文字列なので undefined 落ち・空配列消失が起きない) | `update-game-state.ts` |
 
-移植元で `subscribe-requests.ts` (firebase 層) に置かれていた以下の at-least-once 対応は、**core の受信ルーティングへ移す** (どの transport でも起きうる普遍的な問題のため):
-
-1. 同一 prevKey の added 重複破棄 (`REQUESTS` ガード)
-2. `responsedBy` 付きで added に届いた request の changed 扱い振り分け (restore 時)
-3. restore 時 query 先頭の prevKey null に snapshot の revision を補完
+移植元で `subscribe-requests.ts` (firebase 層) に置かれていた at-least-once 対応 (added 重複破棄・裁定済み added の changed 振り分け) は、**core の受信ルーティングへ移した** (どの transport でも起きうる普遍的な問題のため)。prev チェーン由来の対応 (prevKey 補完等) は seq 化 (ADR-0002) で不要になり消滅
 
 ## A3: 封筒 wire format
 
 ```ts
-export const SYNQUX_SCHEMA_VERSION = 1
+export const SYNQUX_SCHEMA_VERSION = 2  // v2 = host 採番 seq (ADR-0002)
 
 /**
  * transport を流れる request 封筒
@@ -373,7 +368,8 @@ export type RequestEnvelope = {
   requested: number         // serverNow() 基準
   requestedBy: Peer['id']
   responsedBy?: Peer['id']  // host の裁定済みマーク。これの有無が added/changed の実質の区別
-  prev?: string | null      // host 観測順 (response 時に焼き込み)。順序の正
+  epoch?: number            // host 世代番号 (fencing、ADR-0002)。同一 seq 衝突の tiebreak
+  seq?: number              // host 採番の適用順連番 (response 時に焼き込み)。順序の正
   result?: string           // Result の JSON 文字列
 }
 
@@ -382,7 +378,9 @@ type SnapshotEnvelope<TSynced> = {
   v: number                     // SYNQUX_SCHEMA_VERSION
   synced: TSynced
   ordering: {
-    revisions: string[]         // 処理済み request id 列。Phase 3 の seq 化で ordering ごと差し替え (Decision 10)
+    epoch: number
+    appliedSeq: number
+    applied: { [seq: number]: string }  // 直近 200 件の seq → request id 窓 (ADR-0002 Decision 4)
   }
 }
 ```

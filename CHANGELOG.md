@@ -4,6 +4,21 @@
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-07-05
+
+### Changed (BREAKING: wire format v2)
+
+- Phase 3: 順序判定を host 採番 seq へ全面刷新 (`docs/ADR-0002-host-seq.md`)
+    - 封筒の裁定印が `prev` (チェーン参照) → `(epoch, seq)` (連番 + host 世代) に変更。`SYNQUX_SCHEMA_VERSION = 2`、v1 封筒・snapshot は明示的に拒否される
+    - snapshot 封筒の `ordering` が `{ revisions: string[] }` → `{ epoch, appliedSeq, applied (直近 200 件窓) }` に変更 (無限成長の解消)
+    - transport 契約変更: `respondRequest` の patch が `(epoch, seq)`、`subscribeRequests` の onAdded から prevKey 引数を削除
+- fork の待機をイベント駆動化 (ポーリングは安全網に格下げ)。直列処理 191ms/req → 2ms/req、host migration 回復 510ms → 10ms
+
+### Fixed
+
+- 既知の問題② (clock skew による request の無言ドロップ) を機構ごと根絶。順序が request id (端末時計) と無関係になった
+- dual-host 窓で同一 seq が衝突した場合の収束を決定的 tiebreak (epoch → responsedBy) で保証し、敗者 request は host が新しい seq で再裁定して救済する (v1 は敗者救済なし)
+
 ## [0.1.0] - 2026-07-05
 
 ### Added
