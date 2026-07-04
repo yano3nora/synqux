@@ -48,15 +48,18 @@ describe('createSynqux (end-to-end)', () => {
     expect(a.store.getState().game.log).toEqual(['increment:1'])
     expect(b.store.getState().game.log).toEqual(['increment:1'])
 
-    // 裁定は host (b) が行い、host 観測順の prev が焼き込まれている
+    // 裁定は host (b) が行い、(epoch, seq) が焼き込まれている
     const requests = hub.inspect.requests(GROUP_ID)
     expect(requests).toHaveLength(1)
     expect(requests[0]?.responsedBy).toBeDefined()
+    expect(requests[0]?.epoch).toBe(1)
+    expect(requests[0]?.seq).toBe(1)
 
-    // 受理 request ごとに snapshot が永続化される
+    // 受理 request ごとに snapshot が永続化される (ordering はカウンタ + 直近窓)
     const snapshot = parseSnapshotPayload(hub.inspect.snapshot(GROUP_ID)!)
     expect((snapshot.synced as GameState).count).toBe(1)
-    expect(snapshot.ordering.revisions).toEqual([requests[0]?.id])
+    expect(snapshot.ordering.appliedSeq).toBe(1)
+    expect(snapshot.ordering.applied[1]).toBe(requests[0]?.id)
   })
 
   it('複数端末の同時 dispatch でも全端末の適用順が host 基準で一致する', async () => {

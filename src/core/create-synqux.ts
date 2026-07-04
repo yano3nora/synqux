@@ -7,8 +7,8 @@ import {
   type Reducer,
   type UnknownAction,
 } from '@reduxjs/toolkit'
-import { sleepTimer, waitUntilOrFail } from '@yano3nora/ts-utils'
-import { createOrdering } from './ordering.js'
+import { waitUntilOrFail } from '@yano3nora/ts-utils'
+import { createOrdering, type OrderingState } from './ordering.js'
 import { selectIsHost } from './selectors.js'
 import {
   buildSnapshotPayload,
@@ -34,10 +34,45 @@ import {
   type Unsubscribe,
 } from './types.js'
 
-// 同期レート、小さくすれば高負荷・高速となる (移植元踏襲)
-const REQUEST_LOOP_MS = 100
-// host 機昇格はそこまで素早く見なくていい (移植元踏襲)
-const HOST_PROMOTION_LOOP_MS = 1000
+/**
+ * 待機 fork の安全網タイムアウト (ms)
+ *
+ * fork の待機はイベント駆動 (waker) が主で、状態変化 (peer 増減・request 受信・
+ * 適用完了) の notify で即時に再評価される。このタイムアウトは「notify の
+ * 取りこぼし」に備えた保険であり、平常時のレイテンシには現れない
+ */
+const WAKE_FALLBACK_MS = 1000
+
+/**
+ * イベント駆動待機のシグナル (ADR-0002 / イベント駆動化)
+ * notify で全 waiter を起こす。timeout は安全網 (起きて再評価して損はない)
+ */
+const createWaker = () => {
+  let waiters: (() => void)[] = []
+
+  return {
+    notify(): void {
+      const pending = waiters
+      waiters = []
+      for (const resolve of pending) {
+        resolve()
+      }
+    },
+
+    wait(timeoutMs: number): Promise<void> {
+      return new Promise<void>((resolve) => {
+        const timer = setTimeout(done, timeoutMs)
+
+        function done(): void {
+          clearTimeout(timer)
+          resolve() // 二重呼び出し (notify 後の timeout 等) は no-op
+        }
+
+        waiters.push(done)
+      })
+    },
+  }
+}
 
 export type CreateSynquxConfig<
   TRoot extends { synqux: SynquxState },
@@ -139,6 +174,10 @@ export const createSynqux = <
   // 処理済みリスト等の同期状態はすべてインスタンス内部に持つ (Decision 3)
   const ordering = createOrdering()
 
+  // 待機 fork をイベントで起こすシグナル。notify 点は「state 変化 = 再評価に
+  // 値する事象」に限る: peer 増減 / request 受信 / 適用完了
+  const waker = createWaker()
+
   const devDeterminismCheck =
     config.devDeterminismCheck ??
     (typeof process !== 'undefined' && process.env.NODE_ENV !== 'production')
@@ -186,7 +225,7 @@ export const createSynqux = <
    */
   const persistSnapshot = async (
     synced: TSynced,
-    revisions: RequestEnvelope['id'][],
+    orderingState: OrderingState,
   ): Promise<void> => {
     if (!session) {
       return
@@ -194,7 +233,7 @@ export const createSynqux = <
 
     await transport.saveSnapshot(
       session.groupId,
-      buildSnapshotPayload({ synced, ordering: { revisions } }),
+      buildSnapshotPayload({ synced, ordering: orderingState }),
     )
   }
 
@@ -209,7 +248,7 @@ export const createSynqux = <
         session.groupId,
         buildSnapshotPayload({
           synced: config.selectSynced(root),
-          ordering: { revisions: ordering.revisions() },
+          ordering: ordering.state(),
         }),
       ),
     ).catch((e: unknown) => console.error(e))
@@ -237,7 +276,8 @@ export const createSynqux = <
     requested: envelope.requested,
     requestedBy: envelope.requestedBy,
     responsedBy: envelope.responsedBy,
-    prev: envelope.prev,
+    epoch: envelope.epoch,
+    seq: envelope.seq,
     action: {
       type: envelope.action.type,
       payload:
@@ -345,59 +385,97 @@ export const createSynqux = <
     }
 
   /**
-   * 判定待ち request を host として捌く fork (移植元 requestListener 相当)
+   * request ごとの host 裁定 fork (ADR-0002)
    *
-   * 全端末が未応答 request ごとに永続 fork を持ち、「自分が host か」
-   * 「先行 request (prev) が処理済みか」を監視し続ける。host 不在・migration 中に
-   * 届いた request も、誰かが host に昇格した時点で処理される
+   * 全端末が request ごとに fork を持ち、「自分が host か」を監視し続ける。
+   * fork は request が**適用されるまで**生存し (v1 の「応答済みまで」から延長)、
+   * 自分が host のとき以下を裁定する:
+   * - 未裁定の request → 通常の裁定 (試し実行 → seq 採番 → respond)
+   * - seq スロットを別 request に取られた確定敗者 (dual-host 窓の産物) → 再裁定
+   *
+   * NOTE 前 host の「responded 済み・未適用」の in-flight 裁定は再採番しない
+   * (誰かが適用済みかもしれず、再採番は適用列の分岐を作る)。直列ゲートで
+   * その適用を待ってから次の裁定に進む
    */
-  const requestListener = createListenerMiddleware()
-  requestListener.startListening({
-    actionCreator: synquxActions.requestAdded,
-    effect: (action, listener) => {
-      const { request, prev } = action.payload
+  const hostForkActive = new Set<RequestEnvelope['id']>()
 
-      listener.fork(async () => {
+  const spawnHostFork = (
+    listener: {
+      getState: () => unknown
+      fork: (fn: () => Promise<void>) => unknown
+    },
+    id: RequestEnvelope['id'],
+  ): void => {
+    if (hostForkActive.has(id)) {
+      return
+    }
+    hostForkActive.add(id)
+
+    listener.fork(async () => {
+      try {
         while (true) {
-          // 先行する request が存在するとき、その処理完了まで待機させる
-          if (ordering.shouldWaitFor(prev)) {
-            await sleepTimer(REQUEST_LOOP_MS)
-            continue
+          if (ordering.isApplied(id)) {
+            break
           }
 
           const current = listener.getState() as TRoot
+          const entity = current.synqux.requests.entities[id]
           const responsedBy = current.synqux.connections.selfId
 
-          // ほぼありえないが、型ヒントと接続切れた時用
-          if (!responsedBy) {
-            break
-          }
-
-          // 処理済みなら他 host が処理し全体に伝播済みのため破棄
-          if (ordering.isApplied(request.id)) {
-            break
-          }
-
-          // 遅延 request は順序保証のため意図的に取りこぼす (既知の問題②の機構)
-          if (ordering.isDelayed(request.id)) {
+          // entity 消滅 = 適用直後 (hash matcher が破棄済み)。接続切れも同様に離脱
+          if (!entity || !responsedBy) {
             break
           }
 
           // host 昇格するまでは判定を行わない
           if (!selectIsHost(current)) {
-            await sleepTimer(HOST_PROMOTION_LOOP_MS)
+            await waker.wait(WAKE_FALLBACK_MS)
             continue
           }
 
+          const responded = entity.seq !== undefined
+
+          if (responded) {
+            // 窓より古い過去 → 適用済み扱いで破棄 (responseListener 側も破棄する)
+            if (ordering.isBeyondWindow(entity.seq!)) {
+              break
+            }
+
+            // 確定敗者 (スロットを別 request が消費) だけが再裁定の対象。
+            // それ以外の responded は正当な in-flight であり、適用を待つのみ
+            const isLoser =
+              ordering.isStale(entity.seq!) && !ordering.isApplied(id)
+
+            if (!isLoser) {
+              await waker.wait(WAKE_FALLBACK_MS)
+              continue
+            }
+          }
+
+          // 直列裁定ゲート: 自分の発行済み or 他 host の in-flight (未適用の
+          // responded) が残る間は、試し実行の土台 state が古いため裁定しない
+          const hasInflight = Object.values(
+            current.synqux.requests.entities,
+          ).some(
+            (pending) =>
+              pending.seq !== undefined && pending.seq > ordering.appliedSeq(),
+          )
+          if (hasInflight || ordering.hasPendingIssue()) {
+            await waker.wait(WAKE_FALLBACK_MS)
+            continue
+          }
+
+          const epoch = ordering.beginHosting()
+          const seq = ordering.issueSeq()
+
           try {
             // reducer が唯一の判定器: rootReducer の試し実行で成否を判定する
-            const next = config.rootReducer(current, request.action as TAction)
+            const next = config.rootReducer(current, entity.action as TAction)
             const result = config.selectSynced(next).result
 
-            // 既知の問題①の修正: snapshot へ載せる revisions を ack await の
-            // 「前」に評価固定する。ack 遅延中に responseListener 側の
-            // markApplied が先行しても、同一 id が隣接ペアで二重記録されない
-            const revisions = ordering.revisions().concat(request.id)
+            // snapshot へ載せる順序状態を ack await の「前」に評価固定する
+            // (v1 の既知の問題①と同じ構図の再発防止)
+            const orderingState = ordering.stateWith(seq, id)
 
             // 決定性検出網: 試し実行結果を控える。error & console は dispatch
             // されず実適用が発生しないため対象外
@@ -406,103 +484,198 @@ export const createSynqux = <
               !(result?.type === 'error' && result.console)
             ) {
               expectedSyncedByRequest.set(
-                request.id,
+                id,
                 canonicalStringify(config.selectSynced(next)),
               )
             }
 
-            await transport.respondRequest(request.id, {
-              prev: prev ?? null, // host 取得 prev を正として焼き込む
+            await transport.respondRequest(id, {
+              epoch,
+              seq,
               responsedBy,
               result: result ? serializeResult(result) : null,
             })
 
-            await persistSnapshot(config.selectSynced(next), revisions)
+            await persistSnapshot(config.selectSynced(next), orderingState)
           } catch (e) {
-            // reducer 内で throw された時用
+            // reducer 内で throw された時用 (transport 失敗もここに落ちる)
             console.error(e)
 
-            await transport.respondRequest(request.id, {
-              prev: prev ?? null,
-              responsedBy,
-              result: serializeResult({
-                action: request.action as TAction,
-                type: 'error',
-                targets: [request.requestedBy],
-                message: e instanceof Error ? e.message : String(e),
-                console: true,
-              }),
-            })
+            try {
+              await transport.respondRequest(id, {
+                epoch,
+                seq, // 同一 seq を使う。二重発行になっても tiebreak が収束させる
+                responsedBy,
+                result: serializeResult({
+                  action: entity.action as TAction,
+                  type: 'error',
+                  targets: [entity.requestedBy],
+                  message: e instanceof Error ? e.message : String(e),
+                  console: true,
+                }),
+              })
+            } catch (respondError) {
+              // respond 自体が失敗: 発行を取り消して host の永久停止を防ぐ
+              console.error(respondError)
+              ordering.retractIssue()
+            }
           }
 
           break
         }
-      })
+      } finally {
+        hostForkActive.delete(id)
+      }
+    })
+  }
+
+  const requestListener = createListenerMiddleware()
+  requestListener.startListening({
+    actionCreator: synquxActions.requestAdded,
+    effect: (action, listener) => {
+      spawnHostFork(listener, action.payload.request.id)
+      waker.notify() // 新規 request: 直列裁定ゲートの再評価を促す
     },
+  })
+  // 裁定済みで届いた request (restore / 再配送) にも敗者救済の watch が要るため、
+  // changed 側からも host fork を立てる (active set で二重起動はしない)
+  requestListener.startListening({
+    actionCreator: synquxActions.requestChanged,
+    effect: (action, listener) => {
+      spawnHostFork(listener, action.payload.request.id)
+      waker.notify() // 裁定の到着/更新: seq 待ちと勝者判定の再評価を促す
+    },
+  })
+  // peer 増減で host が変わり得るため、昇格待機中の fork を起こす
+  // (migration 回復の主経路。1000ms ポーリングは安全網に格下げ)
+  requestListener.startListening({
+    actionCreator: synquxActions.peerUpserted,
+    effect: () => waker.notify(),
+  })
+  requestListener.startListening({
+    actionCreator: synquxActions.peerRemoved,
+    effect: () => waker.notify(),
   })
 
   /**
-   * host 裁定済み request を適用する fork (移植元 responseListener 相当)
+   * host 裁定済み request を適用する fork (ADR-0002)
    * ここで初めて request.action が全端末に dispatch される
+   *
+   * 適用規則は「appliedSeq + 1 の seq を持つ envelope を適用」。同一 seq に
+   * 複数 request が衝突している場合 (dual-host 窓) は (epoch 降順,
+   * responsedBy 辞書順降順) の決定的 tiebreak で勝者を選び、敗者は host の
+   * 再裁定 (requestChanged で entity が新しい seq に上書きされる) を待つ
    */
   const responseListener = createListenerMiddleware()
   responseListener.startListening({
     actionCreator: synquxActions.requestChanged,
     effect: (action, listener) => {
-      const { request, prev } = action.payload
+      const { id } = action.payload.request
 
       listener.fork(async () => {
         while (true) {
           // 処理済み (または他 fork が処理中) なら自端末で反映済みのため破棄。
           // isProcessing は同一 changed の同時二重配送による二重 dispatch を防ぐ
-          // 処理中ガード (既知の問題①′の修正)
-          if (
-            ordering.isApplied(request.id) ||
-            ordering.isProcessing(request.id)
-          ) {
+          // 処理中ガード (v1 の既知の問題①′対策を継続)
+          if (ordering.isApplied(id) || ordering.isProcessing(id)) {
             break
           }
 
-          // 先行する未処理の response が存在するとき、その処理完了まで待機させる
-          if (ordering.shouldWaitFor(prev)) {
-            await sleepTimer(REQUEST_LOOP_MS)
+          // 裁定印は再裁定で変わり得るため、fork の起動時 payload ではなく
+          // 最新の entity を毎 loop 読み直す
+          const current = listener.getState() as TRoot
+          const entity = current.synqux.requests.entities[id]
+
+          if (!entity || entity.seq === undefined) {
+            // entity 消滅 = 他 fork が適用完了。裁定印なしは routing 上来ない
+            break
+          }
+
+          const seq = entity.seq
+
+          // 窓より古い過去は正史/敗者の区別記録がなく、適用済み扱いで破棄する
+          // (restore 時の全量購読で届く歴史的 envelope はここで落ちる)
+          if (ordering.isBeyondWindow(seq)) {
+            break
+          }
+
+          if (ordering.isStale(seq)) {
+            // 正史なら isApplied で break 済み → ここに来るのは dual-host 窓の
+            // 敗者。host の再裁定 (新しい seq) を待つ
+            await waker.wait(WAKE_FALLBACK_MS)
+            continue
+          }
+
+          // 先行する seq が未適用のあいだ待機する (順序の線形化)
+          if (ordering.shouldWait(seq)) {
+            await waker.wait(WAKE_FALLBACK_MS)
+            continue
+          }
+
+          // seq == appliedSeq + 1: 同一 seq の衝突があれば決定的 tiebreak
+          const rivals = Object.values(current.synqux.requests.entities).filter(
+            (pending) => pending.seq === seq,
+          )
+          const winner = rivals.reduce((best, candidate) => {
+            const bestKey: [number, string] = [
+              best.epoch ?? 0,
+              best.responsedBy ?? '',
+            ]
+            const candidateKey: [number, string] = [
+              candidate.epoch ?? 0,
+              candidate.responsedBy ?? '',
+            ]
+            return candidateKey[0] > bestKey[0] ||
+              (candidateKey[0] === bestKey[0] && candidateKey[1] > bestKey[1])
+              ? candidate
+              : best
+          })
+
+          if (winner.id !== id) {
+            // 自分は敗者候補: 勝者の適用 → 自分の再裁定を待つ
+            await waker.wait(WAKE_FALLBACK_MS)
             continue
           }
 
           // error & console な result は負荷軽減のため dispatch せず直接出力
-          if (request.result?.type === 'error' && request.result.console) {
-            console.error(request.result.message)
-            ordering.markApplied(request.id)
+          if (entity.result?.type === 'error' && entity.result.console) {
+            console.error(entity.result.message)
+            ordering.markApplied(seq, id)
+            waker.notify() // 適用完了: 次の seq を待つ fork を起こす
             break
           }
 
           // dispatch 直前 (await を挟まず同期的) にガードを立てる。
-          // prev 待機 loop 内で立てると fork が死んだとき誰も処理できなくなる
-          ordering.beginProcessing(request.id)
+          // seq 待機 loop 内で立てると fork が死んだとき誰も処理できなくなる
+          ordering.beginProcessing(id)
 
           try {
-            listener.dispatch(request.action as TAction)
+            listener.dispatch(entity.action as TAction)
 
-            // snapshot の永続化や次の request を捌く fork の開始は state の更新完了後で
-            // ないと不整合となる。適用完了 = 内部 entities からの破棄、をもって進行する
+            // dispatch は同期で、成功した時点で適用は確定している。markApplied を
+            // ここ (dispatch 直後・await なし) で行い、「entity は消えたが
+            // appliedSeq が進んでいない」観測窓を作らない — この窓があると
+            // 他 fork が rival 消失を「自分が勝者」と誤認し得る。
+            // NOTE dispatch **前**への前倒しは不可 (失敗時に seq が永久欠番になる)
+            ordering.markApplied(seq, id)
+            waker.notify() // 適用完了: 次の seq を待つ fork を起こす
+
+            // 内部 entities からの破棄 (同 hash の action 通過) を確認してから
+            // fork を終える。通常は dispatch 内で同期完了しており即座に通る
             await waitUntilOrFail(
               () =>
-                !(listener.getState() as TRoot).synqux.requests.entities[
-                  request.id
-                ],
-              { intervalMillis: REQUEST_LOOP_MS },
+                !(listener.getState() as TRoot).synqux.requests.entities[id],
+              { intervalMillis: WAKE_FALLBACK_MS },
             )
-
-            ordering.markApplied(request.id)
 
             // 決定性検出網: 実適用後の synced を host の試し実行結果と照合する
             verifyDeterminism(
-              request.id,
+              id,
               config.selectSynced(listener.getState() as TRoot),
             )
           } finally {
             // markApplied 済みなら不要。失敗時も解放し、再配送での retry 余地を残す
-            ordering.endProcessing(request.id)
+            ordering.endProcessing(id)
           }
 
           break
@@ -542,7 +715,7 @@ export const createSynqux = <
 
       if (payload) {
         const envelope = parseSnapshotPayload(payload)
-        ordering.seed(envelope.ordering.revisions)
+        ordering.seed(envelope.ordering)
         store.dispatch(
           synquxRestored({ synced: clearRestoredResult(envelope.synced) }),
         )
@@ -565,16 +738,13 @@ export const createSynqux = <
 
     store.dispatch(synquxActions.sessionStarted({ selfId, enabled: true }))
 
-    // 復帰端末は snapshot + revisions を復元し、それ以降の requests だけを
-    // 購読して追いつく。途中参加・リロード・host migration をまたいでも
-    // 状態と順序保証が継続する
-    let restoredRevision: RequestEnvelope['id'] | undefined
+    // 復帰端末は snapshot (synced + 順序状態) を復元してから requests を購読する。
+    // 途中参加・リロード・host migration をまたいでも状態と順序保証が継続する
     const payload = await transport.loadSnapshot(groupId)
 
     if (payload) {
       const envelope = parseSnapshotPayload(payload)
-      ordering.seed(envelope.ordering.revisions)
-      restoredRevision = ordering.lastRevision()
+      ordering.seed(envelope.ordering)
       store.dispatch(
         synquxRestored({ synced: clearRestoredResult(envelope.synced) }),
       )
@@ -592,42 +762,34 @@ export const createSynqux = <
       return true
     }
 
+    // NOTE after (id 辞書順フィルタ) は使わない: id 順は端末時計依存で
+    // 「id は古いが seq は新しい」request を取り逃がすため、全量購読して
+    // 適用済み分は seq / 直近窓で破棄する (ADR-0002 Decision 5)。再取得コストは
+    // transport の retention 契約 (snapshot 地点より古い requests の prune) で抑える
     const unsubscribeRequests = transport.subscribeRequests(
-      { after: restoredRevision },
+      {},
       {
-        onAdded: (envelope, prevKey) => {
+        onAdded: (envelope) => {
           if (rejectUnknownSchema(envelope)) {
             return
           }
 
-          // 同一 prevKey の added は重複配送 (遅延ののち重複) として破棄する
-          if (!ordering.acceptAdded(prevKey)) {
+          // 同一 request の added 重複配送 (遅延ののち重複) を破棄する
+          if (!ordering.acceptAdded(envelope.id)) {
             return
           }
 
           const request = parseEnvelope(envelope)
+          ordering.observe({ epoch: request.epoch, seq: request.seq })
 
-          // restore タイミング次第で responsedBy 付き request が added で届く。
-          // host 裁定済みのものは changed 相当として適用側の待機 loop に回す
-          // (transport の prevKey は信頼せず、host が焼き込んだ prev を正とする)
+          // restore タイミング次第で裁定済み request が added で届く。
+          // 裁定済みのものは changed 相当として適用側の待機 loop に回す
           if (request.responsedBy) {
-            store.dispatch(
-              synquxActions.requestChanged({
-                request,
-                prev: request.prev ?? null,
-              }),
-            )
+            store.dispatch(synquxActions.requestChanged({ request }))
             return
           }
 
-          store.dispatch(
-            synquxActions.requestAdded({
-              request,
-              // restore 時 query 先頭の prevKey は null になるため、
-              // snapshot の revision を prev として補完し prev 検証を保つ
-              prev: !prevKey && restoredRevision ? restoredRevision : prevKey,
-            }),
-          )
+          store.dispatch(synquxActions.requestAdded({ request }))
         },
 
         onChanged: (envelope) => {
@@ -637,17 +799,13 @@ export const createSynqux = <
 
           const request = parseEnvelope(envelope)
 
-          // host により responsedBy が付与されたものだけ受け取る
+          // host により裁定されたものだけ受け取る
           if (!request.responsedBy) {
             return
           }
 
-          store.dispatch(
-            synquxActions.requestChanged({
-              request,
-              prev: request.prev ?? null,
-            }),
-          )
+          ordering.observe({ epoch: request.epoch, seq: request.seq })
+          store.dispatch(synquxActions.requestChanged({ request }))
         },
       },
     )

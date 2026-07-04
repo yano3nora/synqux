@@ -6,7 +6,7 @@ import type { Action } from '@reduxjs/toolkit'
  * 将来の wire format 変更時に新旧混在を「検出して明示的に拒否」するためのフィールド
  * (ADR-0001 Decision 10)。互換性のない変更を入れるときは必ず increment すること
  */
-export const SYNQUX_SCHEMA_VERSION = 1
+export const SYNQUX_SCHEMA_VERSION = 2
 
 export type Unsubscribe = () => void
 
@@ -132,10 +132,17 @@ export type RequestEnvelope = {
   responsedBy?: Peer['id']
 
   /**
-   * host が観測した先行 request の id (response 時に焼き込む)
-   * transport のイベント順序は信頼せず、全端末がこのチェーンで適用順を線形化する
+   * host の世代番号 (fencing、ADR-0002)。dual-host 窓で同一 seq が衝突したとき
+   * (epoch 降順, responsedBy 辞書順降順) の決定的 tiebreak で勝者を決める
    */
-  prev?: string | null
+  epoch?: number
+
+  /**
+   * host 採番の適用順連番 (response 時に焼き込む、ADR-0002)
+   * transport のイベント順序も request id (端末時計) も信頼せず、全端末が
+   * 「appliedSeq + 1 の seq を適用する」規則で適用順を線形化する
+   */
+  seq?: number
 
   /** Result の JSON 文字列 (core が直列化) */
   result?: string
@@ -154,12 +161,15 @@ export type SnapshotEnvelope<TSynced> = {
   synced: TSynced
 
   /**
-   * 順序判定モジュールの永続状態。Phase 3 の host 採番 seq 化では
-   * この ordering ごと差し替える (Decision 10)
+   * 順序判定モジュールの永続状態 (ADR-0002)
+   * 適用順の ground truth は封筒に焼かれた seq 自体が担うため、ここは
+   * カウンタ + 直近適用窓のみ (v1 の revisions 配列の無限成長を解消)
    */
   ordering: {
-    /** 処理済み request id 列。「実際に適用された順序」の ground truth */
-    revisions: RequestEnvelope['id'][]
+    epoch: number
+    appliedSeq: number
+    /** 直近 N 件の { seq: requestId }。restore 後の正史/敗者の判別に使う */
+    applied: Record<number, RequestEnvelope['id']>
   }
 }
 
@@ -220,11 +230,12 @@ export type SynquxTransport = SnapshotStore & {
     envelope: Omit<RequestEnvelope, 'id'>,
   ): Promise<{ id: RequestEnvelope['id'] }>
 
-  /** host の裁定を request へ焼き込む。prev は host 観測順 (これが順序の正になる) */
+  /** host の裁定を request へ焼き込む。(epoch, seq) が適用順の正になる (ADR-0002) */
   respondRequest(
     id: RequestEnvelope['id'],
     patch: {
-      prev: RequestEnvelope['prev']
+      epoch: number
+      seq: number
       responsedBy: Peer['id']
       result: RequestEnvelope['result'] | null
     },
@@ -234,19 +245,17 @@ export type SynquxTransport = SnapshotStore & {
    * requests の変更購読
    *
    * - after 指定時は「id が after より後の requests」のみを対象とする
-   *   (restore 時に処理済みぶんを再取得しないため。orderByKey().startAfter 相当)
+   *   (orderByKey().startAfter 相当)。NOTE: core は v2 (seq 順序) では使わない —
+   *   id 順は端末時計依存で「id は古いが seq は新しい」request を取り逃がすため、
+   *   全量購読して seq で破棄する (ADR-0002 Decision 5)。オプション自体は
+   *   将来の prune 済み transport 向けに残す
    * - 購読開始時、対象の既存 requests は id 順の onAdded で一括配送されること
    *   (responsedBy 付きで added に届くケースの振り分けは core が行う)
-   * - onAdded の prevKey は「その配送集合内での直前 request の id、先頭は null」
-   *   という infra 観測順のヒントであり、core はこれを信頼しない (host の prev が正)
    */
   subscribeRequests(
     options: { after?: RequestEnvelope['id'] },
     handlers: {
-      onAdded(
-        envelope: RequestEnvelope,
-        prevKey: RequestEnvelope['id'] | null,
-      ): void
+      onAdded(envelope: RequestEnvelope): void
       onChanged(envelope: RequestEnvelope): void
     },
   ): Unsubscribe

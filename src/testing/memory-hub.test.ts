@@ -55,24 +55,22 @@ describe('createMemoryHub', () => {
 
   it('基本フロー: pushRequest と respondRequest を全端末へ非同期配送する', async () => {
     const { a, b, aId } = await connectTwo()
-    const addedA: Array<{ envelope: RequestEnvelope; prevKey: string | null }> =
-      []
-    const addedB: Array<{ envelope: RequestEnvelope; prevKey: string | null }> =
-      []
+    const addedA: RequestEnvelope[] = []
+    const addedB: RequestEnvelope[] = []
     const changedA: RequestEnvelope[] = []
     const changedB: RequestEnvelope[] = []
 
     a.subscribeRequests(
       {},
       {
-        onAdded: (envelope, prevKey) => addedA.push({ envelope, prevKey }),
+        onAdded: (envelope) => addedA.push(envelope),
         onChanged: (envelope) => changedA.push(envelope),
       },
     )
     b.subscribeRequests(
       {},
       {
-        onAdded: (envelope, prevKey) => addedB.push({ envelope, prevKey }),
+        onAdded: (envelope) => addedB.push(envelope),
         onChanged: (envelope) => changedB.push(envelope),
       },
     )
@@ -83,12 +81,12 @@ describe('createMemoryHub', () => {
     await flushDeliveries()
     expect(addedA).toHaveLength(1)
     expect(addedB).toHaveLength(1)
-    expect(addedA[0]?.prevKey).toBeNull()
-    expect(addedA[0]?.envelope).toEqual(addedB[0]?.envelope)
-    expect(addedA[0]?.envelope.id).toBe(id)
+    expect(addedA[0]).toEqual(addedB[0])
+    expect(addedA[0]?.id).toBe(id)
 
     const response = a.respondRequest(id, {
-      prev: null,
+      epoch: 1,
+      seq: 1,
       responsedBy: aId,
       result: '{"type":"success"}',
     })
@@ -99,24 +97,16 @@ describe('createMemoryHub', () => {
     expect(changedB).toHaveLength(1)
     expect(changedA[0]).toMatchObject({
       id,
-      prev: null,
+      epoch: 1,
+      seq: 1,
       responsedBy: aId,
       result: '{"type":"success"}',
     })
     expect(changedB[0]).toEqual(changedA[0])
   })
 
-  it('prevKey: 連続 push の live 配送で直前 request id を渡す', async () => {
+  it('id 採番: 連続 push の id は挿入順で辞書順単調 (transport 契約 1)', async () => {
     const { a, aId } = await connectTwo()
-    const prevKeys: Array<string | null> = []
-
-    a.subscribeRequests(
-      {},
-      {
-        onAdded: (_envelope, prevKey) => prevKeys.push(prevKey),
-        onChanged: () => undefined,
-      },
-    )
 
     const first = await a.pushRequest(
       createEnvelope({ requestedBy: aId, type: 'first' }),
@@ -129,7 +119,6 @@ describe('createMemoryHub', () => {
     )
     await flushDeliveries()
 
-    expect(prevKeys).toEqual([null, first.id, second.id])
     expect([first.id, second.id, third.id]).toEqual(
       [first.id, second.id, third.id].sort((left, right) =>
         left.localeCompare(right),
@@ -137,7 +126,7 @@ describe('createMemoryHub', () => {
     )
   })
 
-  it('after 指定の購読: 対象既存 request だけを id 順かつ先頭 prevKey null で配送する', async () => {
+  it('after 指定の購読: 対象既存 request だけを id 順で配送する', async () => {
     const { a, b, aId } = await connectTwo()
     const first = await a.pushRequest(
       createEnvelope({ requestedBy: aId, type: 'first' }),
@@ -150,28 +139,25 @@ describe('createMemoryHub', () => {
     )
     await flushDeliveries()
 
-    const received: Array<{ id: string; prevKey: string | null }> = []
+    const received: string[] = []
     b.subscribeRequests(
       { after: first.id },
       {
-        onAdded: (envelope, prevKey) =>
-          received.push({ id: envelope.id, prevKey }),
+        onAdded: (envelope) => received.push(envelope.id),
         onChanged: () => undefined,
       },
     )
     await flushDeliveries()
 
-    expect(received).toEqual([
-      { id: second.id, prevKey: null },
-      { id: third.id, prevKey: second.id },
-    ])
+    expect(received).toEqual([second.id, third.id])
   })
 
   it('responsedBy 付き既存 request も restore 模擬として onAdded で届く', async () => {
     const { a, b, aId } = await connectTwo()
     const { id } = await a.pushRequest(createEnvelope({ requestedBy: aId }))
     const response = a.respondRequest(id, {
-      prev: null,
+      epoch: 1,
+      seq: 1,
       responsedBy: aId,
       result: '{"ok":true}',
     })
@@ -223,7 +209,8 @@ describe('createMemoryHub', () => {
     hub.faults.duplicate({ requestId: expectedId, to: bId, event: 'changed' })
     const { id } = await a.pushRequest(createEnvelope({ requestedBy: aId }))
     const response = a.respondRequest(id, {
-      prev: null,
+      epoch: 1,
+      seq: 1,
       responsedBy: aId,
       result: '{"ok":true}',
     })
@@ -306,7 +293,8 @@ describe('createMemoryHub', () => {
     let resolved = false
     const response = a
       .respondRequest(id, {
-        prev: null,
+        epoch: 1,
+        seq: 1,
         responsedBy: aId,
         result: '{"ok":true}',
       })
@@ -327,7 +315,8 @@ describe('createMemoryHub', () => {
     const { hub, a, aId, bId } = await connectTwo()
     const { id } = await a.pushRequest(createEnvelope({ requestedBy: aId }))
     const first = a.respondRequest(id, {
-      prev: null,
+      epoch: 1,
+      seq: 1,
       responsedBy: aId,
       result: '{"ok":true}',
     })
@@ -336,7 +325,8 @@ describe('createMemoryHub', () => {
 
     // dual-host 窓で 2 つ目の host が result なしで応答し直すケースの模擬
     const second = a.respondRequest(id, {
-      prev: null,
+      epoch: 2,
+      seq: 1,
       responsedBy: bId,
       result: null,
     })
@@ -418,7 +408,8 @@ describe('createMemoryHub', () => {
     ).rejects.toThrow('not connected')
     await expect(
       transport.respondRequest('000000000001', {
-        prev: null,
+        epoch: 1,
+        seq: 1,
         responsedBy: 'peer-x',
         result: null,
       }),

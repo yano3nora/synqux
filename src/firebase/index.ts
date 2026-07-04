@@ -176,11 +176,11 @@ export const firebaseTransport = (db: Database): SynquxTransport => {
     async respondRequest(id, patch) {
       const { groupId } = requireSession()
 
-      // update の null 値はキー削除として働く (result: null / prev: null)。
-      // 受信側 (core) は prev ?? null で吸収するため削除でよい
+      // update の null 値はキー削除として働く (result: null)
       // resolve はサーバ ack (契約 2)。local echo の onChildChanged が先に届く
       await update(ref(db, `${requestsPath(groupId)}/${id}`), {
-        prev: patch.prev,
+        epoch: patch.epoch,
+        seq: patch.seq,
         responsedBy: patch.responsedBy,
         result: patch.result,
       })
@@ -191,15 +191,9 @@ export const firebaseTransport = (db: Database): SynquxTransport => {
       const target = requestsQuery(groupId, after)
 
       const unsubs = [
-        // 購読開始時の既存分も onChildAdded で id 順に一括配送される。
-        // prevChildKey は「クエリ結果集合内での直前 key、先頭は null」で
-        // startAfter 使用時に実際の直前 request があっても null になる —
-        // SynquxTransport 契約 (subscribeRequests) はこの firebase 挙動が原型
-        onChildAdded(target, (snap, prevChildKey) => {
-          handlers.onAdded(
-            toEnvelope(snap.val(), snap.key),
-            prevChildKey ?? null,
-          )
+        // 購読開始時の既存分も onChildAdded で id 順に一括配送される
+        onChildAdded(target, (snap) => {
+          handlers.onAdded(toEnvelope(snap.val(), snap.key))
         }),
         onChildChanged(target, (snap) => {
           handlers.onChanged(toEnvelope(snap.val(), snap.key))

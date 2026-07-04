@@ -60,8 +60,15 @@ export const parseSnapshotPayload = (
     )
   }
 
-  if (!parsed.ordering || !Array.isArray(parsed.ordering.revisions)) {
-    throw new Error('Broken snapshot payload: ordering.revisions is missing')
+  if (
+    !parsed.ordering ||
+    typeof parsed.ordering.appliedSeq !== 'number' ||
+    typeof parsed.ordering.epoch !== 'number' ||
+    typeof parsed.ordering.applied !== 'object'
+  ) {
+    throw new Error(
+      'Broken snapshot payload: ordering (epoch / appliedSeq / applied) is missing',
+    )
   }
 
   return {

@@ -1,84 +1,141 @@
 import { describe, expect, it } from 'vitest'
-import { createOrdering } from './ordering.js'
+import { APPLIED_WINDOW_SIZE, createOrdering } from './ordering.js'
 
 /**
- * Phase 0 characterization test (移植元 constants/requests.test.ts) の
- * isDelayedRequestId / REVISIONS / REQUESTS 相当シナリオの新 API 移植。
- * 既知の問題も含めて移植元の挙動を正とする (修正は C6 で行う)
+ * 順序判定モジュール (seq 版、ADR-0002) の unit test
+ * v1 (push id 辞書順 + prev チェーン) の characterization は seq 化で役目を終え、
+ * 本ファイルが v2 の判定仕様を固定する
  */
-describe('createOrdering', () => {
-  describe('isDelayed (移植元 isDelayedRequestId)', () => {
-    it('処理済みリストが空なら常に遅延ではない', () => {
+describe('createOrdering (ADR-0002)', () => {
+  describe('適用規則 (shouldWait / isStale / markApplied)', () => {
+    it('appliedSeq + 1 だけが適用可能で、先の seq は待機、過去の seq は stale', () => {
       const ordering = createOrdering()
-      expect(ordering.isDelayed('-Any')).toBe(false)
+      ordering.markApplied(1, 'req-1')
+
+      expect(ordering.isStale(1)).toBe(true)
+      expect(ordering.shouldWait(2)).toBe(false) // 次に適用すべき seq
+      expect(ordering.shouldWait(3)).toBe(true) // 先行 seq 未適用
     })
 
-    it('処理済み末尾より辞書順で新しい id は遅延ではない', () => {
+    it('markApplied は appliedSeq を進め、id を適用済みとして記録する', () => {
       const ordering = createOrdering()
-      ordering.seed(['-Aaa', '-Bbb'])
-      expect(ordering.isDelayed('-Ccc')).toBe(false)
-    })
+      ordering.markApplied(1, 'req-1')
+      ordering.markApplied(2, 'req-2')
 
-    it('処理済み末尾より辞書順で古い id は遅延と判定する', () => {
-      const ordering = createOrdering()
-      ordering.seed(['-Bbb'])
-      expect(ordering.isDelayed('-Aaa')).toBe(true)
-    })
-
-    it('【既知の問題②の機構】辞書順比較は push id = 端末時計に依存するため、時計がズレた端末の正当な request も遅延と誤判定し得る', () => {
-      // 実時間では「あと」に送信された request でも、送信端末の時計が
-      // 遅れていると push id が辞書順で「まえ」になり、取りこぼされる
-      const newerButSkewedId = '-OwWbW56Lp4fz-eiDXWN' // 実データ由来の例
-      const ordering = createOrdering()
-      ordering.seed(['-OwWbW651v_vXDMKpqbu'])
-      expect(ordering.isDelayed(newerButSkewedId)).toBe(true)
-    })
-  })
-
-  describe('shouldWaitFor / isApplied', () => {
-    it('prev が無ければ待機しない', () => {
-      const ordering = createOrdering()
-      expect(ordering.shouldWaitFor(null)).toBe(false)
-      expect(ordering.shouldWaitFor(undefined)).toBe(false)
-    })
-
-    it('prev が未適用なら待機し、適用済みになったら解除される', () => {
-      const ordering = createOrdering()
-      expect(ordering.shouldWaitFor('req-1')).toBe(true)
-
-      ordering.markApplied('req-1')
-      expect(ordering.shouldWaitFor('req-1')).toBe(false)
+      expect(ordering.appliedSeq()).toBe(2)
       expect(ordering.isApplied('req-1')).toBe(true)
+      expect(ordering.isApplied('req-x')).toBe(false)
     })
 
-    it('seed した revisions も適用済みとして扱う (restore 後の順序保証の継続)', () => {
+    it('【既知の問題②の根治】順序判定は request id (端末時計) を一切参照しない', () => {
+      // v1 では処理済み末尾より辞書順で古い id を「遅延」として意図的に
+      // ドロップしていた (isDelayedRequestId)。v2 に同種の判定は存在せず、
+      // どんな id の request も host が採番した seq で普通に適用される
       const ordering = createOrdering()
-      ordering.seed(['req-1', 'req-2'])
-      expect(ordering.isApplied('req-2')).toBe(true)
-      expect(ordering.shouldWaitFor('req-2')).toBe(false)
-      expect(ordering.lastRevision()).toBe('req-2')
+      ordering.markApplied(1, '-Zzz-newest-id')
+
+      // 辞書順で古い id が次の seq を持って届いても、判定は seq のみで決まる
+      expect(ordering.shouldWait(2)).toBe(false)
+      ordering.markApplied(2, '-Aaa-older-id')
+      expect(ordering.isApplied('-Aaa-older-id')).toBe(true)
     })
   })
 
-  describe('markApplied / revisions', () => {
-    it('重複記録を防がない (防止は呼び出し側の責務。記録列 = 適用履歴の ground truth 性を守る)', () => {
+  describe('採番 (beginHosting / issueSeq)', () => {
+    it('初回昇格は epoch 1、以後は観測済み最大 epoch を跨いで進む', () => {
       const ordering = createOrdering()
-      ordering.markApplied('req-1')
-      ordering.markApplied('req-1')
-      expect(ordering.revisions()).toEqual(['req-1', 'req-1'])
+      expect(ordering.beginHosting()).toBe(1)
+      expect(ordering.beginHosting()).toBe(1) // 継続 host は世代を維持
+
+      // 他 host の裁定 (より新しい世代) を観測したら、次の昇格で跨ぐ
+      ordering.observe({ epoch: 3, seq: 10 })
+      expect(ordering.beginHosting()).toBe(4)
     })
 
-    it('revisions() はコピーを返し、外部からの変更が内部状態に漏れない', () => {
+    it('issueSeq は appliedSeq + 1 を発行し、未適用のまま二重発行すると throw する', () => {
       const ordering = createOrdering()
-      ordering.markApplied('req-1')
+      ordering.markApplied(1, 'req-1')
 
-      const leaked = ordering.revisions()
-      leaked.push('req-x')
-      expect(ordering.revisions()).toEqual(['req-1'])
+      expect(ordering.issueSeq()).toBe(2)
+      expect(ordering.hasPendingIssue()).toBe(true)
+      expect(() => ordering.issueSeq()).toThrow('pending issue')
+
+      ordering.markApplied(2, 'req-2')
+      expect(ordering.hasPendingIssue()).toBe(false)
+      expect(ordering.issueSeq()).toBe(3)
+    })
+
+    it('retractIssue で発行を取り消し、host の永久停止を防ぐ', () => {
+      const ordering = createOrdering()
+      ordering.issueSeq()
+      expect(ordering.hasPendingIssue()).toBe(true)
+
+      ordering.retractIssue()
+      expect(ordering.hasPendingIssue()).toBe(false)
+      expect(ordering.issueSeq()).toBe(1) // 再発行は同じ seq (衝突は tiebreak が収束)
     })
   })
 
-  describe('processing ガード (既知の問題①′の対策)', () => {
+  describe('永続状態 (seed / state / stateWith / 直近窓)', () => {
+    it('seed で restore し、直近窓の id は適用済みとして扱う (正史/敗者の判別)', () => {
+      const ordering = createOrdering()
+      ordering.seed({
+        epoch: 5,
+        appliedSeq: 10,
+        applied: { 9: 'req-9', 10: 'req-10' },
+      })
+
+      expect(ordering.appliedSeq()).toBe(10)
+      expect(ordering.isApplied('req-10')).toBe(true) // 窓にある = 正史
+      expect(ordering.isStale(9)).toBe(true)
+      // 窓にない stale id は敗者候補 (isApplied false のまま)
+      expect(ordering.isApplied('req-loser')).toBe(false)
+      // 復元した epoch を跨いで昇格する
+      expect(ordering.beginHosting()).toBe(6)
+    })
+
+    it('stateWith は「この request 適用後」の snapshot 状態を返す (ack await 前の評価固定用)', () => {
+      const ordering = createOrdering()
+      ordering.markApplied(1, 'req-1')
+      ordering.beginHosting()
+
+      const projected = ordering.stateWith(2, 'req-2')
+      expect(projected.appliedSeq).toBe(2)
+      expect(projected.applied[1]).toBe('req-1')
+      expect(projected.applied[2]).toBe('req-2')
+      // stateWith は評価するだけで内部状態を進めない
+      expect(ordering.appliedSeq()).toBe(1)
+    })
+
+    it('直近窓は APPLIED_WINDOW_SIZE で打ち切られ、それより古い seq は isBeyondWindow になる', () => {
+      const ordering = createOrdering()
+      const total = APPLIED_WINDOW_SIZE + 10
+
+      for (let seq = 1; seq <= total; seq += 1) {
+        ordering.markApplied(seq, `req-${String(seq)}`)
+      }
+
+      const state = ordering.state()
+      expect(Object.keys(state.applied)).toHaveLength(APPLIED_WINDOW_SIZE)
+      expect(ordering.isBeyondWindow(total - APPLIED_WINDOW_SIZE)).toBe(true)
+      expect(ordering.isBeyondWindow(total - APPLIED_WINDOW_SIZE + 1)).toBe(
+        false,
+      )
+      // 窓から溢れた id の適用記録も解放される (メモリの無限成長防止)
+      expect(ordering.isApplied('req-1')).toBe(false)
+    })
+  })
+
+  describe('acceptAdded (added 重複配送ガード)', () => {
+    it('初出の request id は受理し、重複配送は破棄する', () => {
+      const ordering = createOrdering()
+      expect(ordering.acceptAdded('req-1')).toBe(true)
+      expect(ordering.acceptAdded('req-1')).toBe(false)
+      expect(ordering.acceptAdded('req-2')).toBe(true)
+    })
+  })
+
+  describe('processing ガード (v1 の既知の問題①′対策の継続)', () => {
     it('beginProcessing 中は isProcessing が立ち、endProcessing で解放される', () => {
       const ordering = createOrdering()
       expect(ordering.isProcessing('req-1')).toBe(false)
@@ -88,23 +145,6 @@ describe('createOrdering', () => {
 
       ordering.endProcessing('req-1')
       expect(ordering.isProcessing('req-1')).toBe(false)
-    })
-  })
-
-  describe('acceptAdded (移植元 REQUESTS ガード)', () => {
-    it('初出の prevKey は受理し、同一 prevKey の重複配送は破棄する', () => {
-      const ordering = createOrdering()
-      expect(ordering.acceptAdded(null)).toBe(true) // チェーン先頭 (prevKey なし)
-      expect(ordering.acceptAdded('req-1')).toBe(true)
-      expect(ordering.acceptAdded('req-1')).toBe(false) // 遅延後の重複配送
-    })
-
-    it('【移植元仕様の温存】prevKey null の 2 件目は別 request でも破棄される', () => {
-      // 判定 key が request id ではなく prevKey であることの帰結。
-      // live 運用では先頭以外の prevKey は必ず埋まるため実害が顕在化しにくい
-      const ordering = createOrdering()
-      expect(ordering.acceptAdded(null)).toBe(true)
-      expect(ordering.acceptAdded(null)).toBe(false)
     })
   })
 })

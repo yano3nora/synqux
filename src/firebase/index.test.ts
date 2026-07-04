@@ -191,12 +191,13 @@ describe('firebaseTransport', () => {
     expect('root' in value.action.meta).toBe(false)
   })
 
-  it('respondRequest: requests/{groupId}/{id} へ patch を update する (null はキー削除として渡す)', async () => {
+  it('respondRequest: requests/{groupId}/{id} へ (epoch, seq) patch を update する (null はキー削除として渡す)', async () => {
     h.pushKeys.push('conn-1')
     const { transport } = await connect()
 
     await transport.respondRequest('req-9', {
-      prev: null,
+      epoch: 1,
+      seq: 5,
       responsedBy: 'conn-1',
       result: null,
     })
@@ -206,7 +207,12 @@ describe('firebaseTransport', () => {
       Record<string, unknown>,
     ]
     expect(target.path).toBe(`requests/${GROUP_ID}/req-9`)
-    expect(patch).toEqual({ prev: null, responsedBy: 'conn-1', result: null })
+    expect(patch).toEqual({
+      epoch: 1,
+      seq: 5,
+      responsedBy: 'conn-1',
+      result: null,
+    })
   })
 
   it('subscribeRequests: after 指定時のみ startAfter クエリを構成する', async () => {
@@ -225,7 +231,7 @@ describe('firebaseTransport', () => {
     expect(h.startAfterMock).toHaveBeenCalledWith('req-5')
   })
 
-  it('subscribeRequests: snap.key を id に焼き込み、prevChildKey undefined を null へ正規化する', async () => {
+  it('subscribeRequests: snap.key を id に焼き込んで届ける', async () => {
     h.pushKeys.push('conn-1')
     const { transport } = await connect()
     const handlers = { onAdded: vi.fn(), onChanged: vi.fn() }
@@ -233,18 +239,15 @@ describe('firebaseTransport', () => {
     transport.subscribeRequests({}, handlers)
 
     // firebase の onChildAdded callback を直接呼んで受信を模擬する
-    const addedCallback = h.onChildAddedMock.mock.calls[0]?.[1] as unknown as (
-      snap: { key: string; val: () => unknown },
-      prevChildKey?: string | null,
-    ) => void
-    addedCallback(
-      { key: 'req-1', val: () => ({ v: 1, groupId: GROUP_ID }) },
-      undefined,
-    )
+    const addedCallback = h.onChildAddedMock.mock
+      .calls[0]?.[1] as unknown as (snap: {
+      key: string
+      val: () => unknown
+    }) => void
+    addedCallback({ key: 'req-1', val: () => ({ v: 2, groupId: GROUP_ID }) })
 
     expect(handlers.onAdded).toHaveBeenCalledWith(
       expect.objectContaining({ id: 'req-1' }),
-      null,
     )
   })
 

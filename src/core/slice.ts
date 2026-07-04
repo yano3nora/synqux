@@ -21,7 +21,9 @@ export type PendingRequest = {
   requested: number
   requestedBy: Peer['id']
   responsedBy?: Peer['id']
-  prev?: RequestEnvelope['prev']
+  /** host の裁定印 (ADR-0002)。responsedBy とセットで付く */
+  epoch?: number
+  seq?: number
   action: {
     type: string
     payload?: unknown
@@ -113,32 +115,26 @@ const synquxSlice = createSlice({
       delete state.connections.entities[action.payload]
     },
 
-    /**
-     * 判定待ち request の受信 (requestListener がこれを匹配して host 処理を fork する)
-     * prev は受信ルーティングが決めた「待機すべき先行 request」で、
-     * infra の観測順ヒントか host 焼き込み値のどちらか
-     */
+    /** 判定待ち request の受信 (requestListener がこれを匹配して host 処理を fork する) */
     requestAdded: (
       state,
-      action: PayloadAction<{
-        request: PendingRequest
-        prev: RequestEnvelope['prev']
-      }>,
+      action: PayloadAction<{ request: PendingRequest }>,
     ) => {
-      const { request, prev } = action.payload
-      state.requests.entities[request.id] = { ...request, prev }
+      const { request } = action.payload
+      state.requests.entities[request.id] = request
     },
 
-    /** host 裁定済み request の受信 (responseListener がこれを匹配して適用を fork する) */
+    /**
+     * host 裁定済み request の受信 (responseListener がこれを匹配して適用を fork する)
+     * 再裁定 (dual-host 敗者への新しい seq、ADR-0002) も同じ経路で entity を
+     * 上書きする — fork は entity を毎 loop 読み直して最新の裁定印に追従する
+     */
     requestChanged: (
       state,
-      action: PayloadAction<{
-        request: PendingRequest
-        prev: RequestEnvelope['prev']
-      }>,
+      action: PayloadAction<{ request: PendingRequest }>,
     ) => {
-      const { request, prev } = action.payload
-      state.requests.entities[request.id] = { ...request, prev }
+      const { request } = action.payload
+      state.requests.entities[request.id] = request
     },
   },
   extraReducers: (builder) => {
