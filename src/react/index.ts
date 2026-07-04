@@ -1,0 +1,69 @@
+import type { Action } from '@reduxjs/toolkit'
+import { createContext, createElement, useContext, type ReactNode } from 'react'
+import { shallowEqual, useSelector } from 'react-redux'
+import type { Synqux } from '../core/create-synqux.js'
+import { selectIsHost, selectPeers, selectSelfId } from '../core/selectors.js'
+import type { SynquxState } from '../core/slice.js'
+import type { Peer, Result, SynquxSynced } from '../core/types.js'
+
+/**
+ * synqux/react — ゲーム開発者層の読み取り hooks (ADR-0001 Decision 7)
+ *
+ * setup 層が redux の Provider と並べて SynquxProvider を配線し、
+ * ゲーム開発者は hooks だけを使う。requests / prev / revisions の語彙は
+ * ここには一切出てこない
+ */
+
+type WithSynqux = { synqux: SynquxState }
+
+// instance の synced 位置解決だけを Provider で運ぶ。
+// (root: never) => は「どんな TRoot の Synqux でも代入できる」ための逆変位置の型
+type SynquxContextValue = {
+  selectSynced: (root: never) => SynquxSynced
+}
+
+const SynquxContext = createContext<SynquxContextValue | null>(null)
+
+export const SynquxProvider = (props: {
+  /**
+   * createSynqux の返り値。TRoot の具体型はここでは不要なため、逆変位置の
+   * 構造型で受けて「どの TRoot の Synqux でもそのまま渡せる」ようにしている
+   */
+  sync: Pick<Synqux<never>, 'selectSynced'>
+  children: ReactNode
+}): ReactNode =>
+  createElement(
+    SynquxContext.Provider,
+    { value: { selectSynced: props.sync.selectSynced } },
+    props.children,
+  )
+
+/** 自端末が host か。standalone (enabled=false) 時は常に true */
+export const useIsHost = (): boolean =>
+  useSelector((state) => selectIsHost(state as WithSynqux))
+
+/** 同期グループの接続端末一覧 (読み取り専用) */
+export const usePeers = (): Peer[] =>
+  useSelector((state) => selectPeers(state as WithSynqux), shallowEqual)
+
+export const useSelfId = (): Peer['id'] | null =>
+  useSelector((state) => selectSelfId(state as WithSynqux))
+
+/**
+ * 直近の判定結果 (reducer が積んだ result) を読む
+ * 通知 UI (toast 等) は consumer 側の責務で、重複表示の判定には
+ * result.action.meta.hash を使う
+ */
+export const useLatestResult = <
+  TAction extends Action = Action,
+>(): Result<TAction> | null => {
+  const context = useContext(SynquxContext)
+
+  if (!context) {
+    throw new Error('useLatestResult must be used within <SynquxProvider>')
+  }
+
+  return useSelector(
+    (state) => context.selectSynced(state as never).result,
+  ) as Result<TAction> | null
+}

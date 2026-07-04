@@ -1,0 +1,172 @@
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import { createMemoryHub } from '../testing/memory-hub.js'
+import { selectIsHost } from './selectors.js'
+import { parseSnapshotPayload } from './snapshot.js'
+import { createHubClient, settle, type GameState } from './test-fixtures.js'
+import type { SnapshotStore } from './types.js'
+
+/**
+ * createSynqux の end-to-end 検証 (primitive 方式の rootReducer を手書き)
+ * request 化 → host 判定 → 全端末適用 → snapshot → restore の背骨を
+ * memory hub + fake timers の決定的 simulation で確認する
+ */
+
+const GROUP_ID = 'group-a'
+
+describe('createSynqux (end-to-end)', () => {
+  beforeEach(() => {
+    vi.useFakeTimers()
+    vi.setSystemTime(new Date('2026-07-05T00:00:00.000Z'))
+  })
+
+  afterEach(() => {
+    vi.useRealTimers()
+  })
+
+  it('synced action が request 化され、host の裁定順で全端末に 1 回ずつ適用される', async () => {
+    const hub = createMemoryHub()
+    const a = createHubClient(hub)
+    const b = createHubClient(hub)
+
+    await a.sync.subscribe({ store: a.store, groupId: GROUP_ID })
+    await b.sync.subscribe({ store: b.store, groupId: GROUP_ID })
+    await settle()
+
+    // 最新接続の player = b が host
+    expect(selectIsHost(a.store.getState())).toBe(false)
+    expect(selectIsHost(b.store.getState())).toBe(true)
+
+    a.store.dispatch({ type: 'game/increment', payload: 1 })
+
+    // 楽観更新しない: request 化された action はローカル適用されない
+    expect(a.store.getState().game.count).toBe(0)
+
+    await settle()
+
+    expect(a.store.getState().game.count).toBe(1)
+    expect(b.store.getState().game.count).toBe(1)
+    expect(a.store.getState().game.log).toEqual(['increment:1'])
+    expect(b.store.getState().game.log).toEqual(['increment:1'])
+
+    // 裁定は host (b) が行い、host 観測順の prev が焼き込まれている
+    const requests = hub.inspect.requests(GROUP_ID)
+    expect(requests).toHaveLength(1)
+    expect(requests[0]?.responsedBy).toBeDefined()
+
+    // 受理 request ごとに snapshot が永続化される
+    const snapshot = parseSnapshotPayload(hub.inspect.snapshot(GROUP_ID)!)
+    expect((snapshot.synced as GameState).count).toBe(1)
+    expect(snapshot.ordering.revisions).toEqual([requests[0]?.id])
+  })
+
+  it('複数端末の同時 dispatch でも全端末の適用順が host 基準で一致する', async () => {
+    const hub = createMemoryHub()
+    const a = createHubClient(hub)
+    const b = createHubClient(hub)
+
+    await a.sync.subscribe({ store: a.store, groupId: GROUP_ID })
+    await b.sync.subscribe({ store: b.store, groupId: GROUP_ID })
+    await settle()
+
+    a.store.dispatch({ type: 'game/increment', payload: 1 })
+    b.store.dispatch({ type: 'game/increment', payload: 10 })
+    a.store.dispatch({ type: 'game/increment', payload: 100 })
+    await settle(60)
+
+    const logA = a.store.getState().game.log
+    const logB = b.store.getState().game.log
+    expect(a.store.getState().game.count).toBe(111)
+    expect(b.store.getState().game.count).toBe(111)
+    expect(logA).toHaveLength(3)
+    expect(logA).toEqual(logB) // 適用順序の全端末一致 (不変条件 3)
+  })
+
+  it('validation エラー (error & console) の request は dispatch されず console へ流れる', async () => {
+    const consoleError = vi
+      .spyOn(console, 'error')
+      .mockImplementation(() => undefined)
+
+    const hub = createMemoryHub()
+    const a = createHubClient(hub)
+    const b = createHubClient(hub)
+
+    await a.sync.subscribe({ store: a.store, groupId: GROUP_ID })
+    await b.sync.subscribe({ store: b.store, groupId: GROUP_ID })
+    await settle()
+
+    a.store.dispatch({ type: 'game/forbidden' })
+    await settle()
+
+    // 全端末で state は不変のまま、拒否は revisions に記録され進行は継続する
+    expect(a.store.getState().game.count).toBe(0)
+    expect(a.store.getState().game.log).toEqual([])
+    expect(b.store.getState().game.log).toEqual([])
+    expect(consoleError).toHaveBeenCalledWith('forbidden')
+
+    a.store.dispatch({ type: 'game/increment', payload: 1 })
+    await settle()
+    expect(a.store.getState().game.count).toBe(1)
+    expect(b.store.getState().game.count).toBe(1)
+
+    consoleError.mockRestore()
+  })
+
+  it('途中参加端末は snapshot から restore し、以降の requests だけで追いつく', async () => {
+    const hub = createMemoryHub()
+    const a = createHubClient(hub)
+    const b = createHubClient(hub)
+
+    await a.sync.subscribe({ store: a.store, groupId: GROUP_ID })
+    await b.sync.subscribe({ store: b.store, groupId: GROUP_ID })
+    await settle()
+
+    a.store.dispatch({ type: 'game/increment', payload: 1 })
+    await settle()
+    b.store.dispatch({ type: 'game/increment', payload: 10 })
+    await settle()
+
+    // 2 request 処理済みの状態で c が途中参加する
+    const c = createHubClient(hub)
+    await c.sync.subscribe({ store: c.store, groupId: GROUP_ID })
+    await settle()
+
+    expect(c.store.getState().game.count).toBe(11)
+    expect(c.store.getState().game.log).toEqual(['increment:1', 'increment:10'])
+
+    // 最新接続の player となった c が host を引き継ぎ、以降も同期が継続する
+    expect(selectIsHost(c.store.getState())).toBe(true)
+    a.store.dispatch({ type: 'game/increment', payload: 100 })
+    await settle(60)
+
+    for (const client of [a, b, c]) {
+      expect(client.store.getState().game.count).toBe(111)
+    }
+  })
+
+  it('standalone (enabled=false) は即時ローカル適用し、localSnapshots で復元できる', async () => {
+    const saved = new Map<string, string>()
+    const localSnapshots: SnapshotStore = {
+      saveSnapshot: (key, payload) => {
+        saved.set(key, payload)
+      },
+      loadSnapshot: (key) => saved.get(key) ?? null,
+    }
+
+    const hub = createMemoryHub()
+    const first = createHubClient(hub, { enabled: false, localSnapshots })
+    await first.sync.subscribe({ store: first.store, groupId: 'solo' })
+
+    // standalone は常に host 扱いで、request 化せず即時に適用される
+    expect(selectIsHost(first.store.getState())).toBe(true)
+    first.store.dispatch({ type: 'game/increment', payload: 1 })
+    first.store.dispatch({ type: 'game/increment', payload: 10 })
+    expect(first.store.getState().game.count).toBe(11)
+    expect(saved.has('solo')).toBe(true)
+
+    // リロード相当: 新しい store + instance が localSnapshots から復元する
+    const second = createHubClient(hub, { enabled: false, localSnapshots })
+    await second.sync.subscribe({ store: second.store, groupId: 'solo' })
+    expect(second.store.getState().game.count).toBe(11)
+    expect(second.store.getState().game.result).toBeNull()
+  })
+})

@@ -1,0 +1,26 @@
+{
+  "$schema": "./node_modules/oxlint/configuration_schema.json",
+  "env": {
+    "builtin": true,
+    "es2022": true,
+    "node": true
+  },
+  "ignorePatterns": ["dist/**", "node_modules/**", ".*", ".*/**"],
+  "plugins": ["typescript", "unicorn", "oxc", "import", "vitest"],
+  "rules": {
+    "eslint/no-unused-vars": [
+      "warn",
+      {
+        "args": "none",
+        "caughtErrors": "none",
+        "ignoreRestSiblings": true,
+        "vars": "all"
+      }
+    ],
+    "import/default": "off",
+    "no-unused-expressions": ["error", { "allowShortCircuit": true }],
+    "typescript/ban-ts-comment": "off",
+    "typescript/consistent-type-imports": "off",
+    "typescript/no-explicit-any": "off"
+  }
+}

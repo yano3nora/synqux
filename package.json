@@ -1,0 +1,89 @@
+{
+  "name": "synqux",
+  "version": "0.1.0",
+  "description": "Client-host realtime sync for Redux apps",
+  "keywords": ["redux", "redux-toolkit", "sync", "realtime", "multiplayer", "firebase"],
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/yano3nora/synqux.git"
+  },
+  "license": "MIT",
+  "type": "module",
+  "sideEffects": false,
+  "files": [
+    "dist"
+  ],
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    },
+    "./react": {
+      "types": "./dist/react/index.d.ts",
+      "default": "./dist/react/index.js"
+    },
+    "./testing": {
+      "types": "./dist/testing/index.d.ts",
+      "default": "./dist/testing/index.js"
+    },
+    "./firebase": {
+      "types": "./dist/firebase/index.d.ts",
+      "default": "./dist/firebase/index.js"
+    }
+  },
+  "scripts": {
+    "build": "rm -rf dist && tsc -p tsconfig.build.json",
+    "prepublishOnly": "run-s test build",
+    "version": "node -e \"const fs=require('fs');const v=require('./package.json').version;fs.writeFileSync('src/index.ts',fs.readFileSync('src/index.ts','utf-8').replace(/SYNQUX_VERSION = '[^']+'/,\\\"SYNQUX_VERSION = '\\\"+v+\\\"'\\\"))\" && git add src/index.ts",
+    "test": "run-s test:*",
+    "test:vitest": "vitest run --passWithNoTests",
+    "test:oxlint": "oxlint",
+    "test:oxfmt": "oxfmt --check src",
+    "test:tsc": "tsc --noEmit",
+    "check": "run-s test:oxlint test:oxfmt",
+    "fix": "run-s fix:*",
+    "fix:oxlint": "oxlint --fix",
+    "fix:oxfmt": "oxfmt src",
+    "dev:test": "vitest watch --passWithNoTests"
+  },
+  "peerDependencies": {
+    "@reduxjs/toolkit": "^2.0.0",
+    "firebase": ">=9",
+    "react": ">=18",
+    "react-redux": ">=9"
+  },
+  "peerDependenciesMeta": {
+    "firebase": {
+      "optional": true
+    },
+    "react": {
+      "optional": true
+    },
+    "react-redux": {
+      "optional": true
+    }
+  },
+  "devDependencies": {
+    "@reduxjs/toolkit": "^2.12.0",
+    "@testing-library/react": "^16.3.2",
+    "@types/node": "^26.0.0",
+    "@types/react": "^19.2.17",
+    "@types/react-dom": "^19.2.3",
+    "firebase": "^12.15.0",
+    "jsdom": "^29.1.1",
+    "npm-run-all2": "^8.0.4",
+    "oxfmt": "^0.55.0",
+    "oxlint": "^1.70.0",
+    "react": "^19.2.7",
+    "react-dom": "^19.2.7",
+    "react-redux": "^9.3.0",
+    "typescript": "^6.0.3",
+    "vitest": "^4.1.9"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "dependencies": {
+    "@yano3nora/ts-utils": "^0.37.1"
+  }
+}

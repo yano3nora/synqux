@@ -1,0 +1,38 @@
+# mise : node 管理と git-hook 管理のみ利用する
+# https://mise.jdx.dev/
+#
+# - node  : ホストの node を pin。バージョン変更時は package.json engines と手動同期する
+# - hooks : husky の代替。pre-commit=check（軽量）/ pre-push=test（tsc/vitest 込み）に分離。
+#           `mise run install-hooks` で .git/hooks へ生成する
+[settings]
+experimental = true
+
+[tools]
+node = "24.14.1"
+
+[tasks.pre-commit]
+description = "git commit 時: oxlint / oxfmt の check"
+run = ["mise run check"]
+
+[tasks.pre-push]
+description = "git push 時: vitest / oxlint / oxfmt / tsc をフル実行"
+run = ["mise run test"]
+
+[tasks.install-hooks]
+description = "git hooks を .git/hooks へ生成（pre-commit=check / pre-push=test）"
+run = [
+  "mise generate git-pre-commit --task pre-commit --write",
+  "mise generate git-pre-commit --hook pre-push --task pre-push --write",
+]
+
+[tasks.check]
+description = "oxlint, oxfmt の check を実行"
+run = "npm run check"
+
+[tasks.test]
+description = "vitest, oxlint, oxfmt, tsc を実行"
+run = "npm test"
+
+[tasks.provision]
+description = "環境を最初に構成する際のセットアップ"
+run = ["mise run install-hooks", "npm ci"]

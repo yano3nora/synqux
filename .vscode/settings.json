@@ -1,0 +1,10 @@
+{
+  "editor.formatOnSave": true,
+  "files.insertFinalNewline": true,
+  "editor.defaultFormatter": "oxc.oxc-vscode",
+  "js/ts.format.semicolons": "remove",
+  "js/ts.preferences.importModuleSpecifier": "non-relative",
+  "js/ts.preferences.quoteStyle": "single",
+  "js/ts.tsdk.path": "node_modules/typescript/lib",
+  "js/ts.updateImportsOnFileMove.enabled": "always"
+}

@@ -1,0 +1,253 @@
+import type { Action } from '@reduxjs/toolkit'
+
+/**
+ * 永続化する封筒 (request / snapshot) の形式バージョン
+ *
+ * 将来の wire format 変更時に新旧混在を「検出して明示的に拒否」するためのフィールド
+ * (ADR-0001 Decision 10)。互換性のない変更を入れるときは必ず increment すること
+ */
+export const SYNQUX_SCHEMA_VERSION = 1
+
+export type Unsubscribe = () => void
+
+/**
+ * 端末の役割 (排他)。省略時 'player' として扱う
+ *
+ * - player: 通常端末。dedicated 不在時、最新接続の player が host になる
+ * - dedicated: ゲームに常駐するプロセス (lambda 等) を強制的に host にし、
+ *   安定進行・無人進行を担う (移植元の agent 相当)
+ * - observer: monitor / readonly 端末。host 選定から除外する (移植元の guest 相当)
+ */
+export type PeerRole = 'player' | 'dedicated' | 'observer'
+
+/** 同期グループ内の接続端末。consumer へは読み取り専用で公開する */
+export type Peer = {
+  id: string
+  groupId: string
+
+  /**
+   * 接続時刻。host 導出 (最新接続の dedicated、いなければ最新接続の player) の
+   * 全端末合意に使うため、端末時計ではなく transport のサーバ基準時刻であること
+   */
+  connected: number
+
+  role?: PeerRole
+
+  /** 端末の識別ラベル (dedicated の process id 等)。host 導出には使わない */
+  label?: string
+}
+
+/**
+ * reducer (唯一の判定器) が書き、host が読む成否判定結果
+ *
+ * consumer の synced reducer は validation 失敗時に state を変えず result へ
+ * error を積む。host は rootReducer を試し実行してこの type で受理・拒否を判定する
+ */
+export type Result<TAction extends Action = Action> = {
+  /** 対応する action。meta.hash で「既に通知した result か」を判定できる */
+  action: TAction
+
+  type: 'error' | 'success'
+  message: string
+
+  /** 通知先 peer id。standalone 時は [] で無条件表示 */
+  targets: Peer['id'][]
+
+  /**
+   * 通知を画面に出さず console.error へ流すフラグ
+   * 連打・遅延で弾かれた操作の通知はノイズのため裏へ流しつつデータだけ残す用途
+   */
+  console?: true
+
+  /**
+   * 通知 UI (toast 等) の表示時間 ms。null で自動消去なし
+   * 表示自体は consumer の UI 責務で、synqux は値を運ぶだけ
+   */
+  duration?: number | null
+}
+
+/**
+ * consumer の synced state への型契約 (ADR-0001 Decision 7)
+ *
+ * 移植元 GameState と異なり revisions は含まない — 処理済み順序は synqux が
+ * snapshot 封筒側 (SnapshotEnvelope.ordering) で管理する (Decision 11)
+ */
+export type SynquxSynced<TAction extends Action = Action> = {
+  result: Result<TAction> | null
+}
+
+/**
+ * synqux が action に載せる meta の契約
+ *
+ * synced reducer が読んでよいのは requestedBy / dispatched のみ (Decision 8)。
+ * root は locals reducer 専用で、synced reducer には渡らない — host の試し実行と
+ * 各端末での適用が同一結果になる (決定性) ことを構成上保証するため
+ */
+export type SynquxActionMeta = {
+  /** request 経路を通った action に付与。request 化済み action の素通し判定を兼ねる */
+  requestedBy?: Peer['id']
+
+  /** transport サーバ基準の登録時刻 */
+  dispatched?: number
+
+  /** 端末内での action 一意性 (適用完了の検知・result 通知の重複判定に使う) */
+  hash?: string
+
+  /** 直前 reducer 通過後の root state (createSynquxRootReducer が locals にのみ付与) */
+  root?: unknown
+}
+
+/**
+ * transport を流れる request 封筒
+ *
+ * payload / result は core が JSON 文字列化してから push する — 「ストレージが
+ * undefined を落とす・空配列を消す」形状保存問題を core で一度だけ解くため
+ * (Decision 11 と同じ原理。移植元 create-request.ts の payload stringify 踏襲)
+ */
+export type RequestEnvelope = {
+  /** SYNQUX_SCHEMA_VERSION。不一致は検出して明示的に拒否する */
+  v: number
+
+  /** transport 採番。挿入順で辞書順単調であること (transport 契約) */
+  id: string
+
+  groupId: string
+
+  action: {
+    type: string
+
+    /** JSON 文字列。core が push 時に直列化 / 受信時に parse する */
+    payload?: string
+
+    /** root は含まない (直列化前に core が除去する) */
+    meta?: SynquxActionMeta
+  }
+
+  /** serverNow() 基準の依頼時刻 */
+  requested: number
+
+  requestedBy: Peer['id']
+
+  /** host の裁定済みマーク。この有無が「判定待ち / 適用待ち」の実質の区別 */
+  responsedBy?: Peer['id']
+
+  /**
+   * host が観測した先行 request の id (response 時に焼き込む)
+   * transport のイベント順序は信頼せず、全端末がこのチェーンで適用順を線形化する
+   */
+  prev?: string | null
+
+  /** Result の JSON 文字列 (core が直列化) */
+  result?: string
+}
+
+/**
+ * core が構築・直列化する snapshot 封筒 (Decision 11)
+ *
+ * transport / SnapshotStore には canonical JSON 文字列として渡るため、
+ * この型が現れるのは core 内部と export 解析 (Trouble Shooting) のみ
+ */
+export type SnapshotEnvelope<TSynced> = {
+  /** SYNQUX_SCHEMA_VERSION。不一致は検出して明示的に拒否する */
+  v: number
+
+  synced: TSynced
+
+  /**
+   * 順序判定モジュールの永続状態。Phase 3 の host 採番 seq 化では
+   * この ordering ごと差し替える (Decision 10)
+   */
+  ordering: {
+    /** 処理済み request id 列。「実際に適用された順序」の ground truth */
+    revisions: RequestEnvelope['id'][]
+  }
+}
+
+/**
+ * 不透明文字列の snapshot KV (Decision 11)
+ *
+ * 封筒構築と canonical JSON 直列化は core の責務で、store 実装は文字列を
+ * そのまま保存・取得するだけでよい。transport の snapshot API と standalone
+ * (enabled=false) の localSnapshots が本契約を共有する
+ */
+export type SnapshotStore = {
+  saveSnapshot(key: string, payload: string): Promise<void> | void
+  loadSnapshot(key: string): Promise<string | null> | string | null
+}
+
+/**
+ * 同期インフラの抽象 (ADR-0001 Decision 2 / 11)
+ *
+ * 【adapter 実装者への契約】
+ * 1. pushRequest の id 採番は「挿入順で辞書順単調」であること (firebase push id 相当)。
+ *    端末時計依存は許容する (順序判定の seq 化は Phase 3、Decision 10)
+ * 2. respondRequest は永続化 ack で resolve すること (楽観 resolve 禁止)。
+ *    なお変更イベント (onChanged) が ack より先に届くこと (local echo) は許容される
+ * 3. 配送は at-least-once でよい。重複・遅延・順序入れ替えは core が吸収するので
+ *    adapter 側で直列化を頑張らなくてよい (観測したまま素朴に流す)
+ * 4. 【retention】最新 snapshot 地点より新しい requests を保持しなければならない。
+ *    requests を prune する transport (TTL 等) はこの線より過去のみ削除できる
+ * 5. connect した peer の切断時 (プロセス死・ネットワーク断を含む)、全端末で
+ *    onRemoved が発火すること (onDisconnect 相当の presence cleanup を保証する)
+ * 6. connect / serverNow 以外のメソッドは connect 完了後にのみ呼ばれる。
+ *    transport インスタンスは connect で指定された 1 グループに束縛される
+ */
+export type SynquxTransport = SnapshotStore & {
+  /** presence 登録。selfId は transport が採番する */
+  connect(options: {
+    groupId: string
+    role?: PeerRole
+    label?: Peer['label']
+  }): Promise<{ selfId: Peer['id'] }>
+
+  /** presence 解除。以後このインスタンスは再利用しない */
+  disconnect(): Promise<void>
+
+  /** サーバ基準時刻 (firebase: .info/serverTimeOffset 補正相当) */
+  serverNow(): Promise<number>
+
+  /**
+   * 接続端末プールの購読。購読開始時に既存 peer ぶんの onAdded が発火すること
+   */
+  subscribePeers(handlers: {
+    onAdded(peer: Peer): void
+    onChanged(peer: Peer): void
+    onRemoved(peer: Peer): void
+  }): Unsubscribe
+
+  /** request の追記 push。封筒の直列化 (payload / result) は core 側で済んでいる */
+  pushRequest(
+    envelope: Omit<RequestEnvelope, 'id'>,
+  ): Promise<{ id: RequestEnvelope['id'] }>
+
+  /** host の裁定を request へ焼き込む。prev は host 観測順 (これが順序の正になる) */
+  respondRequest(
+    id: RequestEnvelope['id'],
+    patch: {
+      prev: RequestEnvelope['prev']
+      responsedBy: Peer['id']
+      result: RequestEnvelope['result'] | null
+    },
+  ): Promise<void>
+
+  /**
+   * requests の変更購読
+   *
+   * - after 指定時は「id が after より後の requests」のみを対象とする
+   *   (restore 時に処理済みぶんを再取得しないため。orderByKey().startAfter 相当)
+   * - 購読開始時、対象の既存 requests は id 順の onAdded で一括配送されること
+   *   (responsedBy 付きで added に届くケースの振り分けは core が行う)
+   * - onAdded の prevKey は「その配送集合内での直前 request の id、先頭は null」
+   *   という infra 観測順のヒントであり、core はこれを信頼しない (host の prev が正)
+   */
+  subscribeRequests(
+    options: { after?: RequestEnvelope['id'] },
+    handlers: {
+      onAdded(
+        envelope: RequestEnvelope,
+        prevKey: RequestEnvelope['id'] | null,
+      ): void
+      onChanged(envelope: RequestEnvelope): void
+    },
+  ): Unsubscribe
+}
