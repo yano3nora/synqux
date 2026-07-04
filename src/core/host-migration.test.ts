@@ -84,11 +84,12 @@ describe('host migration 境界', () => {
       expect(client.store.getState().game.count).toBe(1)
     }
 
-    // snapshot の revisions にも二重記録は残らない
+    // snapshot の順序状態にも二重記録は残らない (seq 1 に勝者 1 件のみ)
     const snapshot = parseSnapshotPayload(hub.inspect.snapshot(GROUP_ID)!)
-    expect(snapshot.ordering.revisions).toEqual([
+    expect(snapshot.ordering.appliedSeq).toBe(1)
+    expect(snapshot.ordering.applied[1]).toBe(
       hub.inspect.requests(GROUP_ID)[0]?.id,
-    ])
+    )
   })
 
   it('host 不在で滞留した request は、dedicated の参加 (昇格) を待って処理される', async () => {

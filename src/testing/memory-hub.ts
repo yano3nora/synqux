@@ -332,7 +332,6 @@ export function createMemoryHub(): MemoryHub {
         const id = formatRequestId(nextRequestSequence)
         nextRequestSequence += 1
 
-        const prevKey = group.requests.at(-1)?.id ?? null
         const stored: RequestEnvelope = { ...clone(envelope), id }
         group.requests.push(stored)
 
@@ -340,7 +339,7 @@ export function createMemoryHub(): MemoryHub {
           enqueueRequest(subscriber, {
             requestId: id,
             event: 'added',
-            task: () => subscriber.handlers.onAdded(clone(stored), prevKey),
+            task: () => subscriber.handlers.onAdded(clone(stored)),
           })
         }
 
@@ -357,7 +356,8 @@ export function createMemoryHub(): MemoryHub {
         const current = group.requests[index]
         const updated: RequestEnvelope = {
           ...current,
-          prev: patch.prev,
+          epoch: patch.epoch,
+          seq: patch.seq,
           responsedBy: patch.responsedBy,
           result: patch.result === null ? undefined : patch.result,
         }
@@ -402,12 +402,11 @@ export function createMemoryHub(): MemoryHub {
           )
           .sort((left, right) => left.id.localeCompare(right.id))
 
-        existing.forEach((request, index) => {
-          const prevKey = index === 0 ? null : (existing[index - 1]?.id ?? null)
+        existing.forEach((request) => {
           enqueueRequest(subscriber, {
             requestId: request.id,
             event: 'added',
-            task: () => subscriber.handlers.onAdded(clone(request), prevKey),
+            task: () => subscriber.handlers.onAdded(clone(request)),
           })
         })
 

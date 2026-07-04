@@ -43,10 +43,7 @@ describe('synquxSlice', () => {
       synquxInitialState,
       synquxActions.sessionStarted({ selfId: 'peer-1', enabled: true }),
       synquxActions.peerUpserted(peer({ id: 'peer-1', connected: 1 })),
-      synquxActions.requestAdded({
-        request: pending({ id: 'r-1' }),
-        prev: null,
-      }),
+      synquxActions.requestAdded({ request: pending({ id: 'r-1' }) }),
       synquxActions.sessionEnded(),
     )
     expect(state).toEqual(synquxInitialState)
@@ -67,16 +64,29 @@ describe('synquxSlice', () => {
     expect(Object.keys(left.connections.entities)).toEqual(['peer-1'])
   })
 
-  it('requestAdded / requestChanged は prev を焼き直して entities へ格納する', () => {
+  it('requestChanged は entity を裁定印ごと上書きする (再裁定の追従)', () => {
     const state = reduce(
       synquxInitialState,
-      synquxActions.requestAdded({
-        request: pending({ id: 'r-1', prev: 'stale-prev' }),
-        prev: null,
+      synquxActions.requestChanged({
+        request: pending({
+          id: 'r-1',
+          responsedBy: 'peer-1',
+          epoch: 1,
+          seq: 1,
+        }),
+      }),
+      // dual-host 敗者への再裁定: 新しい (epoch, seq) で上書きされる
+      synquxActions.requestChanged({
+        request: pending({
+          id: 'r-1',
+          responsedBy: 'peer-2',
+          epoch: 2,
+          seq: 3,
+        }),
       }),
     )
-    // 受信ルーティングが決めた prev が封筒の prev より優先される
-    expect(state.requests.entities['r-1']?.prev).toBeNull()
+    expect(state.requests.entities['r-1']?.epoch).toBe(2)
+    expect(state.requests.entities['r-1']?.seq).toBe(3)
   })
 
   it('request 経路の action (meta.requestedBy + hash) が通過したら同 hash の entity を破棄する', () => {
@@ -90,7 +100,6 @@ describe('synquxSlice', () => {
             meta: { requestedBy: 'peer-1', hash: 'h-1' },
           },
         }),
-        prev: null,
       }),
     )
 
@@ -104,10 +113,7 @@ describe('synquxSlice', () => {
   it('requestedBy のない action (standalone / local 進行) では entities を破棄しない', () => {
     const before = reduce(
       synquxInitialState,
-      synquxActions.requestAdded({
-        request: pending({ id: 'r-1' }),
-        prev: null,
-      }),
+      synquxActions.requestAdded({ request: pending({ id: 'r-1' }) }),
     )
 
     const after = synquxReducer(before, {
