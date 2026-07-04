@@ -61,6 +61,6 @@
 - `reproduce` ツール / `LAST_RESET` (リセット検知 reload) → UI 密結合のため除外、Phase 2 で要否確定
 - `connections.isNotFoundGame` / query 読み取り / toast 表示 → consumer 責務
 
-## コミット列
+## 履歴に関する注記
 
-`1c927e6` A → `fd73bb8` B → `eb5b625` C1-C4 → `4754333` C5-C7 → `d4fc1bf` D → `bf35729` E
+Phase 0〜2 の開発コミット列は、公開にあたり単一コミットへ squash して破棄済み (2026-07-05)。進行順序・意思決定は本ファイルと各 SPEC / ADR が唯一の記録。
