@@ -7,8 +7,7 @@ Redux (Redux Toolkit) アプリに「クライアントホスト型のリアル�
 - **reducer が唯一の判定器**: validation は reducer に集約し、host / client / 同期なし (standalone) でロジックが分岐しない
 - **transport 抽象**: core は特定インフラに依存しない。Firebase RTDB adapter (`synqux/firebase`) と決定的な in-memory 実装 (`synqux/testing`) を同梱
 
-# Structure
-
+## Structure
 ```
 .
 ├ src/
@@ -24,14 +23,12 @@ Redux (Redux Toolkit) アプリに「クライアントホスト型のリアル�
 - 仕様の正: [SPEC-0001-requests-sync](./docs/SPEC-0001-requests-sync.md) (仕組み・不変条件・既知の問題)
 - API 境界: [SPEC-0002-public-api](./docs/SPEC-0002-public-api.md) / 設計判断: [ADR-0001](./docs/ADR-0001-design.md), [ADR-0002](./docs/ADR-0002-host-seq.md)
 
-# Depends
-
+## Depends
 - node 20+ (開発は mise で 24 系を pin)
 - peerDependencies: `@reduxjs/toolkit` ^2 / optional: `react` 18+, `react-redux` 9+ (synqux/react 利用時), `firebase` 9+ (synqux/firebase 利用時)
 - demo の emulator 実行のみ Java が必要
 
-# Usage
-
+## Usage
 ```sh
 npm install synqux @reduxjs/toolkit
 ```
@@ -82,10 +79,8 @@ await sync.subscribe({ store, groupId })
 
 consumer のテストは `synqux/testing` を使う。`createMemoryHub()` (fault injection つき決定的 in-memory transport) と `assertActionIdempotency()` (非冪等 action の CI 検出) を提供する。action 設計ガイドライン (「toggle ではなく set」等) と同期不具合の調査手順は [SPEC-0001](./docs/SPEC-0001-requests-sync.md) を参照。
 
-# Development
-
-## Getting Started
-
+## Development
+### Getting Started
 ```sh
 mise install     # node の pin
 mise trust
@@ -96,8 +91,7 @@ npm run demo:emulator  # terminal 1: RTDB emulator (Java 必須)
 npm run demo           # terminal 2: http://localhost:5173 を複数タブで
 ```
 
-## Commands
-
+### Commands
 ```sh
 npm ci             # install packages
 npm run fix        # fix lint, format
@@ -107,8 +101,7 @@ npm run dev:test   # vitest watch
 npm run build      # dist へ d.ts 込みでビルド
 ```
 
-# Publishment
-
+## Publishment
 publish は人間が判断して手動で行う (Agent は実行しない)。`prepublishOnly` が test + build を強制するので、緑でない状態では公開できない。
 
 ```sh
@@ -126,7 +119,6 @@ npm publish --access public
 - 消費者の運用は「テンプレは `^latest` 追従、出荷済みゲーム repo は exact pin」。breaking change (wire format の schema version 変更を含む) は必ず major
 - wire format (schema version) を変えるデプロイは「進行中セッションがない時間帯」に行う運用で新旧混在を吸収する
 
-## Resources
-
+### Resources
 - [GitHub](https://github.com/yano3nora/synqux) / [npm](https://www.npmjs.com/package/synqux)
 - [Redux Toolkit](https://redux-toolkit.js.org/) / [Firebase Realtime Database](https://firebase.google.com/docs/database)

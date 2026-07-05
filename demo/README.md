@@ -16,7 +16,7 @@ npm run demo
 - `?group=xxx` で部屋を分ける / `?role=dedicated` `?role=observer` で役割を変える
 - src を alias で直接読むため、ビルド不要で API 変更が即反映される
 
-## 確認シナリオ (テンプレ置換前の adapter 実機検証を兼ねる)
+## Testcases
 
 1. 2 タブで +1 が相互反映される (適用順の一致)
 2. 最新接続タブが HOST 👑 になり、そのタブを閉じると残りが昇格する (onDisconnect → migration)
