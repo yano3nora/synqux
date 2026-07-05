@@ -2,7 +2,7 @@
 
 - Status: **Accepted** (2026-07-05。レビューは「同期ゲームとして成立する状態」で branch ごと受ける方針のため、本 ADR は実装の設計記録として確定)
 - Date: 2026-07-05
-- 関連: ADR-0001 Decision 10 (Phase 3 送りの決定と前倒しの経緯は `TASK-synqux-phase3.md`)
+- 関連: ADR-0001 Decision 10 (Phase 3 送りの決定と前倒しの経緯は `TASK-260705-synqux-phase3.md`)
 
 ## Context
 

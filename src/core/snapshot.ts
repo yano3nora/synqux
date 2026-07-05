@@ -6,7 +6,7 @@ import { SYNQUX_SCHEMA_VERSION, type SnapshotEnvelope } from './types.js'
  * どの transport / SnapshotStore でも snapshot が同一文字列になるよう、
  * core で一度だけ canonical JSON 化する。これにより
  * - ストレージ固有の直列化の罠 (undefined 落ち・空配列消失) を adapter から排除
- * - export 解析による調査手順 (SPEC-requests-sync.md Trouble Shooting) が
+ * - export 解析による調査手順 (SPEC-0001-requests-sync.md Trouble Shooting) が
  *   infra 非依存の資産になる
  */
 

@@ -1,14 +1,14 @@
 # synqux Phase 1: 公開 API 境界の確定と core の移植・インスタンス化
 
 - Status: **完了 (2026-07-05)**
-- 根拠: `ADR-0001-design.md` Decision 3 / 7 / 8 / 10 / 11。API 境界の正は `SPEC-public-api.md`
+- 根拠: `ADR-0001-design.md` Decision 3 / 7 / 8 / 10 / 11。API 境界の正は `SPEC-0002-public-api.md`
 - 合格基準: Phase 0 characterization test の新 API 移植が通ること + `npm test` 全 pass
 
 ## 進行順序とマイルストーン
 
 依存関係: **A (型合意) → B (テスト基盤) → C1〜C4 (移植) → C5 (characterization) → C6 (バグ修正) → C7 (migration 境界) → D → E**。「忠実移植を C5 で固定してから C6 で直す」順序が Phase 0 の投資を活かす要点だった。
 
-### A: 公開 API 境界の確定 → `SPEC-public-api.md`
+### A: 公開 API 境界の確定 → `SPEC-0002-public-api.md`
 
 - A1 型シグネチャ / A2 transport interface (firebase セマンティクスで机上検証、対応表を SPEC に記載) / A3 封筒 wire format (schemaVersion 含む)
 - 実装契約の正: `src/core/types.ts` (adapter 実装者向けの 6 契約を doc comment に焼き込み)
@@ -21,7 +21,7 @@
 ### B: テスト基盤 → `src/testing/memory-hub.ts`
 
 - `createMemoryHub()`: 複数仮想端末が共有する決定的 in-memory バックエンド。FIFO + setTimeout(0) 配送、fault injection 5 種 (duplicate / delay→release / drop / **holdAck** / disconnect)。holdAck (ack だけ保留、local echo は先行) が①の再現に必須
-- **codex exec へ委譲した唯一のタスク**。指示書: `TASK-260705-phase1-b1-memory-hub.md`。レビュー修正 2 点: oxfmt 除外 workaround の revert / `respondRequest` の `result: null` を RTDB update 同様「キー除去」へ (dual-host 境界で実インフラと乖離しないため)
+- **codex exec へ委譲した唯一のタスク**。指示書: `TASK-260705-synqux-phase1-b1-memory-hub.md`。レビュー修正 2 点: oxfmt 除外 workaround の revert / `respondRequest` の `result: null` を RTDB update 同様「キー除去」へ (dual-host 境界で実インフラと乖離しないため)
 - **計画変更**: B2 (simulation ハーネス) は createSynqux 依存のため C へ統合 → 最終的に専用ハーネスは**公開しない**と決定 (memory hub + 自前 store 構築で成立。実例は `create-synqux.test.ts` / `host-migration.test.ts`)
 
 ### C: core の移植・インスタンス化 → `src/core/`
@@ -53,7 +53,7 @@
 - `verifyActionIdempotency` / `assertActionIdempotency` (SPEC 改善ロードマップ 1 の実装)
 - subpath exports (`synqux` / `synqux/react` / `synqux/testing`)、`tsconfig.build.json` で d.ts ビルド。**publish (private 解除) は Phase 2**
 - `Synqux` instance に `rootReducer` を追加 (spread 方式だと configureStore へ渡す rootReducer が手元に残らないため)
-- SPEC-requests-sync.md のコード参照を synqux 実体へ張り替え、①①′を対策済み表へ移動。README / CHANGELOG 整備
+- SPEC-0001-requests-sync.md のコード参照を synqux 実体へ張り替え、①①′を対策済み表へ移動。README / CHANGELOG 整備
 
 ## スコープ外 (経緯つき)
 

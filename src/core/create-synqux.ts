@@ -155,7 +155,7 @@ export type Synqux<TRoot extends { synqux: SynquxState }> = {
   /**
    * synqux/react の useLatestResult が synced の位置を解決するための内部 field。
    * ゲーム開発者はこれを直接使わず、result は自分の synced state から
-   * `(s) => s.game.result` のように直接読むこと (SPEC-public-api.md)
+   * `(s) => s.game.result` のように直接読むこと (SPEC-0002-public-api.md)
    */
   selectSynced: (root: TRoot) => SynquxSynced
 }

@@ -2,7 +2,7 @@
 
 ## Overview
 
-端末間 synced state 同期基盤の仕様。仕組み・前提知識・既知の問題・設計ガイドラインをまとめる。core は transport 抽象にのみ依存し (`docs/SPEC-public-api.md`)、Firebase Realtime Database は adapter 実装の 1 つ (`synqux/firebase`)。本文の firebase 表記は「最初の transport 実装」としての説明であり、仕組み自体は infra 非依存。
+端末間 synced state 同期基盤の仕様。仕組み・前提知識・既知の問題・設計ガイドラインをまとめる。core は transport 抽象にのみ依存し (`docs/SPEC-0002-public-api.md`)、Firebase Realtime Database は adapter 実装の 1 つ (`synqux/firebase`)。本文の firebase 表記は「最初の transport 実装」としての説明であり、仕組み自体は infra 非依存。
 
 - 目的: 同期まわりの不具合調査・改修時に「どこまでが設計意図で、どこからがバグか」を即判断できる状態にする
 - 詳細はコードとその周辺コメントを正とし、本書は「どこを読めばよいか」と「なぜ成り立つか」だけを示す
@@ -11,7 +11,7 @@
 
 採用しているのは Server / Client 方式のうち**クライアントホスト型 (リレーサーバ)**。専用サーバ型と比べてサーバの開発・保守運用コストを丸ごとカットでき、協力型・ターン制の少人数マルチプレイに向く。反面 host に負荷とロジックが集中するため、同期速度・平等性が重視されるリアルタイム対戦には不向き。P2P・専用サーバ型との比較と選定背景は下図を参照。
 
-![Realtime Sync by Client-Host Model](SPEC-requests-sync/realtime-sync-by-client-host-model.svg)
+![Realtime Sync by Client-Host Model](assets/realtime-sync-by-client-host-model.svg)
 
 ## 前提知識
 
@@ -40,7 +40,7 @@
 
 クライアントホスト型を Redux × transport で実現する。redux store は「synqux 内部 slice (`state.synqux` = 接続端末の管理と受信 request の置き場)」と「consumer の synced slice (同期対象状態)」に分かれ、peers と requests を transport と同期させる。全体コンセプトは下図 (移植元の firebase 構成の図。connections/requests/game は state.synqux.connections / state.synqux.requests / synced slice に対応)、action 1 件が適用されるまでの流れは後述のシーケンスの通り。
 
-![Sync with Firebase and Redux](SPEC-requests-sync/sync-with-firebase-and-redux.svg)
+![Sync with Firebase and Redux](assets/sync-with-firebase-and-redux.svg)
 
 ```txt
 client                      firebase                     host

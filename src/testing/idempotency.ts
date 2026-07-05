@@ -6,7 +6,7 @@ import { canonicalStringify } from '../core/snapshot.js'
  *
  * 同期基盤は at-least-once な世界で動くため、synced action は「二重適用・
  * 再クリック・遅延後の再送」に耐える冪等な設計 (toggle ではなく set) が望ましい
- * (SPEC-requests-sync.md 設計ガイドライン 1)。このハーネスを consumer の CI で
+ * (SPEC-0001-requests-sync.md 設計ガイドライン 1)。このハーネスを consumer の CI で
  * 回すことで、非冪等 action の混入を教育ではなく機械的に検出する
  */
 export type IdempotencyReport<TSynced> = {

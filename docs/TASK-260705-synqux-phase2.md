@@ -17,6 +17,7 @@
 - private 解除 / subpath exports 4 本 / firebase・react は optional peer / `prepublishOnly` (test+build 強制) / `version` script (SYNQUX_VERSION 自動同期) / engines >=20
 - ts-utils は public npm + MIT を確認済み (前提クリア)
 - **publish 前の重大バグ修正**: 相対 import の拡張子なし emit で dist が Node ESM 非対応だった → 全 import に `.js` 付与、3 entry の smoke test で解決確認
+- **公開 repo 体裁への是正 (2026-07-05)**: 社内情報 (移植元・テンプレートの具体名/パス) をコミット対象から分離 — git 管理外の `CLAUDE.local.md` / `docs/local/` へ退避し、追跡ファイルは匿名表現へ。開発履歴は情報を含むため単一コミットへ squash して破棄 (経緯は `TASK-260705-synqux-phase1.md` の履歴注記)
 - GitHub への push・npm publish はユーザが判断・実行する (エージェントは行わない)
 
 ## 残タスク

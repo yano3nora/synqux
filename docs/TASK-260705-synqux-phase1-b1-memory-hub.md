@@ -7,7 +7,7 @@
 
 1. `AGENTS.md` — プロジェクト全体の制約 (特に「モジュール変数のグローバル状態は禁止」「at-least-once を前提に設計する」)
 2. `src/core/types.ts` — 実装対象が満たすべき `SynquxTransport` / `SnapshotStore` 契約。**この型定義が正であり、変更してはならない**
-3. `docs/SPEC-public-api.md` の「A2: Transport interface」「`synqux/testing`」節 — 背景と設計意図
+3. `docs/SPEC-0002-public-api.md` の「A2: Transport interface」「`synqux/testing`」節 — 背景と設計意図
 
 ## 目的
 
@@ -119,4 +119,4 @@ fake timers を使う場合は `vi.useFakeTimers()` + `await vi.advanceTimersByT
 
 1. `npm test` (vitest / oxlint / oxfmt --check / tsc --noEmit の全部) が pass すること
 2. テスト要求 1〜11 がすべて実装されていること
-3. `src/core/types.ts` と `docs/SPEC-public-api.md` に変更を加えていないこと (契約側の不備を見つけた場合は変更せず、作業ログに指摘として残すこと)
+3. `src/core/types.ts` と `docs/SPEC-0002-public-api.md` に変更を加えていないこと (契約側の不備を見つけた場合は変更せず、作業ログに指摘として残すこと)

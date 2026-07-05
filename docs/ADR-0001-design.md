@@ -5,7 +5,7 @@
 
 ## Context
 
-社内ブラウザゲームはテンプレート repo を丸ごと複製して出荷しており、端末間同期基盤（クライアントホスト型 × Redux × Firebase RTDB、詳細は `SPEC-requests-sync.md`）はテンプレートに埋め込まれた状態で約 5 年運用してきた。この形には以下の問題がある。
+社内ブラウザゲームはテンプレート repo を丸ごと複製して出荷しており、端末間同期基盤（クライアントホスト型 × Redux × Firebase RTDB、詳細は `SPEC-0001-requests-sync.md`）はテンプレートに埋め込まれた状態で約 5 年運用してきた。この形には以下の問題がある。
 
 1. **修正の伝播が手作業**: 年数回の不具合修正のたびに「ゲーム repo で直す → テンプレ repo へ入れ直す → 他のアクティブな repo へも手で反映」が発生する
 2. **bus factor 1**: 同期基盤は分散システムの知識を要する聖域で、feature 開発者は触れない。コードがテンプレ内にあることで境界も曖昧
@@ -113,7 +113,7 @@ snapshot の正しさの条件は「request 列上の正確な一点と、その
 - **transport の snapshot API は不透明文字列の KV**（`saveSnapshot(key, payload: string)` / `loadSnapshot(key)`）
 - **封筒の構築と canonical JSON 文字列化は core の責務**。封筒 = synced state + 順序判定モジュールの状態（現行の revisions 相当、Decision 10）+ schema version
     - 形状保存問題（RTDB が空配列・空オブジェクト・undefined を落とす等、ストレージ固有の直列化の罠）を core で一度だけ解き、adapter 実装コストを最小化する
-    - どのインフラでも snapshot が同一フォーマットになるため、export 解析による調査手順（`SPEC-requests-sync.md` の Trouble Shooting）が infra 非依存の資産として残る
+    - どのインフラでも snapshot が同一フォーマットになるため、export 解析による調査手順（`SPEC-0001-requests-sync.md` の Trouble Shooting）が infra 非依存の資産として残る
 - **「いつ永続化するか」は core の policy**。v1 は移植元踏襲で「受理 request ごと」とし、policy を 1 箇所に隔離して将来の throttle（受理 N 件ごと / debounce）に備える
 - **retention 契約を transport interface に明記する**:「adapter は最新 snapshot 地点より新しい requests を保持しなければならない」。requests を prune する将来の transport（TTL 等）が復帰不能バグを作ることを防ぐ
 - **差分永続化は不採用**。復元経路（同期基盤の信頼性の立脚点）に「base + patch 再構築」という新しいバグクラスを持ち込まない。書き込み削減は頻度 policy で行い、チャンク分割・圧縮は adapter 内部の自由とする（例: DynamoDB の 400KB item 制限への対応）
@@ -163,11 +163,11 @@ Decision 8 の純粋性契約により、移植元で「synced reducer が `meta
     - 既知の問題②（clock skew ドロップ）の判定機構を unit test で固定済み
     - `launchTalks` / `clearTalks` は移植元に dispatch 箇所なし（間接 dispatch 機構 `message.next.action` は存在するが未使用）。Migration Notes の宿題は解消
 - **Phase 1 完了（2026-07-05）**: 公開 API 境界の確定と core の移植・インスタンス化。特記事項:
-    - API 境界の正は `docs/SPEC-public-api.md`（レビュー決定: `agent`/`guest` → `role: 'player'|'dedicated'|'observer'`、`selectLatestResult` 廃止で result は synced state 直読み、standalone の local 永続化を `SnapshotStore` として責務に内包、`@yano3nora/ts-utils` は依存に含める）
+    - API 境界の正は `docs/SPEC-0002-public-api.md`（レビュー決定: `agent`/`guest` → `role: 'player'|'dedicated'|'observer'`、`selectLatestResult` 廃止で result は synced state 直読み、standalone の local 永続化を `SnapshotStore` として責務に内包、`@yano3nora/ts-utils` は依存に含める）
     - 既知の問題①（revisions 二重記録）①′（二重 dispatch 窓）は「再現テストが落ちることを確認 → 修正」の手順で解消済み。②（clock skew）は再現テストと明文化のみ（根治は Phase 3 の Decision 10）
     - host migration 境界（dual-host 窓・未応答 request 引き継ぎ・host 不在滞留 → dedicated 昇格）を `synqux/testing` の memory hub で決定的にカバー
     - 意図的な移植元からの変更: host 導出に同時刻接続の tiebreak（id 辞書順）を追加（列挙順依存で端末間の結論が割れ得たため）
-    - `createSimulation` は公開しない（memory hub + 自前 store 構築で成立するため。SPEC-public-api.md 参照）
+    - `createSimulation` は公開しない（memory hub + 自前 store 構築で成立するため。SPEC-0002-public-api.md 参照）
 - **Phase 2 synqux 側完了（2026-07-05）**: `synqux/firebase` adapter 実装（実機は未検証）、publish 可能な体裁（0.1.0）。publish 実行とテンプレ置換はユーザ側の残タスク（手順書は git 管理外の docs/local/）
-- **Phase 3 完了（2026-07-05、テンプレ置換より前倒し）**: 順序判定を host 採番 seq へ刷新（`ADR-0002-host-seq.md`、schema v2 / 0.2.0）。既知の問題②を機構ごと根絶、fork 待機のイベント駆動化で直列 2ms/req・migration 回復 10ms。前倒しの経緯と負荷実測は `TASK-synqux-phase3.md`。snapshot throttle のみ意図的に残置（帯域問題が顕在化してから）
+- **Phase 3 完了（2026-07-05、テンプレ置換より前倒し）**: 順序判定を host 採番 seq へ刷新（`ADR-0002-host-seq.md`、schema v2 / 0.2.0）。既知の問題②を機構ごと根絶、fork 待機のイベント駆動化で直列 2ms/req・migration 回復 10ms。前倒しの経緯と負荷実測は `TASK-260705-synqux-phase3.md`。snapshot throttle のみ意図的に残置（帯域問題が顕在化してから）
 - 次: publish（ユーザ判断）→ テンプレ repo の置換（v2 形式へ一度で移行）

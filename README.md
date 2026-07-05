@@ -9,7 +9,7 @@ client の action を「host への request」に変換し、host が reducer �
 - **普通の RTK の書き方がそのまま同期される**: 独自ラッパーで reducer を包まない。楽観更新をしないため「画面に出る state = 同期済み state」が常に成立する
 - **reducer が唯一の判定器**: validation は reducer に集約し、host / client / 同期なし (standalone) でロジックが分岐しない
 - **transport 抽象**: core は特定インフラに依存しない。Firebase RTDB adapter (`synqux/firebase`) と決定的な in-memory 実装 (`synqux/testing`) を同梱
-- 仕様の正: [SPEC-requests-sync](./docs/SPEC-requests-sync.md) (仕組み・不変条件・既知の問題) / [SPEC-public-api](./docs/SPEC-public-api.md) (API 境界) / [ADR-0001](./docs/ADR-0001-design.md) (設計判断)
+- 仕様の正: [SPEC-requests-sync](./docs/SPEC-0001-requests-sync.md) (仕組み・不変条件・既知の問題) / [SPEC-public-api](./docs/SPEC-0002-public-api.md) (API 境界) / [ADR-0001](./docs/ADR-0001-design.md) (設計判断)
 
 ## Getting Started
 
@@ -69,7 +69,7 @@ await sync.subscribe({ store, groupId })
 
 ## Trouble Shooting
 
-同期不具合の調査手順・action 設計ガイドライン (「toggle ではなく set」等) は [SPEC-requests-sync](./docs/SPEC-requests-sync.md) を参照。
+同期不具合の調査手順・action 設計ガイドライン (「toggle ではなく set」等) は [SPEC-requests-sync](./docs/SPEC-0001-requests-sync.md) を参照。
 
 ## Publishing (maintainer 向け)
 

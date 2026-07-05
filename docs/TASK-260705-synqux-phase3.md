@@ -1,7 +1,7 @@
 # synqux Phase 3: 分散制御層の本格リファクタ
 
 - Status: **完了 (2026-07-05、snapshot throttle のみ意図的に残置)。Phase 2 のテンプレ置換より前倒しで実施**
-- 根拠: `ADR-0001-design.md` Decision 5 / 10、`SPEC-requests-sync.md` 改善ロードマップ
+- 根拠: `ADR-0001-design.md` Decision 5 / 10、`SPEC-0001-requests-sync.md` 改善ロードマップ
 - **順序変更の決定 (2026-07-05)**: 当初前提は「Phase 2 完了 = 消費者が semver に乗った状態」だったが、publish 保留により消費者ゼロの期間が生じたため前倒しする。消費者ゼロの今なら wire format 変更 (schema version bump) が無償で、テンプレは seq 済み形式へ一度で移行できる (静穏時間帯デプロイが 1 回で済む)。Decision 10 の実質的な前提「テスト基盤」は Phase 1 で完了済み
 - 作業 branch: `phase3` (main は publish レビュー用に凍結)
 - 実施順: 負荷実測 baseline → seq 化 + fencing (ADR-0002) → イベント駆動化 → 再計測。snapshot throttle は帯域問題が顕在化してから
