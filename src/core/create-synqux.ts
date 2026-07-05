@@ -31,7 +31,6 @@ import {
   type SynquxActionMeta,
   type SynquxSynced,
   type SynquxTransport,
-  type Unsubscribe,
 } from './types.js'
 
 /**

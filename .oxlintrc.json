@@ -21,6 +21,7 @@
     "no-unused-expressions": ["error", { "allowShortCircuit": true }],
     "typescript/ban-ts-comment": "off",
     "typescript/consistent-type-imports": "off",
-    "typescript/no-explicit-any": "off"
+    "typescript/no-explicit-any": "off",
+    "vitest/require-mock-type-parameters": "off"
   }
 }

@@ -278,8 +278,8 @@ describe('firebaseTransport', () => {
     await transport.disconnect()
 
     expect(h.removeMock).toHaveBeenCalledTimes(1)
-    expect((h.removeMock.mock.calls[0]?.[0] as { path?: string }).path).toBe(
-      `connections/${GROUP_ID}/conn-1`,
+    expect(h.removeMock).toHaveBeenCalledWith(
+      expect.objectContaining({ path: `connections/${GROUP_ID}/conn-1` }),
     )
 
     // 切断後の再利用は不可

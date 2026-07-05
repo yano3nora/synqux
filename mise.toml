@@ -7,32 +7,28 @@
 [settings]
 experimental = true
 
+# [hooks]
+# enter = [
+#   "echo '🍳 mise enabled'",
+#   "mise env --json | jq -r 'keys | join(\" \")'",
+# ]
+
+[shell_alias]
+provision = "mise run provision"
+
 [tools]
 node = "24.14.1"
 
 [tasks.pre-commit]
-description = "git commit 時: oxlint / oxfmt の check"
-run = ["mise run check"]
-
-[tasks.pre-push]
-description = "git push 時: vitest / oxlint / oxfmt / tsc をフル実行"
-run = ["mise run test"]
-
-[tasks.install-hooks]
-description = "git hooks を .git/hooks へ生成（pre-commit=check / pre-push=test）"
+description = "pre-commit: fix lint, format & run type check, tests"
 run = [
-  "mise generate git-pre-commit --task pre-commit --write",
-  "mise generate git-pre-commit --hook pre-push --task pre-push --write",
+  "npm run fix",
+  "npm test"
 ]
-
-[tasks.check]
-description = "oxlint, oxfmt の check を実行"
-run = "npm run check"
-
-[tasks.test]
-description = "vitest, oxlint, oxfmt, tsc を実行"
-run = "npm test"
 
 [tasks.provision]
 description = "環境を最初に構成する際のセットアップ"
-run = ["mise run install-hooks", "npm ci"]
+run = [
+  "mise generate git-pre-commit --task pre-commit --write",
+  "npm ci",
+]

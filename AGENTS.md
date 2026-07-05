@@ -31,9 +31,11 @@
 - **Secrets**: 企業名・製品名・機密情報などがあった場合、コード上に残らないように汎用・一般名称に差し替えること。
 - **Commit**: `git commit` は基本的には人間判断で行うため、指示されたとき以外はコミットせず人間に判断を委ねること。
 - **Push / Publish**: `github push` や `npm publish` など、外部へ公開・配布する操作は Agent が実行しない。人間が判断して実行する。
-- **Testing**: タスクを完了とする前に、必ず `npm test` を実行して変更の妥当性を検証すること
-    - 同期挙動のテストは in-memory transport による決定的 simulation test を第一級とする。firebase emulator 依存のテストを増やさない
-    - 分散制御のバグ修正は「そのバグを再現するテスト」を先に書いてから直す
+- **Testing**: タスクを完了とする前に、必ず以下を実施
+    - `npm run fix` を実行して lint, format を整えること
+    - `npm test` を実行して変更の妥当性を検証すること
+        - 同期挙動のテストは in-memory transport による決定的 simulation test を第一級とする。firebase emulator 依存のテストを増やさない
+        - 分散制御のバグ修正は「そのバグを再現するテスト」を先に書いてから直す
 - **Documentation**:
     - 技術的な意思決定や検討は `docs/ADR-XXXX-*.md` に記録し、大きな変更の前には既存 ADR を確認する
     - 設計・仕様の検討・決定事項は `docs/SPEC-XXXX-*.md` に記録する
