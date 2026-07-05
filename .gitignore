@@ -524,3 +524,9 @@ __marimo__/
 # 非公開 (会社情報を含むため git 管理外)
 docs/local/
 CLAUDE.local.md
+
+# firebase emulator
+firebase-debug.log
+database-debug.log
+.firebase/
+demo/dist/

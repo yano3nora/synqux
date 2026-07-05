@@ -1,0 +1,12 @@
+{
+  "extends": "../tsconfig.json",
+  "compilerOptions": {
+    "lib": ["ES2022", "DOM", "DOM.Iterable"],
+    "types": [],
+    "paths": {
+      "synqux": ["../src/index.ts"],
+      "synqux/firebase": ["../src/firebase/index.ts"]
+    }
+  },
+  "include": ["."]
+}

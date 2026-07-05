@@ -2,7 +2,14 @@
   "name": "synqux",
   "version": "0.2.0",
   "description": "Client-host realtime sync for Redux apps",
-  "keywords": ["redux", "redux-toolkit", "sync", "realtime", "multiplayer", "firebase"],
+  "keywords": [
+    "redux",
+    "redux-toolkit",
+    "sync",
+    "realtime",
+    "multiplayer",
+    "firebase"
+  ],
   "repository": {
     "type": "git",
     "url": "git+https://github.com/yano3nora/synqux.git"
@@ -33,18 +40,21 @@
   },
   "scripts": {
     "build": "rm -rf dist && tsc -p tsconfig.build.json",
+    "demo": "vite demo",
+    "demo:emulator": "npx -y firebase-tools emulators:start --only database --project synqux-demo --config demo/firebase.json",
     "prepublishOnly": "run-s test build",
     "version": "node -e \"const fs=require('fs');const v=require('./package.json').version;fs.writeFileSync('src/index.ts',fs.readFileSync('src/index.ts','utf-8').replace(/SYNQUX_VERSION = '[^']+'/,\\\"SYNQUX_VERSION = '\\\"+v+\\\"'\\\"))\" && git add src/index.ts",
     "test": "run-s test:*",
     "test:vitest": "vitest run --passWithNoTests",
     "test:oxlint": "oxlint",
-    "test:oxfmt": "oxfmt --check src",
+    "test:oxfmt": "oxfmt --check src demo",
     "test:tsc": "tsc --noEmit",
     "check": "run-s test:oxlint test:oxfmt",
     "fix": "run-s fix:*",
     "fix:oxlint": "oxlint --fix",
-    "fix:oxfmt": "oxfmt src",
-    "dev:test": "vitest watch --passWithNoTests"
+    "fix:oxfmt": "oxfmt src demo",
+    "dev:test": "vitest watch --passWithNoTests",
+    "test:tsc-demo": "tsc -p demo --noEmit"
   },
   "peerDependencies": {
     "@reduxjs/toolkit": "^2.0.0",
@@ -78,6 +88,7 @@
     "react-dom": "^19.2.7",
     "react-redux": "^9.3.0",
     "typescript": "^6.0.3",
+    "vite": "^8.0.16",
     "vitest": "^4.1.9"
   },
   "engines": {
