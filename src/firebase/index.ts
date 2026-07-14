@@ -17,7 +17,6 @@ import {
   type Database,
   type Query,
 } from 'firebase/database'
-import { sleepTimer } from '@yano3nora/ts-utils'
 import type { Peer, RequestEnvelope, SynquxTransport } from '../core/types.js'
 
 /**
@@ -79,17 +78,19 @@ export const firebaseTransport = (db: Database): SynquxTransport => {
 
       // presence 検知の前提となる db 接続の確立を待つ
       // https://firebase.google.com/docs/database/web/offline-capabilities
-      let connected: boolean | null = null
-      onValue(
-        ref(db, '.info/connected'),
-        (snap) => {
-          connected = snap.val() === true
-        },
-        { onlyOnce: true },
-      )
-      while (connected !== true) {
-        await sleepTimer(100)
-      }
+      // .info/connected は websocket 確立前に false を即時発火してから true を
+      // 発火する 2 段階挙動のため、onlyOnce では最初の false でリスナーが外れて
+      // 永遠に接続待ちになる。true が来るまで張り続け、await 復帰後に解除する
+      // (コールバックが同期発火しても unsub 未代入参照にならない順序)
+      let unsubConnected: (() => void) | undefined
+      await new Promise<void>((resolve) => {
+        unsubConnected = onValue(ref(db, '.info/connected'), (snap) => {
+          if (snap.val() === true) {
+            resolve()
+          }
+        })
+      })
+      unsubConnected?.()
 
       const selfRef = push(ref(db, connectionsPath(groupId)))
       const selfId = selfRef.key!
@@ -126,19 +127,19 @@ export const firebaseTransport = (db: Database): SynquxTransport => {
         return Date.now() + serverTimeOffset
       }
 
-      onValue(
-        ref(db, '.info/serverTimeOffset'),
-        (snap) => {
+      // connect() と同じ理由で onlyOnce + poll を避ける (こちらは初回発火で
+      // 必ず数値が入るため実害はないが、待ち方を揃えておく)
+      let unsubOffset: (() => void) | undefined
+      await new Promise<void>((resolve) => {
+        unsubOffset = onValue(ref(db, '.info/serverTimeOffset'), (snap) => {
           serverTimeOffset = Number(snap.val()) || 0
-        },
-        { onlyOnce: true },
-      )
+          resolve()
+        })
+      })
+      unsubOffset?.()
 
-      while (serverTimeOffset === null) {
-        await sleepTimer(100)
-      }
-
-      return Date.now() + serverTimeOffset
+      // resolve 時点で必ず代入済みだが、callback 内代入は TS が narrow できない
+      return Date.now() + (serverTimeOffset ?? 0)
     },
 
     subscribePeers(handlers) {

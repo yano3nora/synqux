@@ -7,7 +7,7 @@
       "port": 9000
     },
     "ui": {
-      "enabled": false
+      "enabled": true
     }
   }
 }
