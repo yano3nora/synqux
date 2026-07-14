@@ -37,6 +37,7 @@
         - 同期挙動のテストは in-memory transport による決定的 simulation test を第一級とする。firebase emulator 依存のテストを増やさない
         - 分散制御のバグ修正は「そのバグを再現するテスト」を先に書いてから直す
 - **Documentation**:
+    - 未着手・保留・トリガー待ちのタスクは `docs/BACKLOG.md` に集約し、同ファイルの運用ルールに従う
     - 技術的な意思決定や検討は `docs/ADR-XXXX-*.md` に記録し、大きな変更の前には既存 ADR を確認する
     - 設計・仕様の検討・決定事項は `docs/SPEC-XXXX-*.md` に記録する
     - 原則、全開発タスクが適切な粒度で `docs/TASK-YYMMDD-*.md` に残るようにする
