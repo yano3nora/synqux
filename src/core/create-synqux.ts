@@ -20,6 +20,7 @@ import {
   synquxReducer,
   synquxRestored,
   type PendingRequest,
+  type SynquxHealth,
   type SynquxState,
 } from './slice.js'
 import {
@@ -41,6 +42,16 @@ import {
  * 取りこぼし」に備えた保険であり、平常時のレイテンシには現れない
  */
 const WAKE_FALLBACK_MS = 1000
+
+/** gap の継続時間を評価する heartbeat 間隔。correctness には使わない */
+const HEALTH_CHECK_INTERVAL_MS = 1000
+
+const OK_HEALTH: SynquxHealth = {
+  phase: 'ok',
+  expectedSeq: null,
+  maxSeenSeq: null,
+  gapSince: null,
+}
 
 /**
  * イベント駆動待機のシグナル (ADR-0002 / イベント駆動化)
@@ -94,6 +105,13 @@ export type CreateSynquxConfig<
    * runtime の on/off (tutorial 等) は actions.setEnabled で行う
    */
   enabled?: boolean
+
+  /**
+   * stall 判定のヒステリシス ms。「観測済み最大 seq が appliedSeq を超えたまま
+   * appliedSeq がこの時間進まない」で stalled になる。一時遅配を誤検知しない
+   * 値にすること。端末ローカル時刻は通知用であり correctness には使わない
+   */
+  stallAfterMs?: number
 
   /** readonly 端末などで request 送信自体を抑止する hook。既定は常に許可 */
   canRequest?: (root: TRoot) => boolean
@@ -169,6 +187,7 @@ export const createSynqux = <
   const { transport } = config
   const instanceEnabled = config.enabled ?? true
   const canRequest = config.canRequest ?? (() => true)
+  const stallAfterMs = config.stallAfterMs ?? 30_000
 
   // 処理済みリスト等の同期状態はすべてインスタンス内部に持つ (Decision 3)
   const ordering = createOrdering()
@@ -809,9 +828,66 @@ export const createSynqux = <
       },
     )
 
+    let gapStartedAt: number | null = null
+    let lastAppliedSeq = ordering.appliedSeq()
+
+    const healthEquals = (left: SynquxHealth, right: SynquxHealth): boolean =>
+      left.phase === right.phase &&
+      left.expectedSeq === right.expectedSeq &&
+      left.maxSeenSeq === right.maxSeenSeq &&
+      left.gapSince === right.gapSince
+
+    const updateHealth = (health: SynquxHealth): void => {
+      if (!healthEquals(store.getState().synqux.health, health)) {
+        store.dispatch(synquxActions.healthChanged(health))
+      }
+    }
+
+    /**
+     * envelope の在否ではなく ordering の進行だけを見る。dual-host の敗者を先に
+     * 適用した stall では、再裁定 envelope が entities に残ったままになるため。
+     * Date.now はヒステリシスと診断表示にしか使わず、適用順の correctness は
+     * 引き続き host 採番 seq だけで決まるため端末時計で十分。
+     */
+    const healthTimer = setInterval(() => {
+      const applied = ordering.appliedSeq()
+
+      if (!store.getState().synqux.enabled) {
+        gapStartedAt = null
+        lastAppliedSeq = applied
+        updateHealth(OK_HEALTH)
+        return
+      }
+
+      const maxSeen = ordering.maxSeenSeq()
+      const now = Date.now()
+
+      if (applied > lastAppliedSeq || maxSeen <= applied) {
+        gapStartedAt = null
+      }
+      lastAppliedSeq = applied
+
+      if (maxSeen > applied && gapStartedAt === null) {
+        gapStartedAt = now
+      }
+
+      if (gapStartedAt !== null && now - gapStartedAt >= stallAfterMs) {
+        updateHealth({
+          phase: 'stalled',
+          expectedSeq: applied + 1,
+          maxSeenSeq: maxSeen,
+          gapSince: gapStartedAt,
+        })
+        return
+      }
+
+      updateHealth(OK_HEALTH)
+    }, HEALTH_CHECK_INTERVAL_MS)
+
     session = { groupId }
 
     return async () => {
+      clearInterval(healthTimer)
       unsubscribePeers()
       unsubscribeRequests()
       session = null

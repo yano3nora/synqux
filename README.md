@@ -131,6 +131,23 @@ store.dispatch({ type: 'counter/add', payload: 1 })
 
 3. **host か・誰がいるかは selector / hooks で読め** — `selectIsHost` / `selectPeers` / `selectSelfId`、react なら `synqux/react` の `useIsHost` / `usePeers` / `useLatestResult`。判定結果は自分の synced state (`state.game.result`) を直接読んでもよい
 
+### 同期停止を検知してリロードを案内する
+
+```tsx
+const stalled = useIsSyncStalled() // react なしなら selectIsSyncStalled(store.getState())
+
+useEffect(() => {
+  if (
+    stalled &&
+    window.confirm('同期が停止しました。リロードして復帰しますか?')
+  ) {
+    window.location.reload()
+  }
+}, [stalled])
+```
+
+現在の回復経路はリロードによる snapshot restore だけ。UI 文言と通知・リロードの発火方法は consumer が決める。
+
 consumer のテストは `synqux/testing` を使う。`createMemoryHub()` (fault injection つき決定的 in-memory transport) と `assertActionIdempotency()` (非冪等 action の CI 検出) を提供する。action 設計ガイドライン (「toggle ではなく set」等) と同期不具合の調査手順は [SPEC-0001](./docs/SPEC-0001-requests-sync.md) を参照。
 
 ## Development

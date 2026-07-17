@@ -2,8 +2,14 @@ import type { Action } from '@reduxjs/toolkit'
 import { createContext, createElement, useContext, type ReactNode } from 'react'
 import { shallowEqual, useSelector } from 'react-redux'
 import type { Synqux } from '../core/create-synqux.js'
-import { selectIsHost, selectPeers, selectSelfId } from '../core/selectors.js'
-import type { SynquxState } from '../core/slice.js'
+import {
+  selectIsHost,
+  selectIsSyncStalled,
+  selectPeers,
+  selectSelfId,
+  selectSyncHealth,
+} from '../core/selectors.js'
+import type { SynquxHealth, SynquxState } from '../core/slice.js'
 import type { Peer, Result, SynquxSynced } from '../core/types.js'
 
 /**
@@ -48,6 +54,14 @@ export const usePeers = (): Peer[] =>
 
 export const useSelfId = (): Peer['id'] | null =>
   useSelector((state) => selectSelfId(state as WithSynqux))
+
+/** response 欠落などによる同期停止の検知状態 */
+export const useSyncHealth = (): SynquxHealth =>
+  useSelector((state) => selectSyncHealth(state as WithSynqux), shallowEqual)
+
+/** 同期停止を検知済みか。standalone / runtime off 時は常に false */
+export const useIsSyncStalled = (): boolean =>
+  useSelector((state) => selectIsSyncStalled(state as WithSynqux))
 
 /**
  * 直近の判定結果 (reducer が積んだ result) を読む

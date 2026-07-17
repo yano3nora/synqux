@@ -27,6 +27,7 @@ export {
   synquxReducer,
   synquxRestored,
   type PendingRequest,
+  type SynquxHealth,
   type SynquxState,
 } from './core/slice.js'
 
@@ -36,4 +37,10 @@ export {
   stateWithError,
   stateWithResult,
 } from './core/results.js'
-export { selectIsHost, selectPeers, selectSelfId } from './core/selectors.js'
+export {
+  selectIsHost,
+  selectIsSyncStalled,
+  selectPeers,
+  selectSelfId,
+  selectSyncHealth,
+} from './core/selectors.js'

@@ -33,6 +33,9 @@ export type Ordering = {
 
   appliedSeq(): number
 
+  /** この端末が観測した裁定済み envelope の最大 seq */
+  maxSeenSeq(): number
+
   /** 受信 envelope の裁定印を報告する (epoch/seq の観測最大値の追跡) */
   observe(stamp: { epoch?: number; seq?: number }): void
 
@@ -143,6 +146,10 @@ export const createOrdering = (): Ordering => {
 
     appliedSeq() {
       return appliedSeq
+    },
+
+    maxSeenSeq() {
+      return maxIssuedSeq
     },
 
     observe(stamp) {

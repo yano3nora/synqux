@@ -1,5 +1,5 @@
 import { deriveHostId } from './host.js'
-import type { SynquxState } from './slice.js'
+import type { SynquxHealth, SynquxState } from './slice.js'
 import type { Peer } from './types.js'
 
 /**
@@ -33,3 +33,9 @@ export const selectPeers = (root: WithSynqux): Peer[] =>
 
 export const selectSelfId = (root: WithSynqux): Peer['id'] | null =>
   root.synqux.connections.selfId
+
+export const selectSyncHealth = (root: WithSynqux): SynquxHealth =>
+  root.synqux.health
+
+export const selectIsSyncStalled = (root: WithSynqux): boolean =>
+  selectSyncHealth(root).phase === 'stalled'

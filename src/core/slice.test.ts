@@ -1,5 +1,11 @@
 import { describe, expect, it } from 'vitest'
-import { selectIsHost, selectPeers, selectSelfId } from './selectors.js'
+import {
+  selectIsHost,
+  selectIsSyncStalled,
+  selectPeers,
+  selectSelfId,
+  selectSyncHealth,
+} from './selectors.js'
 import {
   synquxActions,
   synquxInitialState,
@@ -62,6 +68,23 @@ describe('synquxSlice', () => {
 
     const left = reduce(joined, synquxActions.peerRemoved('peer-2'))
     expect(Object.keys(left.connections.entities)).toEqual(['peer-1'])
+  })
+
+  it('healthChanged で診断値を更新し、sessionEnded で ok に戻す', () => {
+    const stalled = reduce(
+      synquxInitialState,
+      synquxActions.healthChanged({
+        phase: 'stalled',
+        expectedSeq: 2,
+        maxSeenSeq: 3,
+        gapSince: 100,
+      }),
+    )
+    expect(selectIsSyncStalled({ synqux: stalled })).toBe(true)
+    expect(selectSyncHealth({ synqux: stalled }).expectedSeq).toBe(2)
+
+    const ended = reduce(stalled, synquxActions.sessionEnded())
+    expect(selectIsSyncStalled({ synqux: ended })).toBe(false)
   })
 
   it('requestChanged は entity を裁定印ごと上書きする (再裁定の追従)', () => {

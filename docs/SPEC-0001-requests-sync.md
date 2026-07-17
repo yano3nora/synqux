@@ -87,9 +87,10 @@ client                      firebase                     host
 
 ### 既知トレードオフ (仕様として明文化)
 
-- **dual-host 窓の一時分岐**: presence 遅延で 2 端末が host を自認した窓で、端末間の適用列が一時的に分岐し得る (v1 の prev チェーン fork と同クラス、seq 化で悪化しない)。fencing は収束先を決定的にし、敗者は再裁定で救済される。二重適用への最終防衛は consumer の冪等 action 設計 (設計ガイドライン 1)
+- **dual-host 窓の一時分岐**: presence 遅延で 2 端末が host を自認した窓 (host は最新接続端末のため、新規参加のたびに短時間開く) で、異なる request が同一 seq を得ることがある。正史 (host + snapshot + 封筒の seq) は常に一本道で壊れず、未適用の端末は決定的 tiebreak で同じ勝者に合意し、敗者は再裁定で救済される。ただし**勝者到着前に敗者を適用してしまった端末**は救済されない: 勝者を適用する機会を失って表示が正史からズレ、さらに敗者の再裁定 seq を適用済み扱いで破棄するため appliedSeq が進まなくなり、下記「配送の永久欠落による stall」と同型の停止に合流する (机上分析。再現 simulation test は BACKLOG の gap 項)。この端末が host に昇格すると直列裁定ゲートにより群全体の裁定も止まる (新規参加による host 移動で群は解除、当該端末はリロードまで停止)。冪等 action 設計 (設計ガイドライン 1) が緩和するのは二重適用と表示ズレの実害であり、stall は防げない
 - **敗者救済の範囲は直近適用窓 (200 件) まで**: 窓より古い敗者は正史との区別記録がなく、適用済み扱いで破棄される (v1 は敗者救済ゼロだったため純増の改善)
 - **配送の永久欠落による stall**: ある seq の envelope を端末が受け取り損ねると、その端末の適用がそこで止まる (v1 の prev 欠落と同クラス)。復旧はリロード (snapshot restore) 経路
+- **端末ローカル視界のズレは自動で戻らない (本基盤の最重要トレードオフ)**: 上記の dual-host 早期適用と配送欠落は、いずれも「端末のローカル視界が正史から乖離したまま停止し、リロードでしか回復しない」同一クラスの 2 症状。検知は sync health (`selectSyncHealth` / `selectIsSyncStalled`) で提供済み (ADR-0003)。自動回復は BACKLOG iteration 2 で扱う
 
 NOTE: `markApplied` を dispatch **前**へ前倒しする案は不可 (dispatch 失敗時にその seq が永久欠番となり全端末が停止する)。dispatch 直後 (同期) に行うのが正しい位置 — これにより「entity は消えたが appliedSeq が進んでいない」観測窓も消える。①′の処理中ガードは seq 待機ループの途中で立ててはいけない (待機中に fork が死ぬと誰もその request を処理できなくなる)。
 
@@ -110,7 +111,8 @@ NOTE: `markApplied` を dispatch **前**へ前倒しする案は不可 (dispatch
 2. ~~**既知の問題の修正**: ①の concat 評価固定 / ①′の処理中 Set ガード~~ → **Phase 1 で対応済み**。consumer 側の toggle 系 action の set 化は残タスク
 3. ~~**host 採番の連番導入**~~ → **Phase 3 で対応済み** (ADR-0002)。②は機構ごと根絶
 4. ~~**同時操作の負荷実測**~~ → **Phase 3 で対応済み** (`src/core/protocol-latency.test.ts`)。イベント駆動化後は直列 2ms/req・migration 回復 10ms (v1 比 ~96x / ~51x)
-5. **snapshot 書き込み削減**: 全量 JSON set を N request ごとなどへ (帯域コストが問題化してから。policy 点は `persistSnapshot` に隔離済み)
+5. ~~**seq gap の検知と consumer 通知**~~ → **sync health iteration 1 で対応済み** (ADR-0003)。自動回復は BACKLOG iteration 2
+6. **snapshot 書き込み削減**: 全量 JSON set を N request ごとなどへ (帯域コストが問題化してから。policy 点は `persistSnapshot` に隔離済み)
 
 ## Trouble Shooting: 同期不具合の調査手順
 

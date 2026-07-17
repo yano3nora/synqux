@@ -58,6 +58,14 @@ export type SynquxSynced<TAction extends Action = Action> = {
   result: Result<TAction> | null
 }
 
+/** 端末ローカルの seq gap 検知結果。stalled の回復手段はリロード */
+export type SynquxHealth = {
+  phase: 'ok' | 'stalled'
+  expectedSeq: number | null
+  maxSeenSeq: number | null
+  gapSince: number | null
+}
+
 /**
  * synqux が action に載せる meta の契約
  * synced reducer が読んでよいのは requestedBy / dispatched のみ (Decision 8)
@@ -91,6 +99,8 @@ export type CreateSynquxConfig<
   selectSynced: (root: TRoot) => TSynced
   /** false で standalone (同期なし・host 常時 true)。既定 true。runtime 切替は actions.setEnabled */
   enabled?: boolean
+  /** seq gap が継続したと判定するヒステリシス ms。既定 30,000。correctness には使わない */
+  stallAfterMs?: number
   /** readonly 端末などで request 送信自体を抑止する hook (移植元 scenes.readonly 相当)。既定 () => true */
   canRequest?: (root: TRoot) => boolean
   /**
@@ -194,6 +204,8 @@ export function generateResult<TAction>(props: ...): Result<TAction>
 export function selectIsHost(root: { synqux: SynquxState }): boolean  // standalone (enabled=false) 時は常に true
 export function selectPeers(root: { synqux: SynquxState }): Peer[]
 export function selectSelfId(root: { synqux: SynquxState }): Peer['id'] | null
+export function selectSyncHealth(root: { synqux: SynquxState }): SynquxHealth
+export function selectIsSyncStalled(root: { synqux: SynquxState }): boolean
 
 // NOTE: selectLatestResult は提供しない (レビューで廃止決定)
 // result は consumer 自身の synced state の所有物であり SynquxSynced 契約で型も見えるため
@@ -207,6 +219,7 @@ export function selectSelfId(root: { synqux: SynquxState }): Peer['id'] | null
 /** 型自体は export するが、中身への直接アクセスは selector 経由のみサポート */
 export type SynquxState = {
   enabled: boolean
+  health: SynquxHealth
   connections: {
     selfId: Peer['id'] | null
     entities: Record<Peer['id'], Peer>
@@ -230,6 +243,8 @@ export function SynquxProvider(props: { sync: Synqux<any, any, any>; children: R
 export function useIsHost(): boolean
 export function usePeers(): Peer[]
 export function useSelfId(): Peer['id'] | null
+export function useSyncHealth(): SynquxHealth
+export function useIsSyncStalled(): boolean
 export function useLatestResult<TAction>(): Result<TAction> | null  // synced の位置は Provider 経由で解決
 ```
 
@@ -396,8 +411,8 @@ type SnapshotEnvelope<TSynced> = {
 
 | subpath | 主な export | 対象 |
 | --- | --- | --- |
-| `synqux` | `createSynqux` / `createSynquxRootReducer` / `synquxReducer` / `stateWithError` / `stateWithResult` / `generateResult` / `selectIsHost` / `selectPeers` / `selectSelfId` / `localStorageSnapshotStore` / 型 (`SynquxSynced` / `Result` / `Peer` / `SynquxActionMeta` / `SynquxTransport` / `SnapshotStore` / `RequestEnvelope` / `SynquxState`) | セットアップ層 + reducer ヘルパー |
-| `synqux/react` | `SynquxProvider` / `useIsHost` / `usePeers` / `useSelfId` / `useLatestResult` | ゲーム開発者層 |
+| `synqux` | `createSynqux` / `createSynquxRootReducer` / `synquxReducer` / `stateWithError` / `stateWithResult` / `generateResult` / `selectIsHost` / `selectPeers` / `selectSelfId` / `selectSyncHealth` / `selectIsSyncStalled` / `localStorageSnapshotStore` / 型 (`SynquxSynced` / `SynquxHealth` / `Result` / `Peer` / `SynquxActionMeta` / `SynquxTransport` / `SnapshotStore` / `RequestEnvelope` / `SynquxState`) | セットアップ層 + reducer ヘルパー |
+| `synqux/react` | `SynquxProvider` / `useIsHost` / `usePeers` / `useSelfId` / `useSyncHealth` / `useIsSyncStalled` / `useLatestResult` | ゲーム開発者層 |
 | `synqux/testing` | `createMemoryHub` / `verifyActionIdempotency` / `assertActionIdempotency` | consumer CI / 本 repo の simulation test |
 | `synqux/firebase` | `firebaseTransport` | Phase 2 で実装 |
 

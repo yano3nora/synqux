@@ -9,9 +9,11 @@ import type { SynquxTransport } from '../core/types.js'
 import {
   SynquxProvider,
   useIsHost,
+  useIsSyncStalled,
   useLatestResult,
   usePeers,
   useSelfId,
+  useSyncHealth,
 } from './index.js'
 
 /** hooks は購読と描画の glue のみなので、store 直接操作で読み取り面だけ検証する */
@@ -73,6 +75,25 @@ describe('synqux/react hooks', () => {
     })
     expect(result.current?.type).toBe('error')
     expect(result.current?.message).toBe('forbidden')
+  })
+
+  it('useSyncHealth / useIsSyncStalled は Provider 追加なしで health を読める', () => {
+    const { store, wrapper } = setup()
+    store.dispatch(
+      synquxActions.healthChanged({
+        phase: 'stalled',
+        expectedSeq: 2,
+        maxSeenSeq: 3,
+        gapSince: 100,
+      }),
+    )
+
+    expect(
+      renderHook(() => useSyncHealth(), { wrapper }).result.current,
+    ).toMatchObject({ phase: 'stalled', expectedSeq: 2 })
+    expect(
+      renderHook(() => useIsSyncStalled(), { wrapper }).result.current,
+    ).toBe(true)
   })
 
   it('useLatestResult は Provider がないと throw する', () => {

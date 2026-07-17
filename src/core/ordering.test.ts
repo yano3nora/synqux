@@ -52,6 +52,13 @@ describe('createOrdering (ADR-0002)', () => {
       expect(ordering.beginHosting()).toBe(4)
     })
 
+    it('observe は観測済み最大 seq を追跡する', () => {
+      const ordering = createOrdering()
+      ordering.observe({ seq: 3 })
+      ordering.observe({ seq: 2 })
+      expect(ordering.maxSeenSeq()).toBe(3)
+    })
+
     it('issueSeq は appliedSeq + 1 を発行し、未適用のまま二重発行すると throw する', () => {
       const ordering = createOrdering()
       ordering.markApplied(1, 'req-1')

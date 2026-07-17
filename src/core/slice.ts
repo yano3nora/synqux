@@ -32,6 +32,16 @@ export type PendingRequest = {
   result?: Result
 }
 
+export type SynquxHealth = {
+  /** 'stalled' = 適用が進まない停止を検知。回復手段はリロード */
+  phase: 'ok' | 'stalled'
+  /** stalled 時のみ数値が入る診断値。ok 時はすべて null */
+  expectedSeq: number | null
+  maxSeenSeq: number | null
+  /** gap 開始の端末ローカル時刻 (Date.now) */
+  gapSince: number | null
+}
+
 /**
  * 予約 key `state.synqux` 配下の内部 state (ADR-0001 Decision 7)
  *
@@ -48,6 +58,8 @@ export type SynquxState = {
    */
   enabled: boolean
 
+  health: SynquxHealth
+
   connections: {
     selfId: Peer['id'] | null
     entities: Record<Peer['id'], Peer>
@@ -61,6 +73,12 @@ export type SynquxState = {
 
 export const synquxInitialState: SynquxState = {
   enabled: true,
+  health: {
+    phase: 'ok',
+    expectedSeq: null,
+    maxSeenSeq: null,
+    gapSince: null,
+  },
   connections: {
     selfId: null,
     entities: {},
@@ -105,6 +123,10 @@ const synquxSlice = createSlice({
     /** tutorial 等で runtime に同期を on/off する (移植元 _prepareTutorial 相当) */
     setEnabled: (state, action: PayloadAction<boolean>) => {
       state.enabled = action.payload
+    },
+
+    healthChanged: (state, action: PayloadAction<SynquxHealth>) => {
+      state.health = action.payload
     },
 
     peerUpserted: (state, action: PayloadAction<Peer>) => {

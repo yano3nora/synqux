@@ -4,6 +4,11 @@
 
 ## [Unreleased]
 
+### Added
+
+- seq gap が継続して同期適用が止まった端末を `state.synqux.health` で検知する sync health (ADR-0003)
+- `stallAfterMs` 設定、`selectSyncHealth` / `selectIsSyncStalled`、`useSyncHealth` / `useIsSyncStalled`
+
 ## [0.2.0] - 2026-07-05
 
 ### Changed (BREAKING: wire format v2)
