@@ -28,27 +28,69 @@ Redux (Redux Toolkit) アプリに「クライアントホスト型のリアル�
 - peerDependencies: `@reduxjs/toolkit` ^2 / optional: `react` 18+, `react-redux` 9+ (synqux/react 利用時), `firebase` 9+ (synqux/firebase 利用時)
 - demo の emulator 実行のみ Java が必要
 
-## Usage
+## Quick Start
+
+動く完成形は [demo/](./demo/) (firebase emulator + 複数タブで同期を体験できる) にあり、以下は demo と同じ構成を最小手順に分解したもの。
+
+### 1. Install
+
 ```sh
 npm install synqux @reduxjs/toolkit
+# firebase transport を使う場合
+npm install firebase
 ```
 
-セットアップ層 (テンプレに 1 ファイル、feature 開発者は触らない):
+### 2. 同期対象 slice を書く
+
+普通の Redux reducer に「`result` を持つ (`SynquxSynced`)」「validation 失敗は state を変えず `stateWithError` で表現する」の 2 点を足すだけ。独自ラッパーは無い (全文: [demo/counter.ts](./demo/counter.ts))。
+
+```ts
+import { stateWithError, type SynquxSynced } from 'synqux'
+
+export type CounterState = SynquxSynced<CounterAction> & { count: number }
+
+export const counterReducer: Reducer<CounterState> = (
+  state = { result: null, count: 0 },
+  action,
+) => {
+  switch (action.type) {
+    case 'counter/add': {
+      const next = state.count + (action.payload ?? 1)
+
+      // validation は reducer に集約する。host がこの result を見て request を
+      // 拒否し、依頼元にだけ通知される
+      if (next > 100 || next < 0) {
+        return stateWithError({ ...state }, action, {
+          message: 'count は 0〜100 の範囲です',
+        })
+      }
+
+      return { ...state, result: null, count: next }
+    }
+    default:
+      return state
+  }
+}
+```
+
+### 3. store を配線する
+
+セットアップ層はテンプレに 1 ファイル。feature 開発者は触らない (全文: [demo/main.ts](./demo/main.ts))。firebase の匿名認証等は transport 生成前に済ませること。
 
 ```ts
 import { configureStore } from '@reduxjs/toolkit'
 import { createSynqux, createSynquxRootReducer } from 'synqux'
 import { firebaseTransport } from 'synqux/firebase'
-import { gameReducer } from './game/reducers'     // 同期対象 (SynquxSynced を満たす)
-import { scenesReducer } from './scenes/reducers' // 端末ローカル
+import { counterReducer } from './counter'        // 同期対象 (SynquxSynced を満たす)
+import { scenesReducer } from './scenes/reducers'  // 端末ローカル (同期しない slice)
 
 export const sync = createSynqux({
-  transport: firebaseTransport(db),               // 匿名認証等の auth は transport 生成前に済ませる
-  isSyncedAction: (a): a is GameAction => a.type.startsWith('game/'),
+  transport: firebaseTransport(db),                // 匿名認証等の auth は transport 生成前に済ませる
+  isSyncedAction: (a): a is CounterAction => a.type.startsWith('counter/'),
   // rootReducer と selectSynced が返るので、そのまま config へ spread する
   ...createSynquxRootReducer({
-    synced: { game: gameReducer },
-    locals: { scenes: scenesReducer },            // 宣言順に直列実行、meta.root で前段を読める
+    synced: { counter: counterReducer },
+    locals: { scenes: scenesReducer },             // 宣言順に直列実行、meta.root で前段を読める
   }),
 })
 
@@ -59,12 +101,24 @@ export const store = configureStore({
       serializableCheck: { ignoredActionPaths: ['meta.root'] }, // 必須
     }).prepend(...sync.middlewares),
 })
-
-// 起動時 (standalone でも呼ぶ。restore がここで走る)
-await sync.subscribe({ store, groupId })
 ```
 
-ゲーム開発者が覚えること 3 つ:
+NOTE: `synced` に渡せる slice は**ちょうど 1 つ** (仕様。2 つ以上は throw)。同期したいドメインが複数ある場合は 1 つの reducer に合成し、`result` を top-level に写す。実例は [demo/main.ts](./demo/main.ts) の `demoReducer` (counter と ledger を 1 slice に畳んでいる)。
+
+### 4. 同期を開始して動作確認
+
+```ts
+// 起動時に 1 回 (standalone でも呼ぶ。snapshot restore がここで走る)
+await sync.subscribe({ store, groupId: 'room-1' })
+
+// あとは普通に dispatch するだけ。middleware が request 化 → host 裁定 →
+// 全端末が同じ順序で適用、まで面倒を見る (楽観更新なし = 画面が同期済み state)
+store.dispatch({ type: 'counter/add', payload: 1 })
+```
+
+同じ `groupId` を subscribe した端末 (タブ) すべてで `state.counter.count` が一致すれば成功。手元で試すなら demo が同じ構成なので、`npm run demo:emulator` + `npm run demo` で http://localhost:5173 を複数タブ開くのが早い。
+
+### ゲーム開発者が覚えること 3 つ
 
 1. **同期 state は直接触るな、action を dispatch しろ** — request 化は自動で起きる。書き方は普通の Redux と同じ
 2. **validation は reducer で、ダメなら `stateWithError` を返せ**

@@ -1,4 +1,4 @@
-import { configureStore } from '@reduxjs/toolkit'
+import { configureStore, type Action, type Reducer } from '@reduxjs/toolkit'
 import { initializeApp } from 'firebase/app'
 import { connectDatabaseEmulator, getDatabase } from 'firebase/database'
 import {
@@ -8,9 +8,23 @@ import {
   selectPeers,
   selectSelfId,
   type PeerRole,
+  type SynquxSynced,
 } from 'synqux'
 import { firebaseTransport } from 'synqux/firebase'
-import { counterReducer, isCounterAction } from './counter'
+import {
+  counterInitialState,
+  counterReducer,
+  isCounterAction,
+  type CounterAction,
+  type CounterState,
+} from './counter'
+import {
+  isLedgerAction,
+  ledgerInitialState,
+  ledgerReducer,
+  type LedgerAction,
+  type LedgerState,
+} from './ledger'
 
 /**
  * synqux demo: firebase emulator 上で counter を端末間同期する
@@ -32,12 +46,46 @@ connectDatabaseEmulator(db, '127.0.0.1', 9000)
 const params = new URLSearchParams(window.location.search)
 const groupId = params.get('group') ?? 'demo-room'
 const role = (params.get('role') ?? undefined) as PeerRole | undefined
+const stormTotal = Number(params.get('storm'))
+
+type DemoAction = CounterAction | LedgerAction
+type DemoState = SynquxSynced<DemoAction> & {
+  counter: CounterState
+  ledger: LedgerState
+}
+
+const demoInitialState: DemoState = {
+  result: null,
+  counter: counterInitialState,
+  ledger: ledgerInitialState,
+}
+
+/**
+ * createSynquxRootReducer v1 の「synced slice は1個」制約に合わせた合成 reducer。
+ * 対象 reducer の result を top-level に写し、host の成否判定を一箇所に保つ。
+ */
+const demoReducer: Reducer<DemoState> = (state = demoInitialState, action) => {
+  if (isCounterAction(action)) {
+    const counter = counterReducer(state.counter, action)
+    return { ...state, result: counter.result, counter }
+  }
+
+  if (isLedgerAction(action)) {
+    const ledger = ledgerReducer(state.ledger, action)
+    return { ...state, result: ledger.result, ledger }
+  }
+
+  return state
+}
+
+const isSyncedAction = (action: Action): action is DemoAction =>
+  isCounterAction(action) || isLedgerAction(action)
 
 const sync = createSynqux({
   transport: firebaseTransport(db),
-  isSyncedAction: isCounterAction,
+  isSyncedAction,
   ...createSynquxRootReducer({
-    synced: { counter: counterReducer },
+    synced: { demo: demoReducer },
     locals: {},
   }),
 })
@@ -53,13 +101,67 @@ const store = configureStore({
 // ---- UI (依存を増やさないため plain DOM。react を使う場合は synqux/react 参照) ----
 const el = (id: string): HTMLElement => document.getElementById(id)!
 
+let stormRunning = false
+let stormSent = 0
+let appendSequence = 0
+let nextLock = true
+
+const sleep = (milliseconds: number): Promise<void> =>
+  new Promise((resolve) => window.setTimeout(resolve, milliseconds))
+
+/**
+ * 複数タブから request をばらけさせて送る。再入を防ぎ、1 storm 内の送信数を
+ * total に固定することで、画面の sent から各タブの完走も確認できるようにする。
+ */
+const startStorm = (total: number): void => {
+  if (stormRunning || !Number.isInteger(total) || total <= 0) {
+    return
+  }
+
+  stormRunning = true
+
+  void (async () => {
+    try {
+      for (let index = 0; index < total; index += 1) {
+        await sleep(25 + Math.random() * 125)
+
+        if (Math.random() < 0.1) {
+          store.dispatch({
+            type: 'ledger/setLocked',
+            payload: nextLock,
+          })
+          nextLock = !nextLock
+        } else {
+          appendSequence += 1
+          store.dispatch({
+            type: 'ledger/append',
+            payload: {
+              by: selectSelfId(store.getState()) ?? 'anon',
+              n: appendSequence,
+            },
+          })
+        }
+
+        stormSent += 1
+        render()
+      }
+    } finally {
+      stormRunning = false
+    }
+  })()
+}
+
 el('group').textContent = groupId
 el('role').textContent = role ?? 'player'
 
 const render = (): void => {
   const state = store.getState()
 
-  el('count').textContent = String(state.counter.count)
+  el('count').textContent = String(state.demo.counter.count)
+  el('ledger-count').textContent = String(state.demo.ledger.count)
+  el('ledger-hash').textContent = state.demo.ledger.hash.slice(0, 8)
+  el('ledger-locked').textContent = String(state.demo.ledger.locked)
+  el('ledger-sent').textContent = String(stormSent)
   el('self').textContent = selectSelfId(state) ?? '(接続中...)'
   el('host').textContent = selectIsHost(state) ? 'HOST 👑' : 'client'
   el('peers').innerHTML = selectPeers(state)
@@ -70,9 +172,15 @@ const render = (): void => {
     .join('')
 
   // 判定結果は synced state を直読みする (SPEC-public-api の作法)
-  const result = state.counter.result
+  const result = state.demo.counter.result
   el('result').textContent =
     result && !result.console ? `${result.type}: ${result.message}` : ''
+
+  const ledgerResult = state.demo.ledger.result
+  el('ledger-result').textContent =
+    ledgerResult && !ledgerResult.console
+      ? `${ledgerResult.type}: ${ledgerResult.message}`
+      : ''
 }
 
 store.subscribe(render)
@@ -82,12 +190,24 @@ el('add1').onclick = () => store.dispatch({ type: 'counter/add', payload: 1 })
 el('add10').onclick = () => store.dispatch({ type: 'counter/add', payload: 10 })
 el('sub1').onclick = () => store.dispatch({ type: 'counter/add', payload: -1 })
 el('reset').onclick = () => store.dispatch({ type: 'counter/set', payload: 0 })
+el('storm50').onclick = () => startStorm(50)
+el('storm200').onclick = () => startStorm(200)
+el('lock-toggle').onclick = () =>
+  store.dispatch({
+    type: 'ledger/setLocked',
+    payload: !store.getState().demo.ledger.locked,
+  })
 
 // ---- 同期開始 (presence 登録 → snapshot restore → requests 購読) ----
 void sync
   .subscribe({ store, groupId, role })
   .then(() => {
     el('status').textContent = 'connected'
+
+    // URL 指定は subscribe 後に開始し、未接続時の request 生成を避ける。
+    if (Number.isInteger(stormTotal) && stormTotal > 0) {
+      startStorm(stormTotal)
+    }
   })
   .catch((e: unknown) => {
     console.error(e)

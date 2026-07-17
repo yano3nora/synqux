@@ -11,11 +11,16 @@
         margin: 2rem auto;
         padding: 0 1rem;
       }
-      #count {
+      #count,
+      #ledger-hash {
         font-size: 4rem;
         font-weight: bold;
         text-align: center;
         margin: 1rem 0;
+      }
+      #ledger-hash {
+        font-family: ui-monospace, monospace;
+        font-size: 2.5rem;
       }
       .buttons {
         display: flex;
@@ -27,11 +32,17 @@
         padding: 0.5rem 1rem;
         cursor: pointer;
       }
-      #result {
+      #result,
+      #ledger-result {
         color: #c00;
         min-height: 1.5em;
         text-align: center;
         margin-top: 0.5rem;
+      }
+      section {
+        border-top: 1px solid #ddd;
+        margin-top: 2rem;
+        padding-top: 1rem;
       }
       dl {
         display: grid;
@@ -56,14 +67,37 @@
       <code>?role=dedicated|observer</code> で役割を変えられる。
     </p>
 
-    <div id="count">0</div>
-    <div class="buttons">
-      <button id="sub1">-1</button>
-      <button id="add1">+1</button>
-      <button id="add10">+10</button>
-      <button id="reset">reset</button>
-    </div>
-    <p id="result"></p>
+    <section>
+      <h2>Counter</h2>
+      <div id="count">0</div>
+      <div class="buttons">
+        <button id="sub1">-1</button>
+        <button id="add1">+1</button>
+        <button id="add10">+10</button>
+        <button id="reset">reset</button>
+      </div>
+      <p id="result"></p>
+    </section>
+
+    <section>
+      <h2>Ledger stress mode</h2>
+      <strong>hash (first 8 chars)</strong>
+      <div id="ledger-hash">seed</div>
+      <dl>
+        <dt>count</dt>
+        <dd id="ledger-count">0</dd>
+        <dt>locked</dt>
+        <dd id="ledger-locked">false</dd>
+        <dt>sent (this tab)</dt>
+        <dd id="ledger-sent">0</dd>
+      </dl>
+      <div class="buttons">
+        <button id="storm50">Storm x50</button>
+        <button id="storm200">Storm x200</button>
+        <button id="lock-toggle">Lock toggle</button>
+      </div>
+      <p id="ledger-result"></p>
+    </section>
 
     <dl>
       <dt>status</dt>

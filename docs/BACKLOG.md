@@ -34,3 +34,29 @@
   - 同期の不変条件または既知トレードオフが変わる場合は `SPEC-0001-requests-sync.md` を更新する
   - simulation test で障害と回復を決定的に再現する
   - 自動回復を実装しない結論の場合も、consumer がリロード案内へ切り替えるための検知境界と運用方針を明文化する
+- **検討の方向性 (2026-07-17 考察)**:
+  1. 検知は ordering の既存観測だけで構造的に成立する。`observe()` が追跡している観測済み最大 seq が `appliedSeq + 1` を超えているのに、`appliedSeq + 1` を持つ envelope が `state.synqux.requests.entities` にも直近適用窓にも無い状態を gap とする。「fork の滞留数」等の間接指標は host 不在・dual-host 敗者待ちでも増えるため誤検知源になり、採用しない
+  2. 一時遅配との区別は「構造的 gap が T (例 30〜60s) 継続」のヒステリシスで行う。T は通知・回復の発火条件であって correctness には使わない (backlog 検討事項 3 と整合)
+  3. 段階回復は (a) requests 再購読 → (b) snapshot restore → (c) 回復不能通知。各段階は 1 回 + backoff で無限 loop を作らない。(b) は snapshot の appliedSeq が自端末以上のときだけ受理し、巻き戻りを禁止する
+  4. (a) の既知の罠: `ordering.acceptAdded` の added 重複ガードが再購読の再配送を握りつぶす。再購読時は seenAddedIds のリセットか、responded 済み envelope を dedup 前に changed 経路へ回す変更が必要
+  5. 現時点は firebase adapter に requests prune が無いため (a) で全量拾い直せるが、retention 導入後は「snapshot 地点より古いものだけ prune」の契約が (a) の成立条件になる (下記 retention 項と相互参照)
+  6. consumer 通知は event/callback API を増やさず、`state.synqux` に health (expectedSeq / maxSeenSeq / gapSince / phase) を積んで selector + `synqux/react` hook で読ませる。schema version 拒否・決定性検査失敗など console.error 止まりの異常系も同じ器に載せると診断手段 (検討事項 6) を兼ねられる
+  7. iteration を分ける: **iteration 1 = 検知 + health + consumer がリロード案内** (小さく安全、移植元事故の運用ニーズはこれで満たせる)。**iteration 2 = (a)(b) の自動回復** (二重 dispatch・巻き戻り・migration 競合のテストが揃ってから)
+
+### requests の retention (prune) が未実装
+
+- SPEC-0001 は「snapshot 地点より古い requests の prune」を transport の retention 契約として前提に書いているが、firebase adapter に prune 実装が無く requests は無限成長する
+- 復帰時の全量購読コスト・帯域・メモリがセッション長に比例して増える。長時間セッション・request 頻度の高いゲームで実害が出る
+- prune の主体 (host が snapshot 永続化後に古い requests を削除する等)、直近適用窓 (200)・敗者救済・gap 回復の再購読との整合、途中参加端末が「snapshot + prune 後の requests」だけで追いつけることを設計で保証する
+
+### 切断・再接続の presence 再登録
+
+- firebase SDK は WebSocket を自動再接続するが、切断中に onDisconnect が発火して connections entry が消えた場合、復帰後に自分を再登録する経路が無い。他端末からは不在のままで、host にも昇格できない
+- connect() 後の `.info/connected` を監視しておらず、consumer がオフラインを検知する手段も無い (移植元事故調査 B の「購読断」仮説と同型の盲点)
+- `.info/connected` の true 復帰時に presence を再 set + onDisconnect 再登録する (adapter 内で完結し core の API 拡張は不要の見込み)。オンライン状態を health (上記 gap 項の器) へ載せるかは併せて検討
+
+### 多端末同時操作の stress simulation test (CI)
+
+- memory hub 上で N 端末 × M request の並行送信 + fault 注入 (重複・遅延・drop・host 強制切断) をシード付き乱数で回し、収束後に全端末の synced state と適用列 (seq → request id) が一致することを検証する property test を CI へ追加する
+- fixture は順序敏感な state (append + running hash 等) にする。可換な counter では順序バグが素通りする
+- demo の手動 stress mode (TASK-260717-demo-stress) の CI 版に相当し、「当たり前に動く」ことの継続的な担保をこちらが担う
