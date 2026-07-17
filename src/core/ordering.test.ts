@@ -139,6 +139,9 @@ describe('createOrdering (ADR-0002)', () => {
       expect(ordering.acceptAdded('req-1')).toBe(true)
       expect(ordering.acceptAdded('req-1')).toBe(false)
       expect(ordering.acceptAdded('req-2')).toBe(true)
+
+      ordering.resetAddedGuard()
+      expect(ordering.acceptAdded('req-1')).toBe(true)
     })
   })
 

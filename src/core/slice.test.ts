@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest'
 import {
   selectIsHost,
   selectIsSyncStalled,
+  selectIsSyncUnrecoverable,
   selectPeers,
   selectSelfId,
   selectSyncHealth,
@@ -81,9 +82,22 @@ describe('synquxSlice', () => {
       }),
     )
     expect(selectIsSyncStalled({ synqux: stalled })).toBe(true)
+    expect(selectIsSyncUnrecoverable({ synqux: stalled })).toBe(false)
     expect(selectSyncHealth({ synqux: stalled }).expectedSeq).toBe(2)
 
-    const ended = reduce(stalled, synquxActions.sessionEnded())
+    const unrecoverable = reduce(
+      stalled,
+      synquxActions.healthChanged({
+        phase: 'unrecoverable',
+        expectedSeq: 2,
+        maxSeenSeq: 3,
+        gapSince: 100,
+      }),
+    )
+    expect(selectIsSyncStalled({ synqux: unrecoverable })).toBe(true)
+    expect(selectIsSyncUnrecoverable({ synqux: unrecoverable })).toBe(true)
+
+    const ended = reduce(unrecoverable, synquxActions.sessionEnded())
     expect(selectIsSyncStalled({ synqux: ended })).toBe(false)
   })
 

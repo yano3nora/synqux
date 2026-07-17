@@ -5,6 +5,7 @@ import type { Synqux } from '../core/create-synqux.js'
 import {
   selectIsHost,
   selectIsSyncStalled,
+  selectIsSyncUnrecoverable,
   selectPeers,
   selectSelfId,
   selectSyncHealth,
@@ -62,6 +63,10 @@ export const useSyncHealth = (): SynquxHealth =>
 /** 同期停止を検知済みか。standalone / runtime off 時は常に false */
 export const useIsSyncStalled = (): boolean =>
   useSelector((state) => selectIsSyncStalled(state as WithSynqux))
+
+/** 自動回復を 1 巡しても同期停止が解消せず、リロード案内が必要か */
+export const useIsSyncUnrecoverable = (): boolean =>
+  useSelector((state) => selectIsSyncUnrecoverable(state as WithSynqux))
 
 /**
  * 直近の判定結果 (reducer が積んだ result) を読む

@@ -784,8 +784,7 @@ export const createSynqux = <
     // 「id は古いが seq は新しい」request を取り逃がすため、全量購読して
     // 適用済み分は seq / 直近窓で破棄する (ADR-0002 Decision 5)。再取得コストは
     // transport の retention 契約 (snapshot 地点より古い requests の prune) で抑える
-    const unsubscribeRequests = transport.subscribeRequests(
-      {},
+    const requestHandlers: Parameters<SynquxTransport['subscribeRequests']>[1] =
       {
         onAdded: (envelope) => {
           if (rejectUnknownSchema(envelope)) {
@@ -825,11 +824,20 @@ export const createSynqux = <
           ordering.observe({ epoch: request.epoch, seq: request.seq })
           store.dispatch(synquxActions.requestChanged({ request }))
         },
-      },
-    )
+      }
+
+    // 再購読ではこの関数から同じ routing を開き直す。unsubscribe closure も
+    // 常に最新の購読を参照し、初回購読だけを解除する leak を避ける。
+    const openRequestsSubscription = (): (() => void) =>
+      transport.subscribeRequests({}, requestHandlers)
+
+    let unsubscribeRequests = openRequestsSubscription()
 
     let gapStartedAt: number | null = null
     let lastAppliedSeq = ordering.appliedSeq()
+    let recoveryStage: 'none' | 'resubscribed' | 'restored' = 'none'
+    let stageStartedAt: number | null = null
+    let recoveryInFlight = false
 
     const healthEquals = (left: SynquxHealth, right: SynquxHealth): boolean =>
       left.phase === right.phase &&
@@ -840,6 +848,75 @@ export const createSynqux = <
     const updateHealth = (health: SynquxHealth): void => {
       if (!healthEquals(store.getState().synqux.health, health)) {
         store.dispatch(synquxActions.healthChanged(health))
+      }
+    }
+
+    const resetRecovery = (): void => {
+      recoveryStage = 'none'
+      stageStartedAt = null
+      recoveryInFlight = false
+    }
+
+    const recoveryHealth = (
+      phase: Exclude<SynquxHealth['phase'], 'ok'>,
+      applied: number,
+      maxSeen: number,
+    ): SynquxHealth => ({
+      phase,
+      expectedSeq: applied + 1,
+      maxSeenSeq: maxSeen,
+      gapSince: gapStartedAt,
+    })
+
+    const subscriptionSession = { groupId }
+    session = subscriptionSession
+
+    const restoreFromLatestSnapshot = async (): Promise<void> => {
+      recoveryInFlight = true
+      const appliedBeforeLoad = ordering.appliedSeq()
+
+      try {
+        const latestPayload = await transport.loadSnapshot(groupId)
+
+        // load 中に unsubscribe されたセッションへ state を dispatch しない。
+        if (session !== subscriptionSession) {
+          return
+        }
+
+        const applied = ordering.appliedSeq()
+        const maxSeen = ordering.maxSeenSeq()
+
+        // await 中に欠落 envelope が遅着した場合は自然回復を優先する。
+        // 古い snapshot でその進行を上書きしないため、必ず await 後に再判定する。
+        if (applied > appliedBeforeLoad || maxSeen <= applied) {
+          gapStartedAt = null
+          lastAppliedSeq = applied
+          resetRecovery()
+          updateHealth(OK_HEALTH)
+          return
+        }
+
+        if (latestPayload) {
+          const envelope = parseSnapshotPayload(latestPayload)
+
+          // 同値を含む過去 snapshot は synced を巻き戻し得るため受理しない。
+          if (envelope.ordering.appliedSeq > applied) {
+            // seed と dispatch は await を挟まない同期ブロックにし、待機 fork の
+            // 適用と restore が中途半端な ordering/state の組を観測しないようにする。
+            ordering.seed(envelope.ordering)
+            store.dispatch(
+              synquxRestored({
+                synced: clearRestoredResult(envelope.synced),
+              }),
+            )
+            waker.notify()
+          }
+        }
+
+        recoveryStage = 'restored'
+        stageStartedAt = Date.now()
+      } finally {
+        recoveryInFlight = false
       }
     }
 
@@ -855,6 +932,7 @@ export const createSynqux = <
       if (!store.getState().synqux.enabled) {
         gapStartedAt = null
         lastAppliedSeq = applied
+        resetRecovery()
         updateHealth(OK_HEALTH)
         return
       }
@@ -864,6 +942,10 @@ export const createSynqux = <
 
       if (applied > lastAppliedSeq || maxSeen <= applied) {
         gapStartedAt = null
+        resetRecovery()
+        lastAppliedSeq = applied
+        updateHealth(OK_HEALTH)
+        return
       }
       lastAppliedSeq = applied
 
@@ -871,26 +953,72 @@ export const createSynqux = <
         gapStartedAt = now
       }
 
-      if (gapStartedAt !== null && now - gapStartedAt >= stallAfterMs) {
-        updateHealth({
-          phase: 'stalled',
-          expectedSeq: applied + 1,
-          maxSeenSeq: maxSeen,
-          gapSince: gapStartedAt,
+      if (gapStartedAt === null || now - gapStartedAt < stallAfterMs) {
+        updateHealth(OK_HEALTH)
+        return
+      }
+
+      if (recoveryStage === 'none') {
+        // stalled は consumer が検知できる遷移状態とし、次 heartbeat で (a) を始める。
+        if (store.getState().synqux.health.phase !== 'stalled') {
+          updateHealth(recoveryHealth('stalled', applied, maxSeen))
+          return
+        }
+
+        // (a) は配送欠落を全量再配送で治す段階。added dedup を先に reset
+        // しなければ、まさに取り直したい envelope 自体を握りつぶしてしまう。
+        ordering.resetAddedGuard()
+        unsubscribeRequests()
+        unsubscribeRequests = openRequestsSubscription()
+        recoveryStage = 'resubscribed'
+        stageStartedAt = now
+        updateHealth(recoveryHealth('recovering', applied, maxSeen))
+        return
+      }
+
+      if (store.getState().synqux.health.phase === 'unrecoverable') {
+        updateHealth(recoveryHealth('unrecoverable', applied, maxSeen))
+        return
+      }
+
+      updateHealth(recoveryHealth('recovering', applied, maxSeen))
+
+      if (
+        recoveryStage === 'resubscribed' &&
+        !recoveryInFlight &&
+        stageStartedAt !== null &&
+        now - stageStartedAt >= stallAfterMs
+      ) {
+        // (b) は isApplied ガードで再配送が効かない dual-host 早期適用を、
+        // 正史 snapshot へ置換して治す段階。
+        void restoreFromLatestSnapshot().catch((error: unknown) => {
+          console.error(error)
+          if (session === subscriptionSession) {
+            recoveryStage = 'restored'
+            stageStartedAt = Date.now()
+          }
         })
         return
       }
 
-      updateHealth(OK_HEALTH)
+      if (
+        recoveryStage === 'restored' &&
+        stageStartedAt !== null &&
+        now - stageStartedAt >= stallAfterMs
+      ) {
+        // 1 gap エピソード 1 巡で止める。無限 retry は transport 障害時の
+        // 帯域消費と consumer の reload loop を作るだけで、correctness を増さない。
+        updateHealth(recoveryHealth('unrecoverable', applied, maxSeen))
+      }
     }, HEALTH_CHECK_INTERVAL_MS)
-
-    session = { groupId }
 
     return async () => {
       clearInterval(healthTimer)
       unsubscribePeers()
       unsubscribeRequests()
-      session = null
+      if (session === subscriptionSession) {
+        session = null
+      }
       store.dispatch(synquxActions.sessionEnded())
       await transport.disconnect()
     }

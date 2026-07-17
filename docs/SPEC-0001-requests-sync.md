@@ -84,13 +84,13 @@ client                      firebase                     host
 | ① 順序記録の二重記録 (v1 の revisions 二重追記): host の response ack 遅延時に記録が競合する | snapshot へ載せる順序状態を ack await の**前**に評価固定 (Phase 1 で修正、seq 版でも継続) | `src/core/create-synqux.ts` (host 裁定 fork)、再現テスト: `src/core/characterization.test.ts` |
 | ② clock skew による request の取りこぼし (v1 の isDelayed ドロップ) | **seq 化で機構ごと根絶** (Phase 3 / ADR-0002)。順序が request id と無関係になり、遅配 request は次の seq を貰って普通に適用される | 反転テスト: `src/core/characterization.test.ts` |
 | ①′ responseListener の二重 dispatch 窓: check-then-act (isApplied チェック → dispatch → await → markApplied) の窓に同一 changed の同時二重配送が入ると二重適用され、**非冪等 action が静かに壊れる** | dispatch 直前に同期的な処理中ガード (`ordering.beginProcessing`) を立て、markApplied 後 finally で解放 (synqux Phase 1 で修正)。失敗時は解放して再配送での retry 余地を残す | `src/core/create-synqux.ts` (responseListener) / `src/core/ordering.ts`、再現テスト: `src/core/characterization.test.ts` |
+| response 永久欠落 / dual-host 早期適用による seq gap | sync health で検知し、requests 再購読 → snapshot restore を 1 巡。失敗時だけ unrecoverable を通知 (ADR-0004) | `src/core/create-synqux.ts`、再現テスト: `src/core/recovery.test.ts` |
 
 ### 既知トレードオフ (仕様として明文化)
 
-- **dual-host 窓の一時分岐**: presence 遅延で 2 端末が host を自認した窓 (host は最新接続端末のため、新規参加のたびに短時間開く) で、異なる request が同一 seq を得ることがある。正史 (host + snapshot + 封筒の seq) は常に一本道で壊れず、未適用の端末は決定的 tiebreak で同じ勝者に合意し、敗者は再裁定で救済される。ただし**勝者到着前に敗者を適用してしまった端末**は救済されない: 勝者を適用する機会を失って表示が正史からズレ、さらに敗者の再裁定 seq を適用済み扱いで破棄するため appliedSeq が進まなくなり、下記「配送の永久欠落による stall」と同型の停止に合流する (机上分析。再現 simulation test は BACKLOG の gap 項)。この端末が host に昇格すると直列裁定ゲートにより群全体の裁定も止まる (新規参加による host 移動で群は解除、当該端末はリロードまで停止)。冪等 action 設計 (設計ガイドライン 1) が緩和するのは二重適用と表示ズレの実害であり、stall は防げない
+- **dual-host 窓の一時分岐**: presence 遅延で 2 端末が host を自認した窓 (host は最新接続端末のため、新規参加のたびに短時間開く) で、異なる request が同一 seq を得ることがある。正史 (host + snapshot + 封筒の seq) は常に一本道で壊れず、未適用の端末は決定的 tiebreak で同じ勝者に合意し、敗者は再裁定で救済される。ただし**勝者到着前に敗者を適用してしまった端末**は、勝者を適用する機会を失い、敗者の再裁定 seq も適用済み扱いで破棄して stall する。この端末が host に昇格すると直列裁定ゲートにより群全体の裁定も止まる。sync health の snapshot restore で正史へ戻り、群の裁定も再開する (再現: `src/core/recovery.test.ts`)
 - **敗者救済の範囲は直近適用窓 (200 件) まで**: 窓より古い敗者は正史との区別記録がなく、適用済み扱いで破棄される (v1 は敗者救済ゼロだったため純増の改善)
-- **配送の永久欠落による stall**: ある seq の envelope を端末が受け取り損ねると、その端末の適用がそこで止まる (v1 の prev 欠落と同クラス)。復旧はリロード (snapshot restore) 経路
-- **端末ローカル視界のズレは自動で戻らない (本基盤の最重要トレードオフ)**: 上記の dual-host 早期適用と配送欠落は、いずれも「端末のローカル視界が正史から乖離したまま停止し、リロードでしか回復しない」同一クラスの 2 症状。検知は sync health (`selectSyncHealth` / `selectIsSyncStalled`) で提供済み (ADR-0003)。自動回復は BACKLOG iteration 2 で扱う
+- **回復不能な seq gap はリロードが必要**: 配送欠落は requests 再購読、dual-host 早期適用は snapshot restore で自動回復する (ADR-0004)。各段階は 1 gap エピソードにつき 1 回だけで、snapshot が無い・自端末以下など 1 巡で戻れない場合は `unrecoverable` となる。この場合だけ consumer がリロードを案内する。遅着で gap が自然解消すれば `unrecoverable` からも `ok` へ戻る
 
 NOTE: `markApplied` を dispatch **前**へ前倒しする案は不可 (dispatch 失敗時にその seq が永久欠番となり全端末が停止する)。dispatch 直後 (同期) に行うのが正しい位置 — これにより「entity は消えたが appliedSeq が進んでいない」観測窓も消える。①′の処理中ガードは seq 待機ループの途中で立ててはいけない (待機中に fork が死ぬと誰もその request を処理できなくなる)。
 
@@ -111,7 +111,7 @@ NOTE: `markApplied` を dispatch **前**へ前倒しする案は不可 (dispatch
 2. ~~**既知の問題の修正**: ①の concat 評価固定 / ①′の処理中 Set ガード~~ → **Phase 1 で対応済み**。consumer 側の toggle 系 action の set 化は残タスク
 3. ~~**host 採番の連番導入**~~ → **Phase 3 で対応済み** (ADR-0002)。②は機構ごと根絶
 4. ~~**同時操作の負荷実測**~~ → **Phase 3 で対応済み** (`src/core/protocol-latency.test.ts`)。イベント駆動化後は直列 2ms/req・migration 回復 10ms (v1 比 ~96x / ~51x)
-5. ~~**seq gap の検知と consumer 通知**~~ → **sync health iteration 1 で対応済み** (ADR-0003)。自動回復は BACKLOG iteration 2
+5. ~~**seq gap の検知・自動回復・consumer 通知**~~ → **sync health iteration 1 / 2 で対応済み** (ADR-0003 / ADR-0004)
 6. **snapshot 書き込み削減**: 全量 JSON set を N request ごとなどへ (帯域コストが問題化してから。policy 点は `persistSnapshot` に隔離済み)
 
 ## Trouble Shooting: 同期不具合の調査手順

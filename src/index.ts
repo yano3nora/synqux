@@ -40,6 +40,7 @@ export {
 export {
   selectIsHost,
   selectIsSyncStalled,
+  selectIsSyncUnrecoverable,
   selectPeers,
   selectSelfId,
   selectSyncHealth,

@@ -58,9 +58,9 @@ export type SynquxSynced<TAction extends Action = Action> = {
   result: Result<TAction> | null
 }
 
-/** 端末ローカルの seq gap 検知結果。stalled の回復手段はリロード */
+/** 端末ローカルの seq gap 検知・自動回復状態 */
 export type SynquxHealth = {
-  phase: 'ok' | 'stalled'
+  phase: 'ok' | 'stalled' | 'recovering' | 'unrecoverable'
   expectedSeq: number | null
   maxSeenSeq: number | null
   gapSince: number | null
@@ -206,6 +206,7 @@ export function selectPeers(root: { synqux: SynquxState }): Peer[]
 export function selectSelfId(root: { synqux: SynquxState }): Peer['id'] | null
 export function selectSyncHealth(root: { synqux: SynquxState }): SynquxHealth
 export function selectIsSyncStalled(root: { synqux: SynquxState }): boolean
+export function selectIsSyncUnrecoverable(root: { synqux: SynquxState }): boolean
 
 // NOTE: selectLatestResult は提供しない (レビューで廃止決定)
 // result は consumer 自身の synced state の所有物であり SynquxSynced 契約で型も見えるため
@@ -245,6 +246,7 @@ export function usePeers(): Peer[]
 export function useSelfId(): Peer['id'] | null
 export function useSyncHealth(): SynquxHealth
 export function useIsSyncStalled(): boolean
+export function useIsSyncUnrecoverable(): boolean
 export function useLatestResult<TAction>(): Result<TAction> | null  // synced の位置は Provider 経由で解決
 ```
 
@@ -411,8 +413,8 @@ type SnapshotEnvelope<TSynced> = {
 
 | subpath | 主な export | 対象 |
 | --- | --- | --- |
-| `synqux` | `createSynqux` / `createSynquxRootReducer` / `synquxReducer` / `stateWithError` / `stateWithResult` / `generateResult` / `selectIsHost` / `selectPeers` / `selectSelfId` / `selectSyncHealth` / `selectIsSyncStalled` / `localStorageSnapshotStore` / 型 (`SynquxSynced` / `SynquxHealth` / `Result` / `Peer` / `SynquxActionMeta` / `SynquxTransport` / `SnapshotStore` / `RequestEnvelope` / `SynquxState`) | セットアップ層 + reducer ヘルパー |
-| `synqux/react` | `SynquxProvider` / `useIsHost` / `usePeers` / `useSelfId` / `useSyncHealth` / `useIsSyncStalled` / `useLatestResult` | ゲーム開発者層 |
+| `synqux` | `createSynqux` / `createSynquxRootReducer` / `synquxReducer` / `stateWithError` / `stateWithResult` / `generateResult` / `selectIsHost` / `selectPeers` / `selectSelfId` / `selectSyncHealth` / `selectIsSyncStalled` / `selectIsSyncUnrecoverable` / `localStorageSnapshotStore` / 型 (`SynquxSynced` / `SynquxHealth` / `Result` / `Peer` / `SynquxActionMeta` / `SynquxTransport` / `SnapshotStore` / `RequestEnvelope` / `SynquxState`) | セットアップ層 + reducer ヘルパー |
+| `synqux/react` | `SynquxProvider` / `useIsHost` / `usePeers` / `useSelfId` / `useSyncHealth` / `useIsSyncStalled` / `useIsSyncUnrecoverable` / `useLatestResult` | ゲーム開発者層 |
 | `synqux/testing` | `createMemoryHub` / `verifyActionIdempotency` / `assertActionIdempotency` | consumer CI / 本 repo の simulation test |
 | `synqux/firebase` | `firebaseTransport` | Phase 2 で実装 |
 

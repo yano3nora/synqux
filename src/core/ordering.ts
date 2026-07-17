@@ -87,6 +87,9 @@ export type Ordering = {
   /** transport の added 重複配送ガード (request id ベース) */
   acceptAdded(id: RequestEnvelope['id']): boolean
 
+  /** requests 再購読の全量再配送だけを受け直すため、added の受信履歴を破棄する */
+  resetAddedGuard(): void
+
   /**
    * 同期的な処理中ガード (既知の問題①′の対策、v1 から継続)
    * dispatch 直前 (await を挟まず同期的) に立て、markApplied 後 finally で解放する。
@@ -237,6 +240,10 @@ export const createOrdering = (): Ordering => {
 
       seenAddedIds.add(id)
       return true
+    },
+
+    resetAddedGuard() {
+      seenAddedIds.clear()
     },
 
     isProcessing(id) {

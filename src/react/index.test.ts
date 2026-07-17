@@ -10,6 +10,7 @@ import {
   SynquxProvider,
   useIsHost,
   useIsSyncStalled,
+  useIsSyncUnrecoverable,
   useLatestResult,
   usePeers,
   useSelfId,
@@ -77,7 +78,7 @@ describe('synqux/react hooks', () => {
     expect(result.current?.message).toBe('forbidden')
   })
 
-  it('useSyncHealth / useIsSyncStalled は Provider 追加なしで health を読める', () => {
+  it('sync health hooks は Provider 追加なしで health を読める', () => {
     const { store, wrapper } = setup()
     store.dispatch(
       synquxActions.healthChanged({
@@ -93,6 +94,21 @@ describe('synqux/react hooks', () => {
     ).toMatchObject({ phase: 'stalled', expectedSeq: 2 })
     expect(
       renderHook(() => useIsSyncStalled(), { wrapper }).result.current,
+    ).toBe(true)
+    expect(
+      renderHook(() => useIsSyncUnrecoverable(), { wrapper }).result.current,
+    ).toBe(false)
+
+    store.dispatch(
+      synquxActions.healthChanged({
+        phase: 'unrecoverable',
+        expectedSeq: 2,
+        maxSeenSeq: 3,
+        gapSince: 100,
+      }),
+    )
+    expect(
+      renderHook(() => useIsSyncUnrecoverable(), { wrapper }).result.current,
     ).toBe(true)
   })
 

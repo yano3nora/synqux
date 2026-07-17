@@ -33,9 +33,9 @@ export type PendingRequest = {
 }
 
 export type SynquxHealth = {
-  /** 'stalled' = 適用が進まない停止を検知。回復手段はリロード */
-  phase: 'ok' | 'stalled'
-  /** stalled 時のみ数値が入る診断値。ok 時はすべて null */
+  /** stalled → recovering を 1 巡し、失敗時だけ unrecoverable になる */
+  phase: 'ok' | 'stalled' | 'recovering' | 'unrecoverable'
+  /** ok 以外の phase で数値が入る診断値 */
   expectedSeq: number | null
   maxSeenSeq: number | null
   /** gap 開始の端末ローカル時刻 (Date.now) */

@@ -17,7 +17,7 @@ describe('sync health', () => {
     vi.useRealTimers()
   })
 
-  it('1 端末だけ response が欠落して後続 seq を観測すると stalled になる', async () => {
+  it('1 端末だけ response が欠落して後続 seq を観測すると回復を開始する', async () => {
     const hub = createMemoryHub()
     const a = createHubClient(hub, { stallAfterMs: STALL_AFTER_MS })
     const b = createHubClient(hub, { stallAfterMs: STALL_AFTER_MS })
@@ -42,7 +42,7 @@ describe('sync health', () => {
 
     const health = selectSyncHealth(a.store.getState())
     expect(health).toMatchObject({
-      phase: 'stalled',
+      phase: 'recovering',
       expectedSeq: 1,
       maxSeenSeq: 2,
     })
@@ -126,7 +126,7 @@ describe('sync health', () => {
     })
   })
 
-  it('dual-host 敗者を先に適用した端末は再裁定 seq を破棄して stalled になる', async () => {
+  it('dual-host 敗者を先に適用した端末は再裁定 seq を破棄して回復を開始する', async () => {
     const hub = createMemoryHub()
     const a = createHubClient(hub, { stallAfterMs: STALL_AFTER_MS })
     const b = createHubClient(hub, { stallAfterMs: STALL_AFTER_MS })
@@ -192,7 +192,7 @@ describe('sync health', () => {
 
     await vi.advanceTimersByTimeAsync(STALL_AFTER_MS + 1_000)
     expect(selectSyncHealth(a.store.getState())).toMatchObject({
-      phase: 'stalled',
+      phase: 'recovering',
       expectedSeq: 2,
       maxSeenSeq: 2,
     })

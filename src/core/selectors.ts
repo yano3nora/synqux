@@ -38,4 +38,7 @@ export const selectSyncHealth = (root: WithSynqux): SynquxHealth =>
   root.synqux.health
 
 export const selectIsSyncStalled = (root: WithSynqux): boolean =>
-  selectSyncHealth(root).phase === 'stalled'
+  selectSyncHealth(root).phase !== 'ok'
+
+export const selectIsSyncUnrecoverable = (root: WithSynqux): boolean =>
+  selectSyncHealth(root).phase === 'unrecoverable'

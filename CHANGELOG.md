@@ -8,6 +8,12 @@
 
 - seq gap が継続して同期適用が止まった端末を `state.synqux.health` で検知する sync health (ADR-0003)
 - `stallAfterMs` 設定、`selectSyncHealth` / `selectIsSyncStalled`、`useSyncHealth` / `useIsSyncStalled`
+- seq gap を requests 再購読 → snapshot restore の 1 巡で自動回復する段階制御 (ADR-0004)
+- `recovering` / `unrecoverable` phase、`selectIsSyncUnrecoverable` / `useIsSyncUnrecoverable`
+
+### Changed
+
+- `selectIsSyncStalled` / `useIsSyncStalled` は回復中・回復不能を含む `phase !== 'ok'` を返す。リロード案内は `*IsSyncUnrecoverable` を使う
 
 ## [0.2.0] - 2026-07-05
 
