@@ -242,6 +242,14 @@ export type SynquxTransport = SnapshotStore & {
   ): Promise<void>
 
   /**
+   * 適用窓より古い requests の削除 (retention、ADR-0005)。optional —
+   * 未実装の transport では prune されないだけで correctness に影響しない。
+   * 契約: 「数値 seq を持ち seq < beforeSeq の envelope」だけを削除する。
+   * seq なし (未裁定) は削除しない。削除イベントの配送は不要
+   */
+  pruneRequests?(beforeSeq: number): Promise<void>
+
+  /**
    * requests の変更購読
    *
    * - after 指定時は「id が after より後の requests」のみを対象とする

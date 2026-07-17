@@ -66,7 +66,9 @@ const h = vi.hoisted(() => {
       constraints,
     })),
     orderByKeyMock: vi.fn(() => 'orderByKey'),
+    orderByChildMock: vi.fn((path: string) => `orderByChild:${path}`),
     startAfterMock: vi.fn((value: string) => `startAfter:${value}`),
+    endBeforeMock: vi.fn((value: number) => `endBefore:${value.toString()}`),
     serverTimestampMock: vi.fn(() => ({ '.sv': 'timestamp' })),
   }
 })
@@ -85,7 +87,9 @@ vi.mock('firebase/database', () => ({
   onDisconnect: h.onDisconnectMock,
   query: h.queryMock,
   orderByKey: h.orderByKeyMock,
+  orderByChild: h.orderByChildMock,
   startAfter: h.startAfterMock,
+  endBefore: h.endBeforeMock,
   serverTimestamp: h.serverTimestampMock,
 }))
 
@@ -95,8 +99,8 @@ import { firebaseTransport } from './index.js'
 const DB = { app: 'stub' } as never
 const GROUP_ID = 'game-1'
 
-const connect = async () => {
-  const transport = firebaseTransport(DB)
+const connect = async (options?: { archivePrunedRequests?: boolean }) => {
+  const transport = firebaseTransport(DB, options)
   const { selfId } = await transport.connect({
     groupId: GROUP_ID,
     role: 'player',
@@ -249,6 +253,84 @@ describe('firebaseTransport', () => {
     expect(handlers.onAdded).toHaveBeenCalledWith(
       expect.objectContaining({ id: 'req-1' }),
     )
+  })
+
+  it('pruneRequests: archive off (既定) で seq なしを除外し、閾値未満だけを削除する', async () => {
+    h.pushKeys.push('conn-1')
+    const { transport } = await connect()
+    h.getMock.mockResolvedValueOnce({
+      exists: () => true,
+      val: () => null,
+      forEach: (
+        callback: (snap: { key: string; val: () => unknown }) => void,
+      ) => {
+        callback({ key: 'pending', val: () => ({ requestedBy: 'peer' }) })
+        callback({ key: 'old', val: () => ({ seq: 4 }) })
+        callback({ key: 'boundary', val: () => ({ seq: 5 }) })
+        return false
+      },
+    } as never)
+
+    await transport.pruneRequests!(5)
+
+    expect(h.queryMock.mock.calls.at(-1)?.slice(1)).toEqual([
+      'orderByChild:seq',
+      'endBefore:5',
+    ])
+    expect(h.updateMock).toHaveBeenCalledTimes(1)
+    expect(h.updateMock).toHaveBeenCalledWith(
+      expect.objectContaining({ path: `requests/${GROUP_ID}` }),
+      { old: null },
+    )
+  })
+
+  it('pruneRequests: archive on で requests から logs へ root-level update 1 回で退避する', async () => {
+    h.pushKeys.push('conn-1')
+    const { transport } = await connect({ archivePrunedRequests: true })
+    const oldEnvelope = { seq: 4, action: { type: 'game/old' } }
+    h.getMock.mockResolvedValueOnce({
+      exists: () => true,
+      val: () => null,
+      forEach: (
+        callback: (snap: { key: string; val: () => unknown }) => void,
+      ) => {
+        callback({ key: 'pending', val: () => ({ requestedBy: 'peer' }) })
+        callback({ key: 'old', val: () => oldEnvelope })
+        callback({ key: 'boundary', val: () => ({ seq: 5 }) })
+        return false
+      },
+    } as never)
+
+    await transport.pruneRequests!(5)
+
+    expect(h.updateMock).toHaveBeenCalledTimes(1)
+    expect(h.updateMock).toHaveBeenCalledWith(
+      expect.objectContaining({ path: undefined }),
+      {
+        [`requests/${GROUP_ID}/old`]: null,
+        [`logs/${GROUP_ID}/old`]: oldEnvelope,
+      },
+    )
+  })
+
+  it('pruneRequests: 対象が無いときは update を呼ばない', async () => {
+    h.pushKeys.push('conn-1')
+    const { transport } = await connect({ archivePrunedRequests: true })
+    h.getMock.mockResolvedValueOnce({
+      exists: () => true,
+      val: () => null,
+      forEach: (
+        callback: (snap: { key: string; val: () => unknown }) => void,
+      ) => {
+        callback({ key: 'pending', val: () => ({ requestedBy: 'peer' }) })
+        callback({ key: 'boundary', val: () => ({ seq: 5 }) })
+        return false
+      },
+    } as never)
+
+    await transport.pruneRequests!(5)
+
+    expect(h.updateMock).not.toHaveBeenCalled()
   })
 
   it('saveSnapshot / loadSnapshot: games/{key} に不透明文字列をそのまま読み書きする', async () => {

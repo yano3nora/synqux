@@ -10,6 +10,8 @@
 - `stallAfterMs` 設定、`selectSyncHealth` / `selectIsSyncStalled`、`useSyncHealth` / `useIsSyncStalled`
 - seq gap を requests 再購読 → snapshot restore の 1 巡で自動回復する段階制御 (ADR-0004)
 - `recovering` / `unrecoverable` phase、`selectIsSyncUnrecoverable` / `useIsSyncUnrecoverable`
+- snapshot ack 後に適用窓の外だけを削除する requests retention。optional な `SynquxTransport.pruneRequests` と memory / Firebase adapter 実装 (ADR-0005)
+- prune 対象の request を `logs/` へ原子的に退避し、全量 replay 調査を維持する Firebase adapter の `archivePrunedRequests` option
 
 ### Changed
 

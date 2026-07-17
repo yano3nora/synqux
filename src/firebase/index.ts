@@ -1,10 +1,12 @@
 import {
+  endBefore,
   get,
   onChildAdded,
   onChildChanged,
   onChildRemoved,
   onDisconnect,
   onValue,
+  orderByChild,
   orderByKey,
   push,
   query,
@@ -25,13 +27,17 @@ import type { Peer, RequestEnvelope, SynquxTransport } from '../core/types.js'
  * データ配置は移植元テンプレートと同一:
  * - `connections/{groupId}/{peerId}` — presence (onDisconnect で自動削除)
  * - `requests/{groupId}/{requestId}` — request 封筒 (push id 採番 = 挿入順辞書順)
+ * - `logs/{groupId}/{requestId}` — prune 済み request の調査ログ (opt-in)
  * - `games/{groupId}` — snapshot (canonical JSON 文字列)
  *
  * 前提: firebase auth (匿名認証等) は consumer が transport 生成前に済ませること。
  * at-least-once の吸収 (重複・遅延・振り分け) は core の責務のため、この adapter は
  * 観測したイベントを素朴に流すだけでよい (SynquxTransport 契約 3)
  */
-export const firebaseTransport = (db: Database): SynquxTransport => {
+export const firebaseTransport = (
+  db: Database,
+  options?: { archivePrunedRequests?: boolean },
+): SynquxTransport => {
   // 接続セッション。connect() 成功後に確定し、disconnect() で破棄する
   let session: {
     groupId: string
@@ -50,6 +56,7 @@ export const firebaseTransport = (db: Database): SynquxTransport => {
 
   const connectionsPath = (groupId: string) => `connections/${groupId}`
   const requestsPath = (groupId: string) => `requests/${groupId}`
+  const logsPath = (groupId: string) => `logs/${groupId}`
   const snapshotPath = (key: string) => `games/${key}`
 
   /**
@@ -185,6 +192,51 @@ export const firebaseTransport = (db: Database): SynquxTransport => {
         responsedBy: patch.responsedBy,
         result: patch.result,
       })
+    },
+
+    async pruneRequests(beforeSeq) {
+      const { groupId } = requireSession()
+      const requestsRef = ref(db, requestsPath(groupId))
+      const target = query(
+        requestsRef,
+        orderByChild('seq'),
+        endBefore(beforeSeq),
+      )
+      const snapshot = await get(target)
+      const deletions: Record<string, null> = {}
+      const archives: Record<string, unknown> = {}
+
+      snapshot.forEach((child) => {
+        const envelope = child.val() as Partial<RequestEnvelope> | null
+
+        // RTDB は orderByChild の対象キーが無い child を数値より前に並べる。
+        // query 結果だけを信用すると未裁定 request まで消すため、必ず再検査する。
+        if (
+          child.key !== null &&
+          typeof envelope?.seq === 'number' &&
+          envelope.seq < beforeSeq
+        ) {
+          deletions[child.key] = null
+          archives[child.key] = envelope
+        }
+      })
+
+      if (Object.keys(deletions).length > 0) {
+        if (options?.archivePrunedRequests) {
+          const moves: Record<string, unknown> = {}
+
+          for (const [id, envelope] of Object.entries(archives)) {
+            moves[`${requestsPath(groupId)}/${id}`] = null
+            moves[`${logsPath(groupId)}/${id}`] = envelope
+          }
+
+          // requests から消え、logs にも無い中間状態を作らないよう、
+          // root-level multi-path update 1 回で削除と調査ログへの退避を原子的に行う。
+          await update(ref(db), moves)
+        } else {
+          await update(requestsRef, deletions)
+        }
+      }
     },
 
     subscribeRequests({ after }, handlers) {

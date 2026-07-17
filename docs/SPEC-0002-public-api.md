@@ -301,8 +301,9 @@ NOTE: 専用の `createSimulation` ハーネスは**公開しない** (実装時
  * 2. respondRequest は永続化 ack で resolve すること (楽観 resolve 禁止)
  * 3. 配送は at-least-once。重複・遅延・順序入れ替えは core 側が吸収するので
  *    adapter で頑張って直列化しなくてよい (素朴に流す)
- * 4. 【retention 契約】最新 snapshot 地点より新しい requests を保持しなければならない。
- *    requests を prune する transport (TTL 等) はこの線より過去のみ削除できる
+ * 4. 【retention 契約】pruneRequests は「数値 seq < beforeSeq」のみ requests から
+ *    取り除く (物理削除または logs への退避)。seq なし (未裁定) は取り除かない。snapshot 地点との整合は core が
+ *    prune 線を適用窓の外に揃えることで保証する (ADR-0005)
  * 5. connect した peer の切断時、onRemoved が全端末で発火すること (onDisconnect 相当の
  *    presence cleanup を adapter が保証する)
  */
@@ -340,6 +341,9 @@ export type SynquxTransport = SnapshotStore & {
     patch: { epoch: number; seq: number; responsedBy: Peer['id']; result: string | null },
   ): Promise<void>
 
+  /** 数値 seq < beforeSeq だけを requests から取り除く。未実装でも correctness は不変 */
+  pruneRequests?(beforeSeq: number): Promise<void>
+
   subscribeRequests(
     options: { after?: string },  // NOTE: core は v2 (seq 順序) では使わない。prune 済み transport 向けに残置 (ADR-0002 Decision 5)
     handlers: {
@@ -361,6 +365,7 @@ export type SynquxTransport = SnapshotStore & {
 | `serverNow` | `.info/serverTimeOffset` 補正 | `currentServerTimestamp()` |
 | `pushRequest` | `push()` (push id = 挿入順辞書順単調・端末時計依存) | `create-request.ts` |
 | `respondRequest` | `update()` (ack で resolve — local echo が先に発火する点が既知の問題①の再現条件) | `response-to-request.ts` |
+| `pruneRequests` | `orderByChild('seq').endBefore(beforeSeq)` で取得し、seq なしをコード側で除外。既定は requests から物理削除、`archivePrunedRequests` 有効時は root-level multi-path `update()` で `logs/` へ原子的に退避 | なし |
 | `subscribeRequests` | `onChildAdded` / `onChildChanged` + `orderByKey().startAfter(after)` | `subscribe-requests.ts` / `game-requests-query.ts` |
 | `saveSnapshot` | `set(ref, payload)` (payload は文字列なので undefined 落ち・空配列消失が起きない) | `update-game-state.ts` |
 
@@ -416,7 +421,7 @@ type SnapshotEnvelope<TSynced> = {
 | `synqux` | `createSynqux` / `createSynquxRootReducer` / `synquxReducer` / `stateWithError` / `stateWithResult` / `generateResult` / `selectIsHost` / `selectPeers` / `selectSelfId` / `selectSyncHealth` / `selectIsSyncStalled` / `selectIsSyncUnrecoverable` / `localStorageSnapshotStore` / 型 (`SynquxSynced` / `SynquxHealth` / `Result` / `Peer` / `SynquxActionMeta` / `SynquxTransport` / `SnapshotStore` / `RequestEnvelope` / `SynquxState`) | セットアップ層 + reducer ヘルパー |
 | `synqux/react` | `SynquxProvider` / `useIsHost` / `usePeers` / `useSelfId` / `useSyncHealth` / `useIsSyncStalled` / `useIsSyncUnrecoverable` / `useLatestResult` | ゲーム開発者層 |
 | `synqux/testing` | `createMemoryHub` / `verifyActionIdempotency` / `assertActionIdempotency` | consumer CI / 本 repo の simulation test |
-| `synqux/firebase` | `firebaseTransport` | Phase 2 で実装 |
+| `synqux/firebase` | `firebaseTransport(db, options?: { archivePrunedRequests?: boolean })` | Phase 2 で実装 |
 
 隠蔽の確認 (Decision 7): ゲーム開発者層 (`synqux/react` + reducer ヘルパー + selector) に request / prev / revisions の語彙は一切出ない。`RequestEnvelope` / `SynquxTransport` は adapter 実装者 (= 我々) 向けで、セットアップ層のドキュメントに隔離する。
 

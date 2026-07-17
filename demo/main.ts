@@ -82,7 +82,7 @@ const isSyncedAction = (action: Action): action is DemoAction =>
   isCounterAction(action) || isLedgerAction(action)
 
 const sync = createSynqux({
-  transport: firebaseTransport(db),
+  transport: firebaseTransport(db, { archivePrunedRequests: true }),
   isSyncedAction,
   ...createSynquxRootReducer({
     synced: { demo: demoReducer },

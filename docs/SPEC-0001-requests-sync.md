@@ -33,8 +33,8 @@
     - reducer は logic validation に失敗したら state を変えず `state.result` に error を積む。host は `rootReducer` を試し実行し、`selectSynced(next).result.type` (`error` / `success`) で request の受理・拒否を判定する
     - → 成否判定器は reducer ただ一つ。host / client / 同期なし (standalone) でロジックが分岐せず、reducer さえ堅牢なら同期しても壊れない
 - **snapshot と restore** — `src/core/snapshot.ts`, `src/core/create-synqux.ts` (`subscribe` / `persistSnapshot`)
-    - host は request を 1 件処理するたびに synced state 全体を canonical JSON の封筒で永続化する (封筒には順序状態 = epoch / appliedSeq / 直近適用窓も載る)。復帰端末は snapshot を復元してから requests を全量購読し、適用済み分は seq で破棄して追いつく
-    - → 途中参加・リロード・host migration をまたいでも状態と順序保証が継続する
+    - host は request を 1 件処理するたびに synced state 全体を canonical JSON の封筒で永続化する (封筒には順序状態 = epoch / appliedSeq / 直近適用窓も載る)。ack 後、適用窓の外 (`seq < appliedSeq - 200`) を fire-and-forget で prune する (ADR-0005)。復帰端末は snapshot を復元してから残存 requests を全量購読し、適用済み分は seq で破棄して追いつく
+    - → 途中参加・リロード・host migration をまたいでも状態と順序保証が継続し、requests の保存量はセッション長に比例しない
 
 ## 同期の仕組み
 
@@ -85,6 +85,7 @@ client                      firebase                     host
 | ② clock skew による request の取りこぼし (v1 の isDelayed ドロップ) | **seq 化で機構ごと根絶** (Phase 3 / ADR-0002)。順序が request id と無関係になり、遅配 request は次の seq を貰って普通に適用される | 反転テスト: `src/core/characterization.test.ts` |
 | ①′ responseListener の二重 dispatch 窓: check-then-act (isApplied チェック → dispatch → await → markApplied) の窓に同一 changed の同時二重配送が入ると二重適用され、**非冪等 action が静かに壊れる** | dispatch 直前に同期的な処理中ガード (`ordering.beginProcessing`) を立て、markApplied 後 finally で解放 (synqux Phase 1 で修正)。失敗時は解放して再配送での retry 余地を残す | `src/core/create-synqux.ts` (responseListener) / `src/core/ordering.ts`、再現テスト: `src/core/characterization.test.ts` |
 | response 永久欠落 / dual-host 早期適用による seq gap | sync health で検知し、requests 再購読 → snapshot restore を 1 巡。失敗時だけ unrecoverable を通知 (ADR-0004) | `src/core/create-synqux.ts`、再現テスト: `src/core/recovery.test.ts` |
+| requests の無限成長 | snapshot ack 後、既存仕様ですでに破棄対象となる適用窓の外だけを host が prune (ADR-0005) | `src/core/create-synqux.ts` / transport adapter、再現テスト: `src/core/retention.test.ts` |
 
 ### 既知トレードオフ (仕様として明文化)
 
@@ -117,6 +118,8 @@ NOTE: `markApplied` を dispatch **前**へ前倒しする案は不可 (dispatch
 ## Trouble Shooting: 同期不具合の調査手順
 
 requests / game state の export があれば、端末ログなしで大半を確定できる。
+
+**retention 導入後に requests export だけで遡れるのは「snapshot + 直近適用窓」まで**。既定の物理削除で運用する場合、全履歴が必要な事故調査では発生直後に export を取得すること。Firebase adapter の `archivePrunedRequests` を有効にした場合は、`logs/{groupId}` と `requests/{groupId}` の export を seq 順に結合すれば、prune 後も全量 replay 調査ができる。
 
 1. **requests export と state export を取る** (`requests/{gameId}` と `games/{gameId}`。state は JSON 文字列として格納されている点に注意)
 2. **まず requestedBy / responsedBy を見る**: 誰が操作し、誰が host だったか。複数プレイヤー交錯説・host migration の有無はここで数分で判定できる

@@ -77,6 +77,10 @@ export const counterReducer: Reducer<CounterState> = (
 
 セットアップ層はテンプレに 1 ファイル。feature 開発者は触らない (全文: [demo/main.ts](./demo/main.ts))。firebase の匿名認証等は transport 生成前に済ませること。
 
+Firebase RTDB の rules では retention query 用に `requests/$groupId` へ `".indexOn": ["seq"]` を設定することを推奨する。
+prune 後も全量 replay 調査を可能にするには `firebaseTransport(db, { archivePrunedRequests: true })` で削除対象を `logs/` へ退避できる。
+`logs/` は無限成長するため、容量とグループ破棄時の削除は consumer 側で管理する。
+
 ```ts
 import { configureStore } from '@reduxjs/toolkit'
 import { createSynqux, createSynquxRootReducer } from 'synqux'

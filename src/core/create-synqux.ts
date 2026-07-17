@@ -8,7 +8,11 @@ import {
   type UnknownAction,
 } from '@reduxjs/toolkit'
 import { waitUntilOrFail } from '@yano3nora/ts-utils'
-import { createOrdering, type OrderingState } from './ordering.js'
+import {
+  APPLIED_WINDOW_SIZE,
+  createOrdering,
+  type OrderingState,
+} from './ordering.js'
 import { selectIsHost } from './selectors.js'
 import {
   buildSnapshotPayload,
@@ -191,6 +195,7 @@ export const createSynqux = <
 
   // 処理済みリスト等の同期状態はすべてインスタンス内部に持つ (Decision 3)
   const ordering = createOrdering()
+  let lastPrunedBeforeSeq = 0
 
   // 待機 fork をイベントで起こすシグナル。notify 点は「state 変化 = 再評価に
   // 値する事象」に限る: peer 増減 / request 受信 / 適用完了
@@ -515,6 +520,21 @@ export const createSynqux = <
             })
 
             await persistSnapshot(config.selectSynced(next), orderingState)
+
+            // 窓の外は既存仕様ですでに適用済み扱いで破棄されるため、削除しても
+            // 端末挙動は変わらない。snapshot ack 前に固定した同じ orderingState
+            // から安全線を求め、live ordering の先行を誤って prune 線へ混ぜない。
+            const beforeSeq = orderingState.appliedSeq - APPLIED_WINDOW_SIZE
+            if (
+              beforeSeq > 1 &&
+              beforeSeq > lastPrunedBeforeSeq &&
+              transport.pruneRequests
+            ) {
+              lastPrunedBeforeSeq = beforeSeq
+              // retention は correctness のクリティカルパスではない。失敗時は
+              // 後続 snapshot のより新しい閾値で再試行されるため待たない。
+              void transport.pruneRequests(beforeSeq).catch(console.error)
+            }
           } catch (e) {
             // reducer 内で throw された時用 (transport 失敗もここに落ちる)
             console.error(e)

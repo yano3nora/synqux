@@ -36,6 +36,8 @@ counter の加算は適用順が入れ替わっても同じ値になるため、
    `?storm=200` 付きの同じ URL で開いて自動開始してもよい
 4. storm 終了後、すべての request が静穏化するまで待つ
 
+200 件を超えて prune された request は `logs/{groupId}` へ退避され、emulator UI で確認できる。
+
 **全タブの ledger count と hash が完全一致すれば正常**。1 つでも違えば、順序保証か
 適用一意性のバグとして扱う。
 

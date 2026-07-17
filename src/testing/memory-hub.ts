@@ -380,6 +380,14 @@ export function createMemoryHub(): MemoryHub {
         await new Promise<void>((resolve) => resolveAckNextTick(id, resolve))
       },
 
+      async pruneRequests(beforeSeq) {
+        const { group } = assertConnected()
+        group.requests = group.requests.filter(
+          (request) =>
+            typeof request.seq !== 'number' || request.seq >= beforeSeq,
+        )
+      },
+
       subscribeRequests(options, handlers) {
         const { group, peerId, groupId: boundGroupId } = assertConnected()
         const subscriber: RequestSubscriber = {

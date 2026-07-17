@@ -337,6 +337,48 @@ describe('createMemoryHub', () => {
     expect(hub.inspect.requests(GROUP_ID)[0]?.responsedBy).toBe(bId)
   })
 
+  it('pruneRequests: seq が閾値未満の裁定済み request だけを冪等に削除する', async () => {
+    const { hub, a, aId } = await connectTwo()
+    const first = await a.pushRequest(
+      createEnvelope({ requestedBy: aId, type: 'old' }),
+    )
+    const second = await a.pushRequest(
+      createEnvelope({ requestedBy: aId, type: 'kept' }),
+    )
+    const pending = await a.pushRequest(
+      createEnvelope({ requestedBy: aId, type: 'pending' }),
+    )
+
+    const firstResponse = a.respondRequest(first.id, {
+      epoch: 1,
+      seq: 1,
+      responsedBy: aId,
+      result: null,
+    })
+    const secondResponse = a.respondRequest(second.id, {
+      epoch: 1,
+      seq: 3,
+      responsedBy: aId,
+      result: null,
+    })
+    await flushDeliveries()
+    await Promise.all([firstResponse, secondResponse])
+
+    await a.pruneRequests!(3)
+    expect(hub.inspect.requests(GROUP_ID).map(({ id }) => id)).toEqual([
+      second.id,
+      pending.id,
+    ])
+
+    // 同一・後退した閾値の再実行でも、未裁定 request や残存分を巻き込まない。
+    await a.pruneRequests!(3)
+    await a.pruneRequests!(2)
+    expect(hub.inspect.requests(GROUP_ID).map(({ id }) => id)).toEqual([
+      second.id,
+      pending.id,
+    ])
+  })
+
   it('faults.disconnect / disconnect(): 全端末に onRemoved が届き、unsubscribe 後は届かない', async () => {
     const { hub, a, b, aId, bId } = await connectTwo()
     const removedA: string[] = []
@@ -414,6 +456,7 @@ describe('createMemoryHub', () => {
         result: null,
       }),
     ).rejects.toThrow('not connected')
+    await expect(transport.pruneRequests!(2)).rejects.toThrow('not connected')
     expect(() =>
       transport.subscribeRequests(
         {},
