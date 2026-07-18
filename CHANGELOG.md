@@ -17,6 +17,10 @@
 
 - `selectIsSyncStalled` / `useIsSyncStalled` は回復中・回復不能を含む `phase !== 'ok'` を返す。リロード案内は `*IsSyncUnrecoverable` を使う
 
+### Fixed
+
+- Firebase adapter が一時切断後に同じ connection id と初回 `connected` で presence を自動復元し、host 序列を変えずに候補へ復帰するよう修正 (ADR-0006)
+
 ## [0.2.0] - 2026-07-05
 
 ### Changed (BREAKING: wire format v2)

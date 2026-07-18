@@ -42,12 +42,19 @@ export const firebaseTransport = (
   let session: {
     groupId: string
     selfId: string
+    role: Peer['role'] | null
+    label: Peer['label'] | null
+    connectedAt: number | null
+    sawDisconnect: boolean
+    reregistering: Promise<void> | null
+    unsubscribeConnected?: () => void
+    disposed: boolean
   } | null = null
 
   // .info/serverTimeOffset の補正値。インスタンス内に cache する (module 変数禁止)
   let serverTimeOffset: number | null = null
 
-  const requireSession = (): { groupId: string; selfId: string } => {
+  const requireSession = () => {
     if (!session) {
       throw new Error('Firebase transport is not connected')
     }
@@ -116,17 +123,104 @@ export const firebaseTransport = (
         }),
       )
 
-      session = { groupId, selfId }
+      let connectedAt: number | null = null
+      try {
+        const registered = (await get(selfRef)).val() as {
+          connected?: unknown
+        } | null
+        if (typeof registered?.connected === 'number') {
+          connectedAt = registered.connected
+        }
+      } catch {
+        // 読み戻し不能でも初回登録自体は成功済み。再登録時だけ serverTimestamp へ戻す
+      }
+
+      const currentSession = {
+        groupId,
+        selfId,
+        role: role ?? null,
+        label: label ?? null,
+        connectedAt,
+        sawDisconnect: false,
+        reregistering: null as Promise<void> | null,
+        unsubscribeConnected: undefined as (() => void) | undefined,
+        disposed: false,
+      }
+      session = currentSession
+
+      currentSession.unsubscribeConnected = onValue(
+        ref(db, '.info/connected'),
+        (snap) => {
+          if (currentSession.disposed || session !== currentSession) {
+            return
+          }
+
+          if (snap.val() === false) {
+            currentSession.sawDisconnect = true
+            return
+          }
+
+          if (
+            snap.val() !== true ||
+            !currentSession.sawDisconnect ||
+            currentSession.reregistering
+          ) {
+            return
+          }
+
+          // await 前に処理中ガードを立て、重複する true 配送で二重登録しない
+          const attempt = (async () => {
+            // presence を先に書くと、その直後の切断で孤児レコードが残るため、
+            // 初回登録と同じく onDisconnect の再登録を set より先に完了させる。
+            await onDisconnect(selfRef).remove()
+            if (currentSession.disposed || session !== currentSession) {
+              return
+            }
+
+            await set(
+              selfRef,
+              sanitize({
+                id: selfId,
+                groupId,
+                // 再接続は新規参加ではない。初回値を維持し、不安定な端末による
+                // host 強奪・host churn を防ぐ。読み戻し不能時だけサーバ採番へ戻す。
+                connected:
+                  currentSession.connectedAt ??
+                  (serverTimestamp() as unknown as number),
+                role: currentSession.role,
+                label: currentSession.label,
+              }),
+            )
+            currentSession.sawDisconnect = false
+          })()
+
+          const reregistering = attempt
+            .catch((error: unknown) => {
+              console.error('Firebase presence re-registration failed', error)
+            })
+            .finally(() => {
+              currentSession.reregistering = null
+            })
+          currentSession.reregistering = reregistering
+        },
+      )
+
       return { selfId }
     },
 
     async disconnect() {
-      const { groupId, selfId } = requireSession()
+      const currentSession = requireSession()
+      const { groupId, selfId } = currentSession
       const selfRef = ref(db, `${connectionsPath(groupId)}/${selfId}`)
+
+      // watcher を最初に止め、進行中の再登録にも破棄を同期的に通知する。
+      currentSession.unsubscribeConnected?.()
+      currentSession.disposed = true
+      session = null
+      await currentSession.reregistering
 
       await remove(selfRef)
       await onDisconnect(selfRef).cancel()
-      session = null
     },
 
     async serverNow() {

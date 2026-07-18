@@ -305,7 +305,8 @@ NOTE: 専用の `createSimulation` ハーネスは**公開しない** (実装時
  *    取り除く (物理削除または logs への退避)。seq なし (未裁定) は取り除かない。snapshot 地点との整合は core が
  *    prune 線を適用窓の外に揃えることで保証する (ADR-0005)
  * 5. connect した peer の切断時、onRemoved が全端末で発火すること (onDisconnect 相当の
- *    presence cleanup を adapter が保証する)
+ *    presence cleanup を adapter が保証する)。切断から復帰した adapter は presence を
+ *    自動復元し、connected は初回値を維持して host 序列を変えないこと (ADR-0006)
  */
 /**
  * 不透明文字列の snapshot KV (Decision 11)。封筒構築・直列化は core の責務
@@ -361,7 +362,7 @@ export type SynquxTransport = SnapshotStore & {
 
 | interface | firebase RTDB での実装 | 移植元の対応物 |
 | --- | --- | --- |
-| `connect` / presence | 匿名 auth + `.info/connected` + `onDisconnect().remove()` | `subscribe-connections.ts` / `register-connection.ts` |
+| `connect` / presence | 匿名 auth + `.info/connected` 常駐監視 + `onDisconnect().remove()`。切断後の復帰では同じ id / 初回 `connected` で自動再登録 | `subscribe-connections.ts` / `register-connection.ts` |
 | `serverNow` | `.info/serverTimeOffset` 補正 | `currentServerTimestamp()` |
 | `pushRequest` | `push()` (push id = 挿入順辞書順単調・端末時計依存) | `create-request.ts` |
 | `respondRequest` | `update()` (ack で resolve — local echo が先に発火する点が既知の問題①の再現条件) | `response-to-request.ts` |

@@ -22,6 +22,7 @@
     - → 画面に出る state は常に「同期済み state」であり、画面と判定 state の恒常的なズレが構造上起きない
 - **host 決定ロジック** — `src/core/host.ts` (`deriveHostId`)
     - 全端末が共有する peer pool から「最新接続の dedicated、いなければ最新接続の player」を host とする純粋関数 (observer は昇格しない)
+    - 再接続時の presence 復元は初回の connected を維持するため、復帰だけで host 序列は変わらない (ADR-0006)
     - → 選挙プロトコルなしで全端末が同じ host に合意でき、host 離脱時も pool の変化だけで自動的に次の host が定まる (host migration)
 - **各端末の request 処理 fork** — `src/core/create-synqux.ts` (`requestListener`)
     - 全端末が request ごとに fork を持ち、「自分が host か」を監視し続ける。fork は request が適用されるまで生存し、dual-host 窓の敗者の再裁定も引き受ける (ADR-0002)。待機はイベント駆動 (state 変化の notify) で、ポーリングは安全網のみ

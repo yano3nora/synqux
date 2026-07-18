@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, it, vi } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 /**
  * firebase adapter の unit test (firebase SDK を全 mock、emulator 依存なし)
@@ -11,10 +11,15 @@ import { beforeEach, describe, expect, it, vi } from 'vitest'
 const h = vi.hoisted(() => {
   const refMock = vi.fn((_db: unknown, path?: string) => ({ path }))
   const pushKeys: string[] = []
+  const connectedSubscriptions: {
+    callback: (snap: { val: () => unknown }) => void
+    unsubscribe: ReturnType<typeof vi.fn>
+  }[] = []
 
   return {
     refMock,
     pushKeys,
+    connectedSubscriptions,
     pushMock: vi.fn((target: { path?: string }, value?: unknown) => {
       const key = pushKeys.shift() ?? 'generated-key'
       return Object.assign(
@@ -40,7 +45,10 @@ const h = vi.hoisted(() => {
       ) => {
         // .info/connected と serverTimeOffset は即時に値を返す接続済み想定
         if (target.path === '.info/connected') {
+          const unsubscribe = vi.fn()
+          connectedSubscriptions.push({ callback, unsubscribe })
           callback({ val: () => true })
+          return unsubscribe
         }
         if (target.path === '.info/serverTimeOffset') {
           callback({ val: () => 500 })
@@ -111,6 +119,11 @@ const connect = async (options?: { archivePrunedRequests?: boolean }) => {
 beforeEach(() => {
   vi.clearAllMocks()
   h.pushKeys.length = 0
+  h.connectedSubscriptions.length = 0
+})
+
+afterEach(() => {
+  vi.restoreAllMocks()
 })
 
 describe('firebaseTransport', () => {
@@ -134,6 +147,82 @@ describe('firebaseTransport', () => {
     expect(value.groupId).toBe(GROUP_ID)
     expect(value.role).toBe('player')
     expect(value.label).toBeNull()
+  })
+
+  it('connect: 切断後の復帰で onDisconnect を先に再登録し、初回 connected 値のまま presence を復元する', async () => {
+    h.pushKeys.push('conn-1')
+    h.getMock.mockResolvedValueOnce({
+      exists: () => true,
+      val: () => ({ connected: 123_456 }),
+    })
+    await connect()
+
+    const watcher = h.connectedSubscriptions.at(-1)!
+    watcher.callback({ val: () => false })
+    watcher.callback({ val: () => true })
+
+    await vi.waitFor(() => expect(h.setMock).toHaveBeenCalledTimes(2))
+
+    const disconnectOrder = h.onDisconnectMock.mock.invocationCallOrder[1]!
+    const setOrder = h.setMock.mock.invocationCallOrder[1]!
+    expect(disconnectOrder).toBeLessThan(setOrder)
+    expect(h.setMock.mock.calls[1]?.[1]).toEqual({
+      id: 'conn-1',
+      groupId: GROUP_ID,
+      connected: 123_456,
+      role: 'player',
+      label: null,
+    })
+    expect(h.serverTimestampMock).toHaveBeenCalledTimes(1)
+  })
+
+  it('connect: watcher の初回 true では presence を二重登録しない', async () => {
+    h.pushKeys.push('conn-1')
+
+    await connect()
+
+    expect(h.setMock).toHaveBeenCalledTimes(1)
+    expect(h.onDisconnectMock).toHaveBeenCalledTimes(1)
+  })
+
+  it('disconnect: watcher を先に解除し、その後の切断・復帰では再登録しない', async () => {
+    h.pushKeys.push('conn-1')
+    const { transport } = await connect()
+    const watcher = h.connectedSubscriptions.at(-1)!
+
+    await transport.disconnect()
+    watcher.callback({ val: () => false })
+    watcher.callback({ val: () => true })
+    await Promise.resolve()
+
+    expect(watcher.unsubscribe).toHaveBeenCalledTimes(1)
+    expect(watcher.unsubscribe.mock.invocationCallOrder[0]).toBeLessThan(
+      h.removeMock.mock.invocationCallOrder[0]!,
+    )
+    expect(h.setMock).toHaveBeenCalledTimes(1)
+  })
+
+  it('connect: presence 再登録失敗を報告し、次の再接続サイクルで再試行する', async () => {
+    h.pushKeys.push('conn-1')
+    const consoleError = vi.spyOn(console, 'error').mockImplementation(() => {})
+    await connect()
+    const watcher = h.connectedSubscriptions.at(-1)!
+    h.setMock.mockRejectedValueOnce(new Error('reregistration failed'))
+
+    watcher.callback({ val: () => false })
+    watcher.callback({ val: () => true })
+
+    await vi.waitFor(() => expect(consoleError).toHaveBeenCalledTimes(1))
+    expect(h.setMock).toHaveBeenCalledTimes(2)
+
+    watcher.callback({ val: () => false })
+    watcher.callback({ val: () => true })
+
+    await vi.waitFor(() => expect(h.setMock).toHaveBeenCalledTimes(3))
+    expect(consoleError).toHaveBeenCalledWith(
+      'Firebase presence re-registration failed',
+      expect.any(Error),
+    )
   })
 
   it('connect 前のメソッド呼び出しは throw する', async () => {
