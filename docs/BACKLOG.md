@@ -11,16 +11,3 @@
 4. ADR, SPEC の Open Questions と重複する項目は、決着時に ADR, SPEC 側も更新すること
 
 ## 次イテレーション候補
-
-### 切断・再接続の presence 再登録
-
-- firebase SDK は WebSocket を自動再接続するが、切断中に onDisconnect が発火して connections entry が消えた場合、復帰後に自分を再登録する経路が無い。他端末からは不在のままで、host にも昇格できない
-- connect() 後の `.info/connected` を監視しておらず、consumer がオフラインを検知する手段も無い (移植元事故調査 B の「購読断」仮説と同型の盲点)
-- `.info/connected` の true 復帰時に presence を再 set + onDisconnect 再登録する (adapter 内で完結し core の API 拡張は不要の見込み)。オンライン状態を health (上記 gap 項の器) へ載せるかは併せて検討 (やっていいと思うが)
-- 同じ connection id に復帰させるでいい気がする
-
-### 多端末同時操作の stress simulation test (CI)
-
-- memory hub 上で N 端末 × M request の並行送信 + fault 注入 (重複・遅延・drop・host 強制切断) をシード付き乱数で回し、収束後に全端末の synced state と適用列 (seq → request id) が一致することを検証する property test を CI へ追加する
-- fixture は順序敏感な state (append + running hash 等) にする。可換な counter では順序バグが素通りする
-- demo の手動 stress mode (TASK-260717-demo-stress) の CI 版に相当し、「当たり前に動く」ことの継続的な担保をこちらが担う
