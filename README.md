@@ -6,6 +6,7 @@ Redux (Redux Toolkit) アプリに「クライアントホスト型のリアル�
 - **普通の RTK の書き方がそのまま同期される**: 独自ラッパーで reducer を包まない。楽観更新をしないため「画面に出る state = 同期済み state」が常に成立する
 - **reducer が唯一の判定器**: validation は reducer に集約し、host / client / 同期なし (standalone) でロジックが分岐しない
 - **transport 抽象**: core は特定インフラに依存しない。Firebase RTDB adapter (`synqux/firebase`) と決定的な in-memory 実装 (`synqux/testing`) を同梱
+- **停止の検知と自己修復**: 配送欠落などで適用が止まった端末を sync health が検知し、再購読 → snapshot restore の段階回復で自動復帰する。回復不能時だけ consumer にリロード案内を委ねる。requests は適用窓の外が自動 prune され無限成長しない
 
 ## Structure
 ```
@@ -21,7 +22,8 @@ Redux (Redux Toolkit) アプリに「クライアントホスト型のリアル�
 ```
 
 - 仕様の正: [SPEC-0001-requests-sync](./docs/SPEC-0001-requests-sync.md) (仕組み・不変条件・既知の問題)
-- API 境界: [SPEC-0002-public-api](./docs/SPEC-0002-public-api.md) / 設計判断: [ADR-0001](./docs/ADR-0001-design.md), [ADR-0002](./docs/ADR-0002-host-seq.md)
+- API 境界: [SPEC-0002-public-api](./docs/SPEC-0002-public-api.md)
+- 設計判断: [ADR-0001](./docs/ADR-0001-design.md) (全体設計) / [ADR-0002](./docs/ADR-0002-host-seq.md) (host 採番 seq) / [ADR-0003](./docs/ADR-0003-sync-health.md) (stall 検知) / [ADR-0004](./docs/ADR-0004-sync-auto-recovery.md) (自動回復) / [ADR-0005](./docs/ADR-0005-requests-retention.md) (retention) / [ADR-0006](./docs/ADR-0006-presence-reregistration.md) (presence 再登録)
 
 ## Depends
 - node 20+ (開発は mise で 24 系を pin)
