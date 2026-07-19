@@ -276,16 +276,26 @@ export function createMemoryHub(): {
   inspect: { ... }
 }
 
-/** 冪等性ハーネス: action を二重適用して非冪等 (toggle 系) を検出する (consumer CI 用) */
+/** result を除く domain state について、action の二重適用が冪等か検証する */
 export function verifyActionIdempotency<TSynced, TAction>(config: {
   reducer: Reducer<TSynced>
   state: TSynced   // 前提 state (arrange 済みのもの)
   action: TAction
 }): { idempotent: boolean; single: TSynced; double: TSynced }
 
-/** CI 組込み用: 非冪等なら差分つきで throw */
-export function assertActionIdempotency(config: ...): void
+/**
+ * CI 組込み用の repeat contract 検査。mode 省略時は 'idempotent'
+ * idempotent: set 型 / rejects-repeat: execute-once 型 / repeatable: 明示的な検査除外
+ */
+export function assertActionIdempotency<TSynced, TAction>(config: {
+  reducer: Reducer<TSynced>
+  state: TSynced
+  action: TAction
+  mode?: 'idempotent' | 'rejects-repeat' | 'repeatable'
+}): void
 ```
+
+`idempotent` は top-level の `result` を `null` に正規化した domain state の一致を指す。`rejects-repeat` は初回が error でないこと、2 回目で domain state が変わらないこと、2 回目が error になることを検査する。`repeatable` は無限実行型をレビュー済みとして table に残す no-op であり、同じ意図の別 request による実害評価は consumer の責任とする。
 
 NOTE: 専用の `createSimulation` ハーネスは**公開しない** (実装時決定)。複数端末 simulation は「`createMemoryHub()` + consumer 自身の store 構築 + fake timers」の組合せで成立し、専用ラッパーは consumer の store 設定を再発明させるだけだった。書き方の実例は本 repo の `src/core/create-synqux.test.ts` / `src/core/host-migration.test.ts` を参照。
 

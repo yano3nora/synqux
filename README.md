@@ -23,7 +23,7 @@ Redux (Redux Toolkit) アプリに「クライアントホスト型のリアル�
 
 - 仕様の正: [SPEC-0001-requests-sync](./docs/SPEC-0001-requests-sync.md) (仕組み・不変条件・既知の問題)
 - API 境界: [SPEC-0002-public-api](./docs/SPEC-0002-public-api.md)
-- 設計判断: [ADR-0001](./docs/ADR-0001-design.md) (全体設計) / [ADR-0002](./docs/ADR-0002-host-seq.md) (host 採番 seq) / [ADR-0003](./docs/ADR-0003-sync-health.md) (stall 検知) / [ADR-0004](./docs/ADR-0004-sync-auto-recovery.md) (自動回復) / [ADR-0005](./docs/ADR-0005-requests-retention.md) (retention) / [ADR-0006](./docs/ADR-0006-presence-reregistration.md) (presence 再登録)
+- 設計判断: [ADR-0001](./docs/ADR-0001-design.md) (全体設計) / [ADR-0002](./docs/ADR-0002-host-seq.md) (host 採番 seq) / [ADR-0003](./docs/ADR-0003-sync-health.md) (stall 検知) / [ADR-0004](./docs/ADR-0004-sync-auto-recovery.md) (自動回復) / [ADR-0005](./docs/ADR-0005-requests-retention.md) (retention) / [ADR-0006](./docs/ADR-0006-presence-reregistration.md) (presence 再登録) / [ADR-0007](./docs/ADR-0007-action-repeat-contract.md) (action repeat contract)
 
 ## Depends
 - node 20+ (開発は mise で 24 系を pin)
@@ -154,7 +154,7 @@ useEffect(() => {
 
 seq gap は検知後、requests 再購読 → snapshot restore で自動回復を試みる。1 巡しても戻らない `unrecoverable` のときだけリロードを案内する。`useIsSyncStalled` は回復中を含む進行表示に使える。UI 文言と通知・リロードの発火方法は consumer が決める。
 
-consumer のテストは `synqux/testing` を使う。`createMemoryHub()` (fault injection つき決定的 in-memory transport) と `assertActionIdempotency()` (非冪等 action の CI 検出) を提供する。action 設計ガイドライン (「toggle ではなく set」等) と同期不具合の調査手順は [SPEC-0001](./docs/SPEC-0001-requests-sync.md) を参照。
+consumer のテストは `synqux/testing` を使う。`createMemoryHub()` (fault injection つき決定的 in-memory transport) と、mode 宣言つきの `assertActionIdempotency()` (set 型は `'idempotent'`、execute-once 型は `'rejects-repeat'`、意図的な無限実行型は `'repeatable'` で明示除外) を提供する。action 設計ガイドラインと同期不具合の調査手順は [SPEC-0001](./docs/SPEC-0001-requests-sync.md) を参照。
 
 ## Development
 ### Getting Started

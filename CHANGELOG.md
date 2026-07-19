@@ -12,6 +12,7 @@
 - `recovering` / `unrecoverable` phase、`selectIsSyncUnrecoverable` / `useIsSyncUnrecoverable`
 - snapshot ack 後に適用窓の外だけを削除する requests retention。optional な `SynquxTransport.pruneRequests` と memory / Firebase adapter 実装 (ADR-0005)
 - prune 対象の request を `logs/` へ原子的に退避し、全量 replay 調査を維持する Firebase adapter の `archivePrunedRequests` option
+- `assertActionIdempotency` に action repeat contract を宣言する `mode` (`idempotent` / `rejects-repeat` / `repeatable`) を追加 (ADR-0007)
 
 ### Changed
 
@@ -20,6 +21,7 @@
 ### Fixed
 
 - Firebase adapter が一時切断後に同じ connection id と初回 `connected` で presence を自動復元し、host 序列を変えずに候補へ復帰するよう修正 (ADR-0006)
+- 冪等性ハーネスの比較を `result` を除く domain state に修正し、2 回目を明示的に拒否する execute-once 型の誤検知を解消 (ADR-0007)
 
 ## [0.2.0] - 2026-07-05
 

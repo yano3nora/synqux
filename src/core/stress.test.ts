@@ -6,6 +6,10 @@ import { parseSnapshotPayload } from './snapshot.js'
 import { createHubClient, settle } from './test-fixtures.js'
 import type { SynquxHealth } from './slice.js'
 
+// fake timers 下でも simulation の CPU 実行時間が数秒かかるため、
+// vitest デフォルト 5000ms では並列実行時に margin 不足で timeout する。
+vi.setConfig({ testTimeout: 30_000 })
+
 const INITIAL_CLIENT_COUNT = 4
 const STALL_AFTER_MS = 3_000
 const CHAOS_REQUEST_COUNT = 240

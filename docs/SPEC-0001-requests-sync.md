@@ -100,7 +100,7 @@ NOTE: `markApplied` を dispatch **前**へ前倒しする案は不可 (dispatch
 
 同期基盤の性質から導かれる、game action / reducer 設計のルール。
 
-1. **現在値に依存する action を作らない**: `toggle` ではなく `set({ key, value })`。UI イベントに乗っているユーザ意図をそのまま payload に載せる。冪等な action は重複配送・再クリック・遅延のすべてに耐える
+1. **action の repeat contract を自覚的に選ぶ** (ADR-0007): デフォルトは現在値に依存しない **set 型** (`toggle` ではなく `set({ key, value })`) とする。1 回しか実行できない操作は、2 回目を reducer の validation で拒否する **execute-once 型** にする。チャット投稿などの **無限実行型** も正当だが、同一 request の二重適用は機構が防ぐ一方、再クリック・retry による「同じ意図の別 request」は識別できない。実害があれば payload の一意 key で execute-once 化し、なければ UI debounce または繰り返しを許容する。CI では `synqux/testing` の mode 宣言つき table に全 action を載せ、set 型は `'idempotent'`、execute-once 型は `'rejects-repeat'`、無限実行型は `'repeatable'` の契約を検査する
 2. **1 度しか発火しない自動 dispatch を作らない**: 取りこぼし前提の基盤のため、state 監視 + retry かユーザ操作起点にする
 3. **判定系 action は入力のスナップショットを result / log に残す**: 「現在 state を見て判定する」action は、判定時点の入力を記録しておくと replay 再現なしで調査が終わる
 4. **validation は reducer に集約し、`stateWithError` で表現する**: middleware や UI 側に成否判定を分散させない。reducer が唯一の判定器であることが同期の前提

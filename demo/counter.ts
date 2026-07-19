@@ -35,6 +35,8 @@ export const counterReducer: Reducer<CounterState> = (
   }
 
   switch (action.type) {
+    // 増分型 = 無限実行型の自覚的な例 (設計ガイドライン 1 の 3 分類)。
+    // demo は同時操作の見た目確認が目的なので、操作回数ぶんの加算を許容する。
     case 'counter/add': {
       const next = state.count + (action.payload ?? 1)
 
