@@ -2,7 +2,7 @@ import type { Peer, RequestEnvelope, SynquxTransport } from '../core/types.js'
 
 export type FaultTarget = {
   requestId: RequestEnvelope['id']
-  /** 対象端末の peer id。省略時は全端末への配送が対象 */
+  /** 対象端末の peer id。省略時は 1 fan-out の全端末配送へ適用して消費 */
   to?: Peer['id']
   /** 対象イベント種別。省略時は added / changed の両方が対象 */
   event?: 'added' | 'changed'
@@ -13,11 +13,11 @@ export type MemoryHub = {
   createTransport(): SynquxTransport
 
   faults: {
-    /** 次の該当配送を同一 subscriber へ 2 回連続で届ける (二重配送) */
+    /** 次の該当配送を二重化する。to 省略時は 1 fan-out の全端末配送へ適用して消費 */
     duplicate(target: FaultTarget): void
     /** 該当配送を保留し、release() で保留分を元の順序のまま解放する */
     delay(target: FaultTarget): { release(): void }
-    /** 次の該当配送を 1 回ぶん破棄する */
+    /** 次の該当配送を破棄する。to 省略時は 1 fan-out の全端末配送へ適用して消費 */
     drop(target: FaultTarget): void
     /** respondRequest の resolve (ack) だけを保留する。変更イベントの配送は保留しない */
     holdAck(requestId: RequestEnvelope['id']): { release(): void }
@@ -70,7 +70,7 @@ type GroupState = {
 
 type OneShotFault = {
   target: FaultTarget
-  consumed: boolean
+  consumedDeliveryId: number | null
 }
 
 type DelayFault = {
@@ -105,6 +105,7 @@ export function createMemoryHub(): MemoryHub {
   let nextPeerSequence = 1
   let nextRequestSequence = 1
   let nextSubscriberId = 1
+  let nextDeliveryId = 1
 
   const groups = new Map<string, GroupState>()
   const snapshots = new Map<string, string>()
@@ -176,6 +177,7 @@ export function createMemoryHub(): MemoryHub {
   const enqueueRequest = (
     subscriber: RequestSubscriber,
     delivery: {
+      deliveryId: number
       requestId: RequestEnvelope['id']
       event: RequestEvent
       task: () => void
@@ -196,18 +198,24 @@ export function createMemoryHub(): MemoryHub {
     }
 
     const drop = dropFaults.find(
-      (fault) => !fault.consumed && matchesFault(fault.target, faultDelivery),
+      (fault) =>
+        (fault.consumedDeliveryId === null ||
+          fault.consumedDeliveryId === delivery.deliveryId) &&
+        matchesFault(fault.target, faultDelivery),
     )
     if (drop !== undefined) {
-      drop.consumed = true
+      drop.consumedDeliveryId = delivery.deliveryId
       return
     }
 
     const duplicate = duplicateFaults.find(
-      (fault) => !fault.consumed && matchesFault(fault.target, faultDelivery),
+      (fault) =>
+        (fault.consumedDeliveryId === null ||
+          fault.consumedDeliveryId === delivery.deliveryId) &&
+        matchesFault(fault.target, faultDelivery),
     )
     if (duplicate !== undefined) {
-      duplicate.consumed = true
+      duplicate.consumedDeliveryId = delivery.deliveryId
       enqueue(subscriber, delivery.task)
       enqueue(subscriber, delivery.task)
       return
@@ -335,8 +343,11 @@ export function createMemoryHub(): MemoryHub {
         const stored: RequestEnvelope = { ...clone(envelope), id }
         group.requests.push(stored)
 
+        const deliveryId = nextDeliveryId
+        nextDeliveryId += 1
         for (const subscriber of group.requestSubscribers) {
           enqueueRequest(subscriber, {
+            deliveryId,
             requestId: id,
             event: 'added',
             task: () => subscriber.handlers.onAdded(clone(stored)),
@@ -370,8 +381,11 @@ export function createMemoryHub(): MemoryHub {
         }
         group.requests[index] = updated
 
+        const deliveryId = nextDeliveryId
+        nextDeliveryId += 1
         for (const subscriber of group.requestSubscribers) {
           enqueueRequest(subscriber, {
+            deliveryId,
             requestId: id,
             event: 'changed',
             task: () => subscriber.handlers.onChanged(clone(updated)),
@@ -412,7 +426,10 @@ export function createMemoryHub(): MemoryHub {
           .sort((left, right) => left.id.localeCompare(right.id))
 
         existing.forEach((request) => {
+          const deliveryId = nextDeliveryId
+          nextDeliveryId += 1
           enqueueRequest(subscriber, {
+            deliveryId,
             requestId: request.id,
             event: 'added',
             task: () => subscriber.handlers.onAdded(clone(request)),
@@ -447,7 +464,7 @@ export function createMemoryHub(): MemoryHub {
 
     faults: {
       duplicate(target) {
-        duplicateFaults.push({ target, consumed: false })
+        duplicateFaults.push({ target, consumedDeliveryId: null })
       },
 
       delay(target) {
@@ -470,7 +487,7 @@ export function createMemoryHub(): MemoryHub {
       },
 
       drop(target) {
-        dropFaults.push({ target, consumed: false })
+        dropFaults.push({ target, consumedDeliveryId: null })
       },
 
       holdAck(requestId) {

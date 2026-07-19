@@ -228,6 +228,95 @@ describe('createMemoryHub', () => {
     expect(changedB).toEqual([id, id])
   })
 
+  it('faults.drop: to 省略時は 1 fan-out の全端末配送を破棄する', async () => {
+    const { hub, a, b, aId } = await connectTwo()
+    const c = hub.createTransport()
+    await c.connect({ groupId: GROUP_ID, label: 'c' })
+    const received = [a, b, c].map(() => [] as string[])
+
+    for (const [index, transport] of [a, b, c].entries()) {
+      transport.subscribeRequests(
+        {},
+        {
+          onAdded: (envelope) => received[index]!.push(envelope.action.type),
+          onChanged: () => undefined,
+        },
+      )
+    }
+
+    hub.faults.drop({ requestId: '000000000001', event: 'added' })
+    await a.pushRequest(createEnvelope({ requestedBy: aId, type: 'dropped' }))
+    await flushDeliveries()
+    expect(received).toEqual([[], [], []])
+
+    await a.pushRequest(createEnvelope({ requestedBy: aId, type: 'delivered' }))
+    await flushDeliveries()
+    expect(received).toEqual([['delivered'], ['delivered'], ['delivered']])
+  })
+
+  it('faults.duplicate: to 省略時は 1 fan-out を全端末へ 2 回ずつ届ける', async () => {
+    const { hub, a, b, aId } = await connectTwo()
+    const c = hub.createTransport()
+    await c.connect({ groupId: GROUP_ID, label: 'c' })
+    const received = [a, b, c].map(() => [] as string[])
+
+    for (const [index, transport] of [a, b, c].entries()) {
+      transport.subscribeRequests(
+        {},
+        {
+          onAdded: (envelope) => received[index]!.push(envelope.action.type),
+          onChanged: () => undefined,
+        },
+      )
+    }
+
+    hub.faults.duplicate({ requestId: '000000000001', event: 'added' })
+    await a.pushRequest(
+      createEnvelope({ requestedBy: aId, type: 'duplicated' }),
+    )
+    await flushDeliveries()
+    expect(received).toEqual([
+      ['duplicated', 'duplicated'],
+      ['duplicated', 'duplicated'],
+      ['duplicated', 'duplicated'],
+    ])
+
+    await a.pushRequest(createEnvelope({ requestedBy: aId, type: 'once' }))
+    await flushDeliveries()
+    expect(received).toEqual([
+      ['duplicated', 'duplicated', 'once'],
+      ['duplicated', 'duplicated', 'once'],
+      ['duplicated', 'duplicated', 'once'],
+    ])
+  })
+
+  it('faults.drop: to 指定時は指定端末だけを破棄し、他端末へは届ける', async () => {
+    const { hub, a, b, aId, bId } = await connectTwo()
+    const c = hub.createTransport()
+    await c.connect({ groupId: GROUP_ID, label: 'c' })
+    const received = [a, b, c].map(() => [] as string[])
+
+    for (const [index, transport] of [a, b, c].entries()) {
+      transport.subscribeRequests(
+        {},
+        {
+          onAdded: (envelope) => received[index]!.push(envelope.id),
+          onChanged: () => undefined,
+        },
+      )
+    }
+
+    hub.faults.drop({
+      requestId: '000000000001',
+      to: bId,
+      event: 'added',
+    })
+    const { id } = await a.pushRequest(createEnvelope({ requestedBy: aId }))
+    await flushDeliveries()
+
+    expect(received).toEqual([[id], [], [id]])
+  })
+
   it('faults.delay → release: 保留を後で元の順序のまま解放し、順序入れ替えを作れる', async () => {
     const { hub, a, b, aId, bId } = await connectTwo()
     const receivedB: string[] = []
