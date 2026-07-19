@@ -63,7 +63,7 @@ export const counterReducer: Reducer<CounterState> = (
       // 拒否し、依頼元にだけ通知される
       if (next > 100 || next < 0) {
         return stateWithError({ ...state }, action, {
-          message: 'count は 0〜100 の範囲です',
+          message: { text: 'count は 0〜100 の範囲です' },
         })
       }
 
@@ -131,7 +131,7 @@ store.dispatch({ type: 'counter/add', payload: 1 })
 
     ```ts
     if (state.phase !== 'battle') {
-      return stateWithError(state, action, { message: 'いまは実行できません' })
+      return stateWithError(state, action, { message: { text: 'いまは実行できません' } })
     }
     ```
 
@@ -155,6 +155,61 @@ useEffect(() => {
 seq gap は検知後、requests 再購読 → snapshot restore で自動回復を試みる。1 巡しても戻らない `unrecoverable` のときだけリロードを案内する。`useIsSyncStalled` は回復中を含む進行表示に使える。UI 文言と通知・リロードの発火方法は consumer が決める。
 
 consumer のテストは `synqux/testing` を使う。`createMemoryHub()` (fault injection つき決定的 in-memory transport) と、mode 宣言つきの `assertActionIdempotency()` (set 型は `'idempotent'`、execute-once 型は `'rejects-repeat'`、意図的な無限実行型は `'repeatable'` で明示除外) を提供する。action 設計ガイドラインと同期不具合の調査手順は [SPEC-0001](./docs/SPEC-0001-requests-sync.md) を参照。
+
+### サーバ時刻で機能を組む (`action.meta.dispatched`)
+
+「N 秒経過で解禁」「日付切替」などの時刻依存ロジックは、端末時計を読むと端末ごとに判定がズレて同期が壊れる (reducer 内の `Date.now()` は決定性違反として dev モードで検出される)。代わりに **synqux が action へ焼き込む `meta.dispatched` を読む**。同期経路では request 化の時点で transport のサーバ基準時刻 (`serverNow()`) に上書きされるため、全端末が同じ時刻で判定できる。
+
+```ts
+case 'game/harvest': {
+  // dispatched はサーバ基準時刻 (ms)。全端末・host の試し実行で同一値になる
+  const now = action.meta?.dispatched ?? 0
+
+  if (now - state.plantedAt < GROW_MS) {
+    return stateWithError(state, action, { message: { text: 'まだ育っていません' } })
+  }
+  // ...
+}
+```
+
+- reducer が読んでよい meta は `requestedBy` / `dispatched` のみ (SPEC-0002)
+- パフォーマンス: firebase transport の `serverNow()` は `.info/serverTimeOffset` を接続時に購読・キャッシュするため、request ごとの取得は `Date.now() + offset` の O(1)。往復は発生しない
+- 注意: standalone (`enabled: false`) や `setEnabled(false)` 中の local 適用では `dispatched` は端末時計 (`Date.now()`) になる。単独端末なので判定は壊れないが、「サーバ基準」が保証されるのは同期経路のみ
+
+### tutorial などで同期を一時的に止める (`setEnabled`)
+
+`sync.actions.setEnabled(false)` は**送信ゲート**で、synced action を request 化せず local にのみ即時適用する (永続化もしない)。tutorial のような「本番の同期 state を汚さず、同じ reducer で local 完結に遊ぶ」用途のための機能で、受信・host 責務は止まらない。
+
+```ts
+store.dispatch(sync.actions.setEnabled(false)) // tutorial 開始 (以降 local 完結)
+store.dispatch({ type: 'game/reset' })          // tutorial 用の初期化も普通の action で
+// ... tutorial 進行 (dispatch はすべて local 適用) ...
+```
+
+- 前提: **同期グループに他端末がいない / 動いていない状況で使う**。グループが動いていると remote 適用が local 乖離に混ざり、自端末が host の場合は乖離した state を土台に裁定・snapshot 保存されて同期 state (正史) 自体が汚染される
+- 復帰: `setEnabled(true)` に戻しても off 中の local 乖離は残るため、**tutorial 終了はリロード相当 (新しい store で `subscribe` し直す) で snapshot の正史へ戻す**のが正しい手順
+- 詳細な契約は [SPEC-0001](./docs/SPEC-0001-requests-sync.md) の「setEnabled の契約」を参照
+
+### useSelector / useDispatch の型補完
+
+synqux 固有の仕組みは不要で、Redux 公式の [`.withTypes<>()` パターン](https://redux.js.org/usage/usage-with-typescript#define-typed-hooks)がそのまま使える。RootState は `sync.rootReducer` から導出すると synqux 内部 slice (`state.synqux`) も含めて型が合う。
+
+```ts
+// hooks.ts (setup 層に 1 回だけ)
+import { useDispatch, useSelector } from 'react-redux'
+import type { store, sync } from './store'
+
+export type RootState = ReturnType<typeof sync.rootReducer>
+export type AppDispatch = typeof store.dispatch
+
+export const useAppSelector = useSelector.withTypes<RootState>()
+export const useAppDispatch = useDispatch.withTypes<AppDispatch>()
+
+// ゲーム開発者はこちらを使う (state.counter が補完される)
+const count = useAppSelector((s) => s.counter.count)
+```
+
+`synqux/react` の hooks (`useIsHost` / `useLatestResult` 等) は Provider 経由で型解決するため、この配線がなくても動く。
 
 ## Development
 ### Getting Started

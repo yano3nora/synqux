@@ -88,6 +88,7 @@ describe('createMemoryHub', () => {
       epoch: 1,
       seq: 1,
       responsedBy: aId,
+      responsed: 1,
       result: '{"type":"success"}',
     })
     await flushDeliveries()
@@ -100,6 +101,7 @@ describe('createMemoryHub', () => {
       epoch: 1,
       seq: 1,
       responsedBy: aId,
+      responsed: 1,
       result: '{"type":"success"}',
     })
     expect(changedB[0]).toEqual(changedA[0])
@@ -159,6 +161,7 @@ describe('createMemoryHub', () => {
       epoch: 1,
       seq: 1,
       responsedBy: aId,
+      responsed: 1,
       result: '{"ok":true}',
     })
     await flushDeliveries()
@@ -179,6 +182,7 @@ describe('createMemoryHub', () => {
     expect(added[0]).toMatchObject({
       id,
       responsedBy: aId,
+      responsed: 1,
       result: '{"ok":true}',
     })
     expect(changed).toEqual([])
@@ -212,6 +216,7 @@ describe('createMemoryHub', () => {
       epoch: 1,
       seq: 1,
       responsedBy: aId,
+      responsed: 1,
       result: '{"ok":true}',
     })
     await flushDeliveries()
@@ -296,6 +301,7 @@ describe('createMemoryHub', () => {
         epoch: 1,
         seq: 1,
         responsedBy: aId,
+        responsed: 1,
         result: '{"ok":true}',
       })
       .then(() => {
@@ -318,6 +324,7 @@ describe('createMemoryHub', () => {
       epoch: 1,
       seq: 1,
       responsedBy: aId,
+      responsed: 1,
       result: '{"ok":true}',
     })
     await flushDeliveries()
@@ -328,6 +335,7 @@ describe('createMemoryHub', () => {
       epoch: 2,
       seq: 1,
       responsedBy: bId,
+      responsed: 1,
       result: null,
     })
     await flushDeliveries()
@@ -353,12 +361,14 @@ describe('createMemoryHub', () => {
       epoch: 1,
       seq: 1,
       responsedBy: aId,
+      responsed: 1,
       result: null,
     })
     const secondResponse = a.respondRequest(second.id, {
       epoch: 1,
       seq: 3,
       responsedBy: aId,
+      responsed: 1,
       result: null,
     })
     await flushDeliveries()
@@ -453,6 +463,7 @@ describe('createMemoryHub', () => {
         epoch: 1,
         seq: 1,
         responsedBy: 'peer-x',
+        responsed: 1,
         result: null,
       }),
     ).rejects.toThrow('not connected')

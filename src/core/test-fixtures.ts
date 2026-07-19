@@ -73,14 +73,26 @@ export const gameReducer: Reducer<GameState> = (
 
     case 'game/forbidden': {
       // reducer が唯一の判定器: validation 失敗は state を変えず error を積む
+      // (message なし = log 専用の拒否として dispatch が省略される経路)
       const result: Result<GameAction> = {
         action,
         type: 'error',
-        message: 'forbidden',
         targets: action.meta?.requestedBy ? [action.meta.requestedBy] : [],
-        console: true,
+        log: 'forbidden',
       }
       return { ...state, result }
+    }
+
+    // success + message + log の代表例 (適用されつつ log も出力される経路)
+    case 'game/announce': {
+      const result: Result<GameAction> = {
+        action,
+        type: 'success',
+        message: { text: 'announced' },
+        targets: [],
+        log: 'announce applied',
+      }
+      return { ...state, result, log: state.log.concat('announce') }
     }
 
     default:

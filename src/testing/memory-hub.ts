@@ -359,6 +359,7 @@ export function createMemoryHub(): MemoryHub {
           epoch: patch.epoch,
           seq: patch.seq,
           responsedBy: patch.responsedBy,
+          responsed: patch.responsed,
           result: patch.result === null ? undefined : patch.result,
         }
         // RTDB の update() は null 指定でキーを削除するため、result: null は

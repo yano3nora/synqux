@@ -84,7 +84,7 @@ describe('createSynqux (end-to-end)', () => {
     expect(logA).toEqual(logB) // 適用順序の全端末一致 (不変条件 3)
   })
 
-  it('validation エラー (error & console) の request は dispatch されず console へ流れる', async () => {
+  it('log 専用の validation エラー (message なし) の request は dispatch されず console へ流れる', async () => {
     const consoleError = vi
       .spyOn(console, 'error')
       .mockImplementation(() => undefined)
@@ -104,7 +104,11 @@ describe('createSynqux (end-to-end)', () => {
     expect(a.store.getState().game.count).toBe(0)
     expect(a.store.getState().game.log).toEqual([])
     expect(b.store.getState().game.log).toEqual([])
-    expect(consoleError).toHaveBeenCalledWith('forbidden')
+
+    // log は targets 準拠: 依頼元 (a) の 1 回だけで、b では出力されない
+    expect(
+      consoleError.mock.calls.filter((call) => call[0] === 'forbidden'),
+    ).toHaveLength(1)
 
     a.store.dispatch({ type: 'game/increment', payload: 1 })
     await settle()
@@ -112,6 +116,63 @@ describe('createSynqux (end-to-end)', () => {
     expect(b.store.getState().game.count).toBe(1)
 
     consoleError.mockRestore()
+  })
+
+  it('message ありの result は dispatch され、log は各端末で synqux が console へ出力する', async () => {
+    const consoleLog = vi
+      .spyOn(console, 'log')
+      .mockImplementation(() => undefined)
+
+    const hub = createMemoryHub()
+    const a = createHubClient(hub)
+    const b = createHubClient(hub)
+
+    await a.sync.subscribe({ store: a.store, groupId: GROUP_ID })
+    await b.sync.subscribe({ store: b.store, groupId: GROUP_ID })
+    await settle()
+
+    a.store.dispatch({ type: 'game/announce' })
+    await settle()
+
+    // message ありなので dispatch され、全端末に result (UI 表示データ) が届く
+    expect(a.store.getState().game.log).toEqual(['announce'])
+    expect(b.store.getState().game.log).toEqual(['announce'])
+    expect(a.store.getState().game.result?.message?.text).toBe('announced')
+
+    // log は targets 準拠 (空 = 無条件) で各端末の適用時に 1 回ずつ出力される
+    const announceLogs = consoleLog.mock.calls.filter(
+      (call) => call[0] === 'announce applied',
+    )
+    expect(announceLogs).toHaveLength(2)
+
+    consoleLog.mockRestore()
+  })
+
+  it('changed の重複配送でも適用・log 出力は二重にならない (at-least-once 吸収)', async () => {
+    const consoleLog = vi
+      .spyOn(console, 'log')
+      .mockImplementation(() => undefined)
+
+    const hub = createMemoryHub()
+    const a = createHubClient(hub)
+    const b = createHubClient(hub)
+
+    await a.sync.subscribe({ store: a.store, groupId: GROUP_ID })
+    await b.sync.subscribe({ store: b.store, groupId: GROUP_ID })
+    await settle()
+
+    // 最初の request (id は hub の採番順で決定的) の changed を全端末へ 2 回届ける
+    hub.faults.duplicate({ requestId: '000000000001', event: 'changed' })
+    a.store.dispatch({ type: 'game/announce' })
+    await settle()
+
+    expect(a.store.getState().game.log).toEqual(['announce'])
+    expect(b.store.getState().game.log).toEqual(['announce'])
+    expect(
+      consoleLog.mock.calls.filter((call) => call[0] === 'announce applied'),
+    ).toHaveLength(2)
+
+    consoleLog.mockRestore()
   })
 
   it('途中参加端末は snapshot から restore し、以降の requests だけで追いつく', async () => {

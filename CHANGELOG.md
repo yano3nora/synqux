@@ -4,6 +4,13 @@
 
 ## [Unreleased]
 
+### Changed (BREAKING: wire format v3)
+
+- `Result` を刷新 (ADR-0008): `message` を UI 表示想定データ `{ text: string }` へ構造化 (拡張は `TMessage` generics)。`console` / `duration` を削除し `log?: string` へ置換、log の console 出力は synqux の責務 (targets 準拠) になった
+- `stateWithError` / `stateWithResult` / `generateResult` / `useLatestResult` が新しい `Result` 形状・generics に追従
+- `RequestEnvelope.responsed` (serverNow 基準の裁定時刻) を追加し、transport `respondRequest` の patch に `responsed` が必須になった
+- `SYNQUX_SCHEMA_VERSION` を 3 へ increment (新旧混在は検出して明示的に拒否)
+
 ### Added
 
 - seq gap が継続して同期適用が止まった端末を `state.synqux.health` で検知する sync health (ADR-0003)

@@ -54,7 +54,7 @@ export const ledgerReducer: Reducer<LedgerState> = (
     case 'ledger/append': {
       if (state.locked) {
         return stateWithError<LedgerState, LedgerAction>({ ...state }, action, {
-          message: 'ledger is locked',
+          message: { text: 'ledger is locked' },
         })
       }
 

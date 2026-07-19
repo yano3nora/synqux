@@ -27,7 +27,8 @@ const success = (state: ContractState, action: ContractAction): ContractState =>
     {
       action,
       type: 'success',
-      message: action.type,
+      // as string: template literal 型のまま TMessage が推論されるのを防ぐ
+      message: { text: action.type as string },
     },
   )
 

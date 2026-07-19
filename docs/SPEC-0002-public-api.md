@@ -36,17 +36,28 @@ export type Peer = {
   label?: string
 }
 
-/** reducer (唯一の判定器) が書き、host が読む成否判定結果 */
-export type Result<TAction extends Action = Action> = {
+/** Result.message の型契約 (ADR-0008)。拡張は consumer が generics で行う */
+export type ResultMessage = { text: string }
+
+/**
+ * reducer (唯一の判定器) が書き、host が読む成否判定結果
+ * 拒否された request は state に痕跡を残せないため、result が失敗 feedback の
+ * 唯一のチャネル。通知は message (UI 表示、表示は consumer 責務) と
+ * log (console 出力、synqux が出力) の 2 系統 (ADR-0008)
+ */
+export type Result<
+  TAction extends Action = Action,
+  TMessage extends ResultMessage = ResultMessage,
+> = {
   action: TAction
   type: 'error' | 'success'
-  message: string
+  /** UI 表示想定データ。undefined なら画面通知なし。error かつ message なしは
+      「log 専用の拒否」として dispatch 自体が省略される */
+  message?: TMessage
   /** 通知先 peer id。standalone 時は [] で無条件表示 */
   targets: Peer['id'][]
-  /** 画面に出さず console.error へ流す (連打・遅延で弾かれた操作向け) */
-  console?: true
-  /** toast 表示時間 ms。null で自動消去なし。表示自体は consumer の UI 責務 */
-  duration?: number | null
+  /** console 出力。synqux が type に応じて console.log / error へ targets 準拠で出力 */
+  log?: string
 }
 
 /**
@@ -54,8 +65,11 @@ export type Result<TAction extends Action = Action> = {
  * 移植元 GameState と違い revisions は含まない — 順序状態は synqux が
  * snapshot 封筒側で管理する (Decision 11)
  */
-export type SynquxSynced<TAction extends Action = Action> = {
-  result: Result<TAction> | null
+export type SynquxSynced<
+  TAction extends Action = Action,
+  TMessage extends ResultMessage = ResultMessage,
+> = {
+  result: Result<TAction, TMessage> | null
 }
 
 /** 端末ローカルの seq gap 検知・自動回復状態 */
@@ -186,15 +200,18 @@ export const synquxReducer: Reducer<SynquxState>
 // reducer ヘルパー (ゲーム開発者層、Decision 7)
 // ============================================================
 
-/** validation 失敗時に draft へ error result を積んで返す。immer 前提 (Decision 9) */
-export function stateWithError<TSynced extends SynquxSynced<TAction>, TAction extends Action>(
+/**
+ * validation 失敗時に draft へ error result を積んで返す。immer 前提 (Decision 9)
+ * message 省略時は action.type を log とした「log 専用の拒否」になる (ADR-0008)
+ */
+export function stateWithError<TSynced, TAction, TMessage extends ResultMessage = ResultMessage>(
   state: TSynced,
   action: TAction,
-  option?: { message?: string; console?: true; duration?: number | null },
+  option?: { message?: TMessage; log?: string },
 ): TSynced
 
-export function stateWithResult<TSynced, TAction>(state: TSynced, result: ...): TSynced
-export function generateResult<TAction>(props: ...): Result<TAction>
+export function stateWithResult<TSynced, TAction, TMessage extends ResultMessage = ResultMessage>(state: TSynced, result: ...): TSynced
+export function generateResult<TAction, TMessage extends ResultMessage = ResultMessage>(props: ...): Result<TAction, TMessage>
 
 // ============================================================
 // 読み取り selector (ゲーム開発者層、Decision 7)
@@ -247,7 +264,7 @@ export function useSelfId(): Peer['id'] | null
 export function useSyncHealth(): SynquxHealth
 export function useIsSyncStalled(): boolean
 export function useIsSyncUnrecoverable(): boolean
-export function useLatestResult<TAction>(): Result<TAction> | null  // synced の位置は Provider 経由で解決
+export function useLatestResult<TAction, TMessage extends ResultMessage = ResultMessage>(): Result<TAction, TMessage> | null  // synced の位置は Provider 経由で解決
 ```
 
 - peerDependencies: `react` / `react-redux` (optional peer、`synqux/react` を使うときのみ)
@@ -349,7 +366,7 @@ export type SynquxTransport = SnapshotStore & {
   /** host の裁定を request へ焼き込む。(epoch, seq) が適用順の正になる (ADR-0002) */
   respondRequest(
     id: string,
-    patch: { epoch: number; seq: number; responsedBy: Peer['id']; result: string | null },
+    patch: { epoch: number; seq: number; responsedBy: Peer['id']; responsed: number; result: string | null },
   ): Promise<void>
 
   /** 数値 seq < beforeSeq だけを requests から取り除く。未実装でも correctness は不変 */
@@ -385,7 +402,7 @@ export type SynquxTransport = SnapshotStore & {
 ## A3: 封筒 wire format
 
 ```ts
-export const SYNQUX_SCHEMA_VERSION = 2  // v2 = host 採番 seq (ADR-0002)
+export const SYNQUX_SCHEMA_VERSION = 3  // v2 = host 採番 seq (ADR-0002)、v3 = result 構造化 + responsed (ADR-0008)
 
 /**
  * transport を流れる request 封筒
@@ -405,6 +422,7 @@ export type RequestEnvelope = {
   requested: number         // serverNow() 基準
   requestedBy: Peer['id']
   responsedBy?: Peer['id']  // host の裁定済みマーク。これの有無が added/changed の実質の区別
+  responsed?: number        // serverNow() 基準の裁定時刻 (ADR-0008)。調査用で correctness には使わない
   epoch?: number            // host 世代番号 (fencing、ADR-0002)。同一 seq 衝突の tiebreak
   seq?: number              // host 採番の適用順連番 (response 時に焼き込み)。順序の正
   result?: string           // Result の JSON 文字列
@@ -429,7 +447,7 @@ type SnapshotEnvelope<TSynced> = {
 
 | subpath | 主な export | 対象 |
 | --- | --- | --- |
-| `synqux` | `createSynqux` / `createSynquxRootReducer` / `synquxReducer` / `stateWithError` / `stateWithResult` / `generateResult` / `selectIsHost` / `selectPeers` / `selectSelfId` / `selectSyncHealth` / `selectIsSyncStalled` / `selectIsSyncUnrecoverable` / `localStorageSnapshotStore` / 型 (`SynquxSynced` / `SynquxHealth` / `Result` / `Peer` / `SynquxActionMeta` / `SynquxTransport` / `SnapshotStore` / `RequestEnvelope` / `SynquxState`) | セットアップ層 + reducer ヘルパー |
+| `synqux` | `createSynqux` / `createSynquxRootReducer` / `synquxReducer` / `stateWithError` / `stateWithResult` / `generateResult` / `selectIsHost` / `selectPeers` / `selectSelfId` / `selectSyncHealth` / `selectIsSyncStalled` / `selectIsSyncUnrecoverable` / `localStorageSnapshotStore` / 型 (`SynquxSynced` / `SynquxHealth` / `Result` / `ResultMessage` / `Peer` / `SynquxActionMeta` / `SynquxTransport` / `SnapshotStore` / `RequestEnvelope` / `SynquxState`) | セットアップ層 + reducer ヘルパー |
 | `synqux/react` | `SynquxProvider` / `useIsHost` / `usePeers` / `useSelfId` / `useSyncHealth` / `useIsSyncStalled` / `useIsSyncUnrecoverable` / `useLatestResult` | ゲーム開発者層 |
 | `synqux/testing` | `createMemoryHub` / `verifyActionIdempotency` / `assertActionIdempotency` | consumer CI / 本 repo の simulation test |
 | `synqux/firebase` | `firebaseTransport(db, options?: { archivePrunedRequests?: boolean })` | Phase 2 で実装 |
@@ -443,7 +461,7 @@ type SnapshotEnvelope<TSynced> = {
 | `LAST_RESET` (ゲームデータリセット → 全端末 alert + reload) | v1 core に**含めない**。UI 都合 (alert / reload) と密結合のため。テンプレ置換 (Phase 2) で必要性が確定したら transport のオプションイベントとして追加検討 |
 | `reproduce` (requests JSON replay 復旧ツール) | Phase 1 スコープ外 (合意済み) |
 | `connections.isNotFoundGame` / `getAgentIdFromQuery` | consumer 責務 (エラー画面遷移・query 読み取りはアプリ都合) |
-| result の toast 表示 (`result-notifier`) | consumer 責務。`useLatestResult` + `Result.duration` で材料は提供 |
+| result の toast 表示 (`result-notifier`) | consumer 責務。`useLatestResult` + `Result.message` (拡張は TMessage generics) で材料は提供 (ADR-0008) |
 | `loadGameState` / `saveGameState` (standalone の localStorage 永続化) | **取り込む** (レビュー決定)。`localSnapshots: SnapshotStore` として一般化し、封筒・直列化・policy 点を transport の snapshot と共有する。既定実装 `localStorageSnapshotStore` を同梱。restore 時の result 除去 (移植元 `clearResultFromGameState`) も踏襲 |
 | `@yano3nora/ts-utils` (`sleepTimer` / `waitUntilOrFail`) | **dependencies に含める** (レビュー決定: 作者が同一のため内製化は二重管理になる)。public npm + ライセンス整合が publish (Phase 2) の前提条件 |
 | `debugRevisions` (console.log デバッグ action) | 落とす。simulation test で代替 |

@@ -70,7 +70,15 @@ client                      firebase                     host
 
 - **dual-host 窓での適用列の一時分岐はあり得る** (ADR-0002)。fencing (epoch) の役割は分岐の防止ではなく「収束先の決定」であり、完全防止は consensus を要するためクライアントホスト型の割り切りとする。分岐の実害は敗者再裁定と冪等 action 設計で吸収する
 - **push 失敗・切断による取りこぼしは依然あり得る**ため「タイマー等で 1 度しか発火しない action」は禁止。state 監視で retry するか、ユーザ操作で dispatch させる作りにする (v1 の「遅延 request の意図的ドロップ」は seq 化で消滅したが、この一般則は残る)
-- `result.type === 'error' && console` の request は dispatch せず `console.error` へ流す (連打・遅延で弾かれた操作の通知はノイズのため)
+- **log 専用の error result (`result.type === 'error' && message なし`) の request は dispatch せず `console.error` へ流す** (連打・遅延で弾かれた操作の通知はノイズのため)。result の通知チャネルは message (UI 表示、表示は consumer 責務) と log (console 出力、synqux が targets 準拠で出力) の 2 系統 (ADR-0008)
+
+### setEnabled の契約 (runtime on/off、tutorial 用途)
+
+`actions.setEnabled(false)` は**送信ゲートのみ** (移植元 `_prepareTutorial` と同じセマンティクス)。再現テスト: `src/core/set-enabled.test.ts`
+
+- off 中の synced action は request 化されず **local にのみ即時適用**される (楽観更新なし原則の意図的な例外)。transport への push・localSnapshots への永続化は行わない (standalone = instance `enabled: false` とは別物)
+- **受信 request の適用・host 責務・購読は止まらない**。グループが動いていると remote 適用が local 乖離へ混ざり、さらに**自端末が host の場合は乖離した state を土台に裁定・snapshot 保存されるため、正史そのものが汚染されて群内で state が割れる** (host 導出は peer pool の全端末合意であり、enabled は端末 local のため host 候補から自動では外れない)。tutorial は「グループに他端末がいない / 動いていない」前提で使うこと
+- `setEnabled(true)` に戻しても off 中の local 乖離は残る。自端末が host にならない限り乖離が正史へ乗ることはないが、自端末の以降の同期適用は乖離した土台に乗り続ける。**tutorial 後の復帰はリロード相当 (新しい store / client での再 subscribe) で snapshot の正史へ戻すこと**
 
 ## 既知の問題
 
@@ -123,7 +131,7 @@ requests / game state の export があれば、端末ログなしで大半を�
 **retention 導入後に requests export だけで遡れるのは「snapshot + 直近適用窓」まで**。既定の物理削除で運用する場合、全履歴が必要な事故調査では発生直後に export を取得すること。Firebase adapter の `archivePrunedRequests` を有効にした場合は、`logs/{groupId}` と `requests/{groupId}` の export を seq 順に結合すれば、prune 後も全量 replay 調査ができる。
 
 1. **requests export と state export を取る** (`requests/{gameId}` と `games/{gameId}`。state は JSON 文字列として格納されている点に注意)
-2. **まず requestedBy / responsedBy を見る**: 誰が操作し、誰が host だったか。複数プレイヤー交錯説・host migration の有無はここで数分で判定できる
+2. **まず requestedBy / responsedBy を見る**: 誰が操作し、誰が host だったか。複数プレイヤー交錯説・host migration の有無はここで数分で判定できる。`requested` と `responsed` (いずれも serverNow 基準、ADR-0008) の差で「依頼から裁定までの遅延」も export だけで確認できる
 3. **封筒の `seq` を実適用順の正として使う**: push id 順や export の並びは信頼しない。seq 順で action を replay し、最終 state と一致するか確認する (一致すれば「記録された action が記録された順に 1 回ずつ適用された」ことが確定する)
 4. **異常データの照合**: 同一 seq の複数 request (→dual-host 窓。epoch/responsedBy で勝者を判定)、responsedBy が無い request (→host 不在で滞留)、`result.type` を確認する
 5. **ユーザ報告と突き合わせる**: UI は controlled で楽観更新なしのため、「画面に見えていた state」=「その端末の同期済み state」。request の payload は「ユーザが物理的に操作した対象」そのものなので、操作列から意図を復元できる

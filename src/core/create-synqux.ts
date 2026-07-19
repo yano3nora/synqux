@@ -299,6 +299,7 @@ export const createSynqux = <
     requested: envelope.requested,
     requestedBy: envelope.requestedBy,
     responsedBy: envelope.responsedBy,
+    responsed: envelope.responsed,
     epoch: envelope.epoch,
     seq: envelope.seq,
     action: {
@@ -314,6 +315,54 @@ export const createSynqux = <
         ? undefined
         : (JSON.parse(envelope.result) as Result),
   })
+
+  /**
+   * result.log の console 出力 (ADR-0008)。出力は synqux の責務で、
+   * targets 準拠 (空 = standalone 扱いで無条件出力) で自端末宛てのみ出す
+   */
+  const emitLog = (root: TRoot, result: Result): void => {
+    if (!result.log) {
+      return
+    }
+
+    const selfId = root.synqux.connections.selfId
+    if (
+      result.targets.length > 0 &&
+      (!selfId || !result.targets.includes(selfId))
+    ) {
+      return
+    }
+
+    if (result.type === 'error') {
+      console.error(result.log)
+    } else {
+      console.log(result.log)
+    }
+  }
+
+  /**
+   * 適用済み synced action が生んだ result の log を出力する。
+   * host の試し実行は middleware を通らないため二重出力しない。過去 result の
+   * 再出力は「直前 dispatch と同一 hash の result か」で防ぐ
+   */
+  const emitAppliedResultLog = (root: TRoot, action: UnknownAction): void => {
+    const result = config.selectSynced(root).result
+
+    if (!result?.log) {
+      return
+    }
+
+    const actionHash = (action.meta as SynquxActionMeta | undefined)?.hash
+    const resultHash = (
+      (result.action as UnknownAction).meta as SynquxActionMeta | undefined
+    )?.hash
+
+    if (!actionHash || actionHash !== resultHash) {
+      return
+    }
+
+    emitLog(root, result)
+  }
 
   // ---------------------------------------------------------------
   // middlewares
@@ -398,6 +447,11 @@ export const createSynqux = <
 
       const applied = next(action)
 
+      if (isSynced) {
+        // 適用 (同期 dispatch・standalone 双方) が生んだ result.log を出力する
+        emitAppliedResultLog(store.getState() as TRoot, action as UnknownAction)
+      }
+
       // standalone (instance 設定で無効) のときだけ localSnapshots へ永続化する。
       // runtime の setEnabled(false) (tutorial 等) では保存しない
       if (!instanceEnabled && isSynced) {
@@ -440,6 +494,12 @@ export const createSynqux = <
           if (ordering.isApplied(id)) {
             break
           }
+
+          // 裁定時刻 (調査用、ADR-0008)。current 読み取り → 直列ゲート判定 →
+          // seq 発行 → 試し実行 → orderingState 評価固定の同期ブロックへ await を
+          // 挟まないため、state を読む前に取得しておく (既知の問題①と同じ構図の
+          // 予防)。取得失敗時は端末時計で代用する (correctness に不使用)
+          const responsed = await transport.serverNow().catch(() => Date.now())
 
           const current = listener.getState() as TRoot
           const entity = current.synqux.requests.entities[id]
@@ -500,11 +560,11 @@ export const createSynqux = <
             // (v1 の既知の問題①と同じ構図の再発防止)
             const orderingState = ordering.stateWith(seq, id)
 
-            // 決定性検出網: 試し実行結果を控える。error & console は dispatch
-            // されず実適用が発生しないため対象外
+            // 決定性検出網: 試し実行結果を控える。log 専用の error (message
+            // なし) は dispatch されず実適用が発生しないため対象外
             if (
               devDeterminismCheck &&
-              !(result?.type === 'error' && result.console)
+              !(result?.type === 'error' && !result.message)
             ) {
               expectedSyncedByRequest.set(
                 id,
@@ -516,6 +576,7 @@ export const createSynqux = <
               epoch,
               seq,
               responsedBy,
+              responsed,
               result: result ? serializeResult(result) : null,
             })
 
@@ -544,12 +605,13 @@ export const createSynqux = <
                 epoch,
                 seq, // 同一 seq を使う。二重発行になっても tiebreak が収束させる
                 responsedBy,
+                responsed,
                 result: serializeResult({
                   action: entity.action as TAction,
                   type: 'error',
                   targets: [entity.requestedBy],
-                  message: e instanceof Error ? e.message : String(e),
-                  console: true,
+                  // message なし = log 専用の拒否として dispatch を省略させる
+                  log: e instanceof Error ? e.message : String(e),
                 }),
               })
             } catch (respondError) {
@@ -675,9 +737,10 @@ export const createSynqux = <
             continue
           }
 
-          // error & console な result は負荷軽減のため dispatch せず直接出力
-          if (entity.result?.type === 'error' && entity.result.console) {
-            console.error(entity.result.message)
+          // log 専用の error (message なし) は UI に出すデータがなく、
+          // 負荷軽減のため dispatch せず console へ直接出力する (ADR-0008)
+          if (entity.result?.type === 'error' && !entity.result.message) {
+            emitLog(current, entity.result)
             ordering.markApplied(seq, id)
             waker.notify() // 適用完了: 次の seq を待つ fork を起こす
             break

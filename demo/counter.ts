@@ -44,7 +44,9 @@ export const counterReducer: Reducer<CounterState> = (
       // 積む → host が拒否し、依頼元にだけ通知される (message ありなので画面通知)
       if (next > MAX || next < MIN) {
         return stateWithError({ ...state }, action, {
-          message: `count は ${String(MIN)}〜${String(MAX)} の範囲です`,
+          message: {
+            text: `count は ${String(MIN)}〜${String(MAX)} の範囲です`,
+          },
         })
       }
 

@@ -292,6 +292,7 @@ describe('firebaseTransport', () => {
       epoch: 1,
       seq: 5,
       responsedBy: 'conn-1',
+      responsed: 1,
       result: null,
     })
 
@@ -304,6 +305,7 @@ describe('firebaseTransport', () => {
       epoch: 1,
       seq: 5,
       responsedBy: 'conn-1',
+      responsed: 1,
       result: null,
     })
   })

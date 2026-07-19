@@ -75,7 +75,7 @@ describe('synqux/react hooks', () => {
       wrapper,
     })
     expect(result.current?.type).toBe('error')
-    expect(result.current?.message).toBe('forbidden')
+    expect(result.current?.log).toBe('forbidden')
   })
 
   it('sync health hooks は Provider 追加なしで health を読める', () => {

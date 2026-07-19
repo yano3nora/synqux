@@ -171,16 +171,17 @@ const render = (): void => {
     )
     .join('')
 
-  // 判定結果は synced state を直読みする (SPEC-public-api の作法)
+  // 判定結果は synced state を直読みする (SPEC-public-api の作法)。
+  // message は UI 表示想定データ (ADR-0008)。log 専用の result はここに出さない
   const result = state.demo.counter.result
-  el('result').textContent =
-    result && !result.console ? `${result.type}: ${result.message}` : ''
+  el('result').textContent = result?.message
+    ? `${result.type}: ${result.message.text}`
+    : ''
 
   const ledgerResult = state.demo.ledger.result
-  el('ledger-result').textContent =
-    ledgerResult && !ledgerResult.console
-      ? `${ledgerResult.type}: ${ledgerResult.message}`
-      : ''
+  el('ledger-result').textContent = ledgerResult?.message
+    ? `${ledgerResult.type}: ${ledgerResult.message.text}`
+    : ''
 }
 
 store.subscribe(render)

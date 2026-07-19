@@ -21,6 +21,8 @@ export type PendingRequest = {
   requested: number
   requestedBy: Peer['id']
   responsedBy?: Peer['id']
+  /** serverNow() 基準の裁定時刻 (ADR-0008)。responsedBy とセットで付く */
+  responsed?: number
   /** host の裁定印 (ADR-0002)。responsedBy とセットで付く */
   epoch?: number
   seq?: number

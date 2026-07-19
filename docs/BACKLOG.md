@@ -11,3 +11,5 @@
 4. ADR, SPEC の Open Questions と重複する項目は、決着時に ADR, SPEC 側も更新すること
 
 ## 次イテレーション候補
+
+(空。2026-07-19 に「Result / 封筒形状の刷新 (ADR-0008)」「setEnabled 契約の明文化」「README How to 2 件」を消化 — `TASK-260719-*.md` を参照)

@@ -284,6 +284,7 @@ export const firebaseTransport = (
         epoch: patch.epoch,
         seq: patch.seq,
         responsedBy: patch.responsedBy,
+        responsed: patch.responsed,
         result: patch.result,
       })
     },

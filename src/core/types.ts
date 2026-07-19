@@ -6,7 +6,7 @@ import type { Action } from '@reduxjs/toolkit'
  * 将来の wire format 変更時に新旧混在を「検出して明示的に拒否」するためのフィールド
  * (ADR-0001 Decision 10)。互換性のない変更を入れるときは必ず increment すること
  */
-export const SYNQUX_SCHEMA_VERSION = 2
+export const SYNQUX_SCHEMA_VERSION = 3
 
 export type Unsubscribe = () => void
 
@@ -38,32 +38,48 @@ export type Peer = {
 }
 
 /**
+ * Result.message の型契約 (ADR-0008)
+ *
+ * text 以外のフィールド (表示時間・severity 等) は consumer が generics で拡張する。
+ * JSON 直列化して封筒で運ぶため、値は JSON-serializable であること
+ */
+export type ResultMessage = { text: string }
+
+/**
  * reducer (唯一の判定器) が書き、host が読む成否判定結果
  *
  * consumer の synced reducer は validation 失敗時に state を変えず result へ
  * error を積む。host は rootReducer を試し実行してこの type で受理・拒否を判定する
+ *
+ * 拒否された request は state に痕跡を残せない (reducer は error 時 state 不変)
+ * ため、result が失敗 feedback を UI へ届ける唯一のチャネルになる (ADR-0008)。
+ * 通知チャネルは 2 系統: message (UI 表示、表示自体は consumer 責務) と
+ * log (console 出力、synqux が出力する)
  */
-export type Result<TAction extends Action = Action> = {
+export type Result<
+  TAction extends Action = Action,
+  TMessage extends ResultMessage = ResultMessage,
+> = {
   /** 対応する action。meta.hash で「既に通知した result か」を判定できる */
   action: TAction
 
   type: 'error' | 'success'
-  message: string
+
+  /**
+   * UI 表示想定データ。undefined なら画面通知なし。
+   * error かつ message なしの result は「log 専用の拒否」として action の
+   * dispatch 自体が省略される (連打・遅延で弾かれた操作のノイズ抑制)
+   */
+  message?: TMessage
 
   /** 通知先 peer id。standalone 時は [] で無条件表示 */
   targets: Peer['id'][]
 
   /**
-   * 通知を画面に出さず console.error へ流すフラグ
-   * 連打・遅延で弾かれた操作の通知はノイズのため裏へ流しつつデータだけ残す用途
+   * console 出力メッセージ。synqux が type に応じて console.log / console.error
+   * へ出力する (targets 準拠)。デバッグ・運用ログ用途で UI には出さない
    */
-  console?: true
-
-  /**
-   * 通知 UI (toast 等) の表示時間 ms。null で自動消去なし
-   * 表示自体は consumer の UI 責務で、synqux は値を運ぶだけ
-   */
-  duration?: number | null
+  log?: string
 }
 
 /**
@@ -72,8 +88,11 @@ export type Result<TAction extends Action = Action> = {
  * 移植元 GameState と異なり revisions は含まない — 処理済み順序は synqux が
  * snapshot 封筒側 (SnapshotEnvelope.ordering) で管理する (Decision 11)
  */
-export type SynquxSynced<TAction extends Action = Action> = {
-  result: Result<TAction> | null
+export type SynquxSynced<
+  TAction extends Action = Action,
+  TMessage extends ResultMessage = ResultMessage,
+> = {
+  result: Result<TAction, TMessage> | null
 }
 
 /**
@@ -130,6 +149,12 @@ export type RequestEnvelope = {
 
   /** host の裁定済みマーク。この有無が「判定待ち / 適用待ち」の実質の区別 */
   responsedBy?: Peer['id']
+
+  /**
+   * serverNow() 基準の裁定時刻 (ADR-0008)。requested との差で「依頼から裁定
+   * までの遅延」を export だけで調査できる。correctness には使わない
+   */
+  responsed?: number
 
   /**
    * host の世代番号 (fencing、ADR-0002)。dual-host 窓で同一 seq が衝突したとき
@@ -237,6 +262,8 @@ export type SynquxTransport = SnapshotStore & {
       epoch: number
       seq: number
       responsedBy: Peer['id']
+      /** serverNow() 基準の裁定時刻 (ADR-0008)。そのまま封筒へ焼く */
+      responsed: number
       result: RequestEnvelope['result'] | null
     },
   ): Promise<void>

@@ -11,7 +11,12 @@ import {
   selectSyncHealth,
 } from '../core/selectors.js'
 import type { SynquxHealth, SynquxState } from '../core/slice.js'
-import type { Peer, Result, SynquxSynced } from '../core/types.js'
+import type {
+  Peer,
+  Result,
+  ResultMessage,
+  SynquxSynced,
+} from '../core/types.js'
 
 /**
  * synqux/react — ゲーム開発者層の読み取り hooks (ADR-0001 Decision 7)
@@ -75,7 +80,8 @@ export const useIsSyncUnrecoverable = (): boolean =>
  */
 export const useLatestResult = <
   TAction extends Action = Action,
->(): Result<TAction> | null => {
+  TMessage extends ResultMessage = ResultMessage,
+>(): Result<TAction, TMessage> | null => {
   const context = useContext(SynquxContext)
 
   if (!context) {
@@ -84,5 +90,5 @@ export const useLatestResult = <
 
   return useSelector(
     (state) => context.selectSynced(state as never).result,
-  ) as Result<TAction> | null
+  ) as Result<TAction, TMessage> | null
 }

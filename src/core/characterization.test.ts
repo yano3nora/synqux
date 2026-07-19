@@ -34,6 +34,7 @@ const createStubTransport = () => {
         epoch: number
         seq: number
         responsedBy: string
+        responsed: number
         result: string | null
       },
     ) => undefined,
@@ -85,7 +86,6 @@ const makeRequest = (
 const successResult = (request: PendingRequest): Result => ({
   action: request.action as GameAction,
   type: 'success',
-  message: '',
   targets: [],
 })
 
@@ -216,6 +216,8 @@ describe('host 裁定 fork (requestListener)', () => {
     expect(patch.responsedBy).toBe(SELF)
     expect(patch.epoch).toBe(1) // 初回昇格の世代
     expect(patch.seq).toBe(1) // 採番は appliedSeq + 1
+    // 裁定時刻 (serverNow 基準) が封筒へ焼かれる (ADR-0008)
+    expect(typeof patch.responsed).toBe('number')
     // increment は result を積まない (= null) ので success 扱いで受理される
     expect(patch.result).toBeNull()
 
@@ -243,7 +245,9 @@ describe('host 裁定 fork (requestListener)', () => {
     const raw = respondRequest.mock.calls[0]?.[1].result
     const result = raw ? (JSON.parse(raw) as Result) : null
     expect(result?.type).toBe('error')
-    expect(result?.console).toBe(true)
+    // message なし = log 専用の拒否 (fixture の forbidden は log: 'forbidden')
+    expect(result?.message).toBeUndefined()
+    expect(result?.log).toBe('forbidden')
     // result は判定対象 action のもの (stale result にならない)
     expect((result?.action as GameAction | undefined)?.meta?.hash).toBe(
       request.action.meta?.hash,
@@ -416,14 +420,14 @@ describe('適用 fork (responseListener)', () => {
     ).toBeUndefined()
   })
 
-  it('error & console の result は適用せず console.error へ流し、seq は消費する', async () => {
+  it('log 専用の error result (message なし) は適用せず console.error へ流し、seq は消費する', async () => {
     const spy = vi.spyOn(console, 'error').mockImplementation(() => undefined)
     const { store } = await setupSelfAsHost()
     const base = makeRequest({ type: 'game/increment', payload: 1 })
     const request = responded(
       base,
       { seq: 1 },
-      { result: { ...successResult(base), type: 'error', console: true } },
+      { result: { ...successResult(base), type: 'error', log: 'rejected' } },
     )
 
     store.dispatch(synquxActions.requestChanged({ request }))
