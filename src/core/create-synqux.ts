@@ -816,7 +816,7 @@ export const createSynqux = <
 
       if (payload) {
         const envelope = parseSnapshotPayload(payload)
-        ordering.seed(envelope.ordering)
+        ordering.restore(envelope.ordering)
         store.dispatch(
           synquxRestored({ synced: clearRestoredResult(envelope.synced) }),
         )
@@ -845,7 +845,7 @@ export const createSynqux = <
 
     if (payload) {
       const envelope = parseSnapshotPayload(payload)
-      ordering.seed(envelope.ordering)
+      ordering.restore(envelope.ordering)
       store.dispatch(
         synquxRestored({ synced: clearRestoredResult(envelope.synced) }),
       )
@@ -984,15 +984,31 @@ export const createSynqux = <
 
           // 同値を含む過去 snapshot は synced を巻き戻し得るため受理しない。
           if (envelope.ordering.appliedSeq > applied) {
-            // seed と dispatch は await を挟まない同期ブロックにし、待機 fork の
+            // restore と dispatch は await を挟まない同期ブロックにし、待機 fork の
             // 適用と restore が中途半端な ordering/state の組を観測しないようにする。
-            ordering.seed(envelope.ordering)
+            ordering.restore(envelope.ordering)
             store.dispatch(
               synquxRestored({
                 synced: clearRestoredResult(envelope.synced),
               }),
             )
             waker.notify()
+
+            // 再裁定 envelope を isApplied 残留で破棄した fork は break 済みで
+            // 死んでいる。resubscribe (stage a) は restore (stage b) より前に
+            // 走るため、restore で purge しても再処理する主体がいない。
+            // 二重 fork は isApplied / isProcessing / entity 消滅 / tiebreak の
+            // 既存ガードが吸収するため、未適用の裁定済み entity を再評価する。
+            for (const request of Object.values(
+              store.getState().synqux.requests.entities,
+            )) {
+              if (
+                request.seq !== undefined &&
+                !ordering.isApplied(request.id)
+              ) {
+                store.dispatch(synquxActions.requestChanged({ request }))
+              }
+            }
           }
         }
 

@@ -35,6 +35,7 @@
     - → 成否判定器は reducer ただ一つ。host / client / 同期なし (standalone) でロジックが分岐せず、reducer さえ堅牢なら同期しても壊れない
 - **snapshot と restore** — `src/core/snapshot.ts`, `src/core/create-synqux.ts` (`subscribe` / `persistSnapshot`)
     - host は request を 1 件処理するたびに synced state 全体を canonical JSON の封筒で永続化する (封筒には順序状態 = epoch / appliedSeq / 直近適用窓も載る)。ack 後、適用窓の外 (`seq < appliedSeq - 200`) を fire-and-forget で prune する (ADR-0005)。復帰端末は snapshot を復元してから残存 requests を全量購読し、適用済み分は seq で破棄して追いつく
+    - restore は ordering の適用窓・適用済み id 集合を snapshot の内容で完全置換し、残存する未適用の裁定済み envelope を再評価する
     - → 途中参加・リロード・host migration をまたいでも状態と順序保証が継続し、requests の保存量はセッション長に比例しない
 
 ## 同期の仕組み
@@ -98,7 +99,7 @@ client                      firebase                     host
 
 ### 既知トレードオフ (仕様として明文化)
 
-- **dual-host 窓の一時分岐**: presence 遅延で 2 端末が host を自認した窓 (host は最新接続端末のため、新規参加のたびに短時間開く) で、異なる request が同一 seq を得ることがある。正史 (host + snapshot + 封筒の seq) は常に一本道で壊れず、未適用の端末は決定的 tiebreak で同じ勝者に合意し、敗者は再裁定で救済される。ただし**勝者到着前に敗者を適用してしまった端末**は、勝者を適用する機会を失い、敗者の再裁定 seq も適用済み扱いで破棄して stall する。この端末が host に昇格すると直列裁定ゲートにより群全体の裁定も止まる。sync health の snapshot restore で正史へ戻り、群の裁定も再開する (再現: `src/core/recovery.test.ts`)
+- **dual-host 窓の一時分岐**: presence 遅延で 2 端末が host を自認した窓 (host は最新接続端末のため、新規参加のたびに短時間開く) で、異なる request が同一 seq を得ることがある。正史 (host + snapshot + 封筒の seq) は常に一本道で壊れず、未適用の端末は決定的 tiebreak で同じ勝者に合意し、敗者は再裁定で救済される。ただし**勝者到着前に敗者を適用してしまった端末**は、勝者を適用する機会を失い、敗者の再裁定 seq も適用済み扱いで破棄して stall する。この端末が host に昇格すると直列裁定ゲートにより群全体の裁定も止まる。sync health の snapshot restore は ordering を正史で完全置換して裁定済み envelope を再評価するため、再裁定 seq が restore snapshot より先にある場合も正史へ追いつき、群の裁定を再開する (再現: `src/core/recovery.test.ts`)
 - **敗者救済の範囲は直近適用窓 (200 件) まで**: 窓より古い敗者は正史との区別記録がなく、適用済み扱いで破棄される (v1 は敗者救済ゼロだったため純増の改善)
 - **回復不能な seq gap はリロードが必要**: 配送欠落は requests 再購読、dual-host 早期適用は snapshot restore で自動回復する (ADR-0004)。各段階は 1 gap エピソードにつき 1 回だけで、snapshot が無い・自端末以下など 1 巡で戻れない場合は `unrecoverable` となる。この場合だけ consumer がリロードを案内する。遅着で gap が自然解消すれば `unrecoverable` からも `ok` へ戻る
 

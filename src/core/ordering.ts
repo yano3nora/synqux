@@ -25,8 +25,14 @@ export type OrderingState = {
 }
 
 export type Ordering = {
-  /** restore した snapshot の順序状態から復元する */
-  seed(state: OrderingState): void
+  /**
+   * snapshot の正史へ復元する (TASK-260719):
+   * - appliedSeq / appliedWindow / appliedIds: snapshot で完全置換
+   * - maxSeenEpoch: fencing を後退させないよう観測最大を維持
+   * - myEpoch: beginHosting の世代、maxIssuedSeq: 発行高水位として維持
+   * - seenAddedIds: 再購読の責務、processing: 同期的処理ガードとして維持
+   */
+  restore(state: OrderingState): void
 
   /** snapshot 封筒へ永続化する状態 */
   state(): OrderingState
@@ -106,7 +112,7 @@ export const createOrdering = (): Ordering => {
   let maxSeenEpoch = 0
   let maxIssuedSeq = 0
 
-  /** 直近適用窓。restore の seed でも埋まる */
+  /** 直近適用窓。snapshot restore でも埋まる */
   const appliedWindow = new Map<number, RequestEnvelope['id']>()
   /** セッション内で適用した (または窓で復元した) request id */
   const appliedIds = new Set<RequestEnvelope['id']>()
@@ -128,9 +134,18 @@ export const createOrdering = (): Ordering => {
   }
 
   return {
-    seed(state) {
+    /**
+     * snapshot の正史へ復元する (TASK-260719):
+     * - appliedSeq / appliedWindow / appliedIds: snapshot で完全置換
+     * - maxSeenEpoch: fencing を後退させないよう観測最大を維持
+     * - myEpoch: beginHosting の世代、maxIssuedSeq: 発行高水位として維持
+     * - seenAddedIds: 再購読の責務、processing: 同期的処理ガードとして維持
+     */
+    restore(state) {
       appliedSeq = state.appliedSeq
       maxSeenEpoch = Math.max(maxSeenEpoch, state.epoch)
+      appliedWindow.clear()
+      appliedIds.clear()
 
       for (const [seq, id] of Object.entries(state.applied)) {
         appliedWindow.set(Number(seq), id)

@@ -149,6 +149,107 @@ describe('sync auto recovery', () => {
     expect(a.loadSnapshot).toHaveBeenCalledTimes(2)
   })
 
+  it('restore snapshot より先の再裁定 envelope を再評価して収束する', async () => {
+    const hub = createMemoryHub()
+    const a = createTrackedClient(hub)
+    const b = createHubClient(hub, { stallAfterMs: STALL_AFTER_MS })
+    const c = createHubClient(hub, { stallAfterMs: STALL_AFTER_MS })
+
+    await a.sync.subscribe({ store: a.store, groupId: GROUP_ID })
+    await b.sync.subscribe({ store: b.store, groupId: GROUP_ID })
+    await c.sync.subscribe({ store: c.store, groupId: GROUP_ID })
+    await settle(10)
+
+    b.store.dispatch(synquxActions.peerRemoved('peer-3'))
+    const delayedLoserToCanonicalHost = hub.faults.delay({
+      requestId: '000000000001',
+      to: 'peer-3',
+    })
+    a.store.dispatch({ type: 'game/increment', payload: 1 })
+    await settle(10)
+
+    hub.faults.drop({
+      requestId: '000000000002',
+      to: 'peer-2',
+      event: 'added',
+    })
+    hub.faults.drop({
+      requestId: '000000000002',
+      to: 'peer-2',
+      event: 'changed',
+    })
+    const delayedWinnerToA = hub.faults.delay({
+      requestId: '000000000002',
+      to: 'peer-1',
+      event: 'changed',
+    })
+    a.store.dispatch({ type: 'game/increment', payload: 10 })
+    await settle(10)
+    delayedWinnerToA.release()
+    await settle(5)
+
+    // dual-host 窓を閉じ、以降は canonical host (peer-3) だけが裁定する。
+    const canonicalHost = hub.inspect
+      .peers(GROUP_ID)
+      .find((peer) => peer.id === 'peer-3')
+    expect(canonicalHost).toBeDefined()
+    b.store.dispatch(synquxActions.peerUpserted(canonicalHost!))
+
+    // 初回 fan-out と再購読時の全量再配送をともに落とす。fault は配送単位の
+    // one-shot なので、added / changed の各配送機会ぶんを積んでおく。
+    for (const event of ['added', 'changed'] as const) {
+      hub.faults.drop({
+        requestId: '000000000003',
+        to: 'peer-1',
+        event,
+      })
+      hub.faults.drop({
+        requestId: '000000000003',
+        to: 'peer-1',
+        event,
+      })
+    }
+    b.store.dispatch({ type: 'game/increment', payload: 100 })
+    await settle(20)
+
+    const snapshotAtSeq2 = hub.inspect.snapshot(GROUP_ID)
+    expect(snapshotAtSeq2).not.toBeNull()
+    expect(JSON.parse(snapshotAtSeq2!).ordering.appliedSeq).toBe(2)
+
+    const heldLoserAck = hub.faults.holdAck('000000000001')
+    delayedLoserToCanonicalHost.release()
+    await settle(20)
+
+    expect(a.store.getState().game.log).toEqual(['increment:1'])
+    expect(c.store.getState().game.log).toEqual([
+      'increment:10',
+      'increment:100',
+      'increment:1',
+    ])
+    expect(hub.inspect.requests(GROUP_ID)[0]?.seq).toBe(3)
+    expect(
+      JSON.parse(hub.inspect.snapshot(GROUP_ID)!).ordering.appliedSeq,
+    ).toBe(2)
+
+    await advanceToResubscribe()
+    await settle(10)
+    expect(a.store.getState().game.log).toEqual(['increment:1'])
+
+    await advanceToRestore()
+    await settle(20)
+
+    heldLoserAck.release()
+    await settle(30)
+
+    expect(a.store.getState().game.log).toEqual(c.store.getState().game.log)
+    expect(a.store.getState().game.log).toEqual([
+      'increment:10',
+      'increment:100',
+      'increment:1',
+    ])
+    expect(selectSyncHealth(a.store.getState()).phase).toBe('ok')
+  })
+
   it('回復中の重複・順序入れ替えでも各 request を高々 1 回だけ適用する', async () => {
     const { hub, a, b, c } = await arrangeMissingFirstResponse()
     hub.faults.duplicate({

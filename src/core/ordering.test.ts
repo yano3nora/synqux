@@ -83,10 +83,10 @@ describe('createOrdering (ADR-0002)', () => {
     })
   })
 
-  describe('永続状態 (seed / state / stateWith / 直近窓)', () => {
-    it('seed で restore し、直近窓の id は適用済みとして扱う (正史/敗者の判別)', () => {
+  describe('永続状態 (restore / state / stateWith / 直近窓)', () => {
+    it('restore し、直近窓の id は適用済みとして扱う (正史/敗者の判別)', () => {
       const ordering = createOrdering()
-      ordering.seed({
+      ordering.restore({
         epoch: 5,
         appliedSeq: 10,
         applied: { 9: 'req-9', 10: 'req-10' },
@@ -99,6 +99,40 @@ describe('createOrdering (ADR-0002)', () => {
       expect(ordering.isApplied('req-loser')).toBe(false)
       // 復元した epoch を跨いで昇格する
       expect(ordering.beginHosting()).toBe(6)
+    })
+
+    it('restore は適用位置と直近窓を snapshot の正史で完全置換する', () => {
+      const ordering = createOrdering()
+      ordering.markApplied(1, 'X')
+
+      ordering.restore({
+        epoch: 2,
+        appliedSeq: 2,
+        applied: { 1: 'Y', 2: 'Z' },
+      })
+
+      expect(ordering.isApplied('X')).toBe(false)
+      expect(ordering.isApplied('Y')).toBe(true)
+      expect(ordering.isApplied('Z')).toBe(true)
+      expect(ordering.appliedSeq()).toBe(2)
+    })
+
+    it('restore は観測済み epoch を後退させない', () => {
+      const ordering = createOrdering()
+      ordering.observe({ epoch: 5 })
+
+      ordering.restore({ epoch: 2, appliedSeq: 0, applied: {} })
+
+      expect(ordering.beginHosting()).toBe(6)
+    })
+
+    it('restore は処理中ガードを維持する', () => {
+      const ordering = createOrdering()
+      ordering.beginProcessing('P')
+
+      ordering.restore({ epoch: 2, appliedSeq: 0, applied: {} })
+
+      expect(ordering.isProcessing('P')).toBe(true)
     })
 
     it('stateWith は「この request 適用後」の snapshot 状態を返す (ack await 前の評価固定用)', () => {
