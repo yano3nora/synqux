@@ -59,7 +59,7 @@
   },
   "peerDependencies": {
     "@reduxjs/toolkit": "^2.0.0",
-    "firebase": ">=9",
+    "firebase": ">=9.9.0",
     "react": ">=18",
     "react-redux": ">=9"
   },

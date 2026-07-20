@@ -28,10 +28,12 @@
 - `subscribe` の `signal?: AbortSignal` (ADR-0012): offline 起動などの接続確立待ちを consumer 判断で中断できる。省略時は従来どおり無期限待機 (復帰時に無操作で接続)。abort は presence を残さず rollback し、同 instance で再 subscribe できる
 - Firebase adapter: `groupId` の RTDB key 禁止文字 (`. # $ / [ ]`・制御文字・空文字) を connect 入口で明示的に拒否
 - memory hub fault: `cancelSubscriptions(peerId)` (購読の回復不能な打ち切りの注入)
+- primitive 方式 (手書き rootReducer) の正式契約化: `synquxRestored` / `PendingRequest` を SPEC-0002 の公開一覧へ追加し、mount 位置固定・`synquxRestored` の match 必須・consumer からの dispatch 禁止 (desync footgun) を明文化。main entry の runtime export 一覧を assert する公開 surface 回帰テストを追加
 
 ### Changed
 
 - `selectIsSyncStalled` / `useIsSyncStalled` は回復中・回復不能を含む `phase !== 'ok'` を返す。リロード案内は `*IsSyncUnrecoverable` を使う
+- peer `firebase` を `>=9` から実証済みの `>=9.9.0` へ狭めた。9.0.0–9.8.0 は package.json `exports` に types 条件がなく、`moduleResolution: Bundler` で adapter の型解決が通らないことを確認 (9.9.0 / 9.23.0 / 10.0.0 / 11.0.0 / 12.x で型検査 PASS)
 
 ### Fixed
 

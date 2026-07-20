@@ -18,20 +18,15 @@
 
 ### P1 — 本番境界と公開契約
 
-> 2026-07-20 の P1 評価で再構成。入力検証の設計は縮小 (ADR-0009 で tamper 耐性は対象外と
-> 決定済みのため、同一 schema の壊れた封筒への深い検証は YAGNI と判断)、request id 契約と
-> emulator gate は P2 へ降格。waiter メモリ増加は [TASK-260720-waker-timeout-cleanup](TASK-260720-waker-timeout-cleanup.md)、
-> wire / adapter 境界の失敗系は [TASK-260720-wire-adapter-failure-handling](TASK-260720-wire-adapter-failure-handling.md) (ADR-0012) で解消済み
+> 2026-07-20 の P1 評価で再構成し、同日中に全件解消。
+> 入力検証の設計は縮小 (ADR-0009 で tamper 耐性は対象外と決定済みのため、同一 schema の
+> 壊れた封筒への深い検証は YAGNI と判断)、request id 契約と emulator gate は P2 へ降格。
+> 解消記録: [waker-timeout-cleanup](TASK-260720-waker-timeout-cleanup.md) /
+> [wire-adapter-failure-handling](TASK-260720-wire-adapter-failure-handling.md) (ADR-0012) /
+> [primitive-contract](TASK-260720-primitive-contract.md) /
+> [firebase-peer-range](TASK-260720-firebase-peer-range.md)
 
-- **primitive 方式 (手書き rootReducer) を正式契約化する**
-  - 方針決定済み (2026-07-20): `createSynquxRootReducer` と手書き rootReducer の両方を受け入れる。よって `synquxRestored` / `PendingRequest` の export は継続し、「再判断」ではなく契約化タスクに縮小
-  - SPEC-0002 の公開一覧へ追加し、primitive 方式の契約を明文化する — mount 位置は `state.synqux` 固定、rootReducer での `synquxRestored` match 処理が必須、consumer が自分で dispatch するのは禁止 (自端末だけ synced が差し替わり desync する) を危険性として明記
-  - `src/index.ts` の export 一覧を assert する公開 surface 回帰テストを追加する
-  - 見送りのデメリット: 未文書の内部 API が事実上の公開契約として固定され、0.3.0 publish 後の変更は semver major になる。文書化が最安なのは publish 前の今
-- **firebase peer 範囲 (`>=9`) の宣言が実証済みか検証する**
-  - ランタイムで弾く機構は作らない (バージョン不整合の警告は npm の peer 解決に任せる)。adapter が使う modular API (`runTransaction` / `startAfter` / `orderByKey` 等) が宣言最低版で型ごと通るかを一度検証する話
-  - scratch dir に firebase@9.0.0 を入れて adapter の tsc が通るか確認し、通らなければ宣言を実証済みの範囲 (例: `>=10`) へ狭める。RTDB の `startAfter` は v9 系追加 API のため 9.0.0 当初から存在したかが特に怪しい
-  - 見送りのデメリット: 未実証の peer 範囲のまま publish され、古い firebase を使う consumer で install 後に型エラー・実行時エラーとして発覚する
+- (なし)
 
 ### P2 — 文書・consumer 導入・コスト最適化
 

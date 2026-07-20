@@ -184,7 +184,11 @@ const synquxSlice = createSlice({
  * snapshot restore の合図。synced state の全量差し替えは synqux 内部 slice では
  * 行えない (consumer の state のため) ので、createSynquxRootReducer がこれを
  * 匹配して synced subtree を置き換える。primitive 方式の consumer は自前の
- * rootReducer でこの action を処理すること
+ * rootReducer でこの action を処理すること (SPEC-0002「primitive 方式の正式契約」)
+ *
+ * 【危険・禁止】consumer が自分で dispatch しないこと。request 経路を通らない
+ * state 差し替えは自端末にしか起きず、他端末と静かに desync する。dispatch する
+ * 主体は core のみで、consumer が触れてよいのは match までとする
  */
 export const synquxRestored = createAction<{ synced: unknown }>(
   'synqux/restored',

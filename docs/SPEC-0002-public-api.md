@@ -198,6 +198,31 @@ export function createSynquxRootReducer<
 export const synquxReducer: Reducer<SynquxState>
 
 // ============================================================
+// primitive 方式の正式契約 (2026-07-20 正式化、TASK-260720-primitive-contract)
+// ============================================================
+
+/**
+ * snapshot restore の合図として core が dispatch する action。
+ *
+ * primitive 方式 (手書き rootReducer) の契約:
+ * 1. `synquxReducer` を予約 key `state.synqux` に mount する (位置は固定)
+ * 2. rootReducer で本 action を match し、synced subtree を `payload.synced` で
+ *    全量差し替える (createSynquxRootReducer 利用時は自動で処理される)
+ * 3. 【危険・禁止】consumer が自分で dispatch しないこと — request 経路を通らない
+ *    state 差し替えは自端末にしか起きず、他端末と静かに desync する。
+ *    dispatch する主体は core (subscribe 時の restore / 回復時の再 restore) のみ。
+ *    consumer が触れてよいのは match (+ 自前 rootReducer のテストでの再現) まで
+ */
+export const synquxRestored: PayloadActionCreator<{ synced: unknown }>
+
+/**
+ * 受信済み・適用未完了 request の内部表現 (`SynquxState.requests.entities` の値)。
+ * `SynquxState` を公開する以上、構成型として公開が必要になるもの。
+ * consumer が読み書きする想定はない (request 語彙はゲーム開発者層に出さない)
+ */
+export type PendingRequest
+
+// ============================================================
 // reducer ヘルパー (ゲーム開発者層、Decision 7)
 // ============================================================
 
@@ -450,7 +475,7 @@ type SnapshotEnvelope<TSynced> = {
 
 | subpath | 主な export | 対象 |
 | --- | --- | --- |
-| `synqux` | `createSynqux` / `createSynquxRootReducer` / `synquxReducer` / `stateWithError` / `stateWithResult` / `generateResult` / `selectIsHost` / `selectPeers` / `selectSelfId` / `selectSyncHealth` / `selectIsSyncStalled` / `selectIsSyncUnrecoverable` / `localStorageSnapshotStore` / 型 (`SynquxSynced` / `SynquxHealth` / `Result` / `ResultMessage` / `Peer` / `SynquxActionMeta` / `SynquxTransport` / `SnapshotStore` / `RequestEnvelope` / `SynquxState`) | セットアップ層 + reducer ヘルパー |
+| `synqux` | `createSynqux` / `createSynquxRootReducer` / `synquxReducer` / `synquxRestored` (primitive 方式の restore 契約。dispatch 禁止・match 専用) / `stateWithError` / `stateWithResult` / `generateResult` / `selectIsHost` / `selectPeers` / `selectSelfId` / `selectSyncHealth` / `selectIsSyncStalled` / `selectIsSyncUnrecoverable` / `localStorageSnapshotStore` / 型 (`SynquxSynced` / `SynquxHealth` / `Result` / `ResultMessage` / `Peer` / `SynquxActionMeta` / `SynquxTransport` / `SnapshotStore` / `RequestEnvelope` / `SynquxState` / `PendingRequest`) | セットアップ層 + reducer ヘルパー |
 | `synqux/react` | `SynquxProvider` / `useIsHost` / `usePeers` / `useSelfId` / `useSyncHealth` / `useIsSyncStalled` / `useIsSyncUnrecoverable` / `useLatestResult` | ゲーム開発者層 |
 | `synqux/testing` | `createMemoryHub` / `verifyActionIdempotency` / `assertActionIdempotency` | consumer CI / 本 repo の simulation test |
 | `synqux/firebase` | `firebaseTransport(db, options?: { archivePrunedRequests?: boolean })` | Phase 2 で実装 |
@@ -473,7 +498,7 @@ type SnapshotEnvelope<TSynced> = {
 
 1. **selector を静的関数にできた**: `state.synqux` が予約 key のため instance なしで `selectIsHost` 等を提供できる。ゲーム開発者が instance に触れない Decision 7 の層分けがそのまま成立する
 2. **`selectLatestResult` は廃止** (レビュー決定): result は consumer 自身の synced state の所有物で直読みできるため、setup 層 re-export の迂回ごと削除。react の `useLatestResult` のみ提供
-3. **createSynquxRootReducer の返り値を config へ spread する形**で、ADR が山場と呼んだ「rootReducer × selectSynced × consumer State 型」の接続点を 1 箇所に畳んだ。primitive 方式は `synquxReducer` + 手書き rootReducer + 手動 `selectSynced` で成立する
+3. **createSynquxRootReducer の返り値を config へ spread する形**で、ADR が山場と呼んだ「rootReducer × selectSynced × consumer State 型」の接続点を 1 箇所に畳んだ。primitive 方式は `synquxReducer` + `synquxRestored` の match + 手書き rootReducer + 手動 `selectSynced` で成立する (契約の正式化は 2026-07-20。上記「primitive 方式の正式契約」と公開 surface 回帰テスト `src/index.test.ts` を参照)
 4. **synced slice は 1 つに限定 — 仕様として確定 (2026-07-18)**。当初は「v1 暫定・複数対応は必要になってから」だったが、host の成否判定 (result の読み取り位置) と snapshot の単位が単一 subtree に固定されることが同期機構の単純さの源泉であり、複数エントリ対応は判定・復元の分割という複雑さだけを持ち込むため採らない。複数ドメインは consumer が合成 reducer で 1 slice に畳み、直近に実行した対象 reducer の result を top-level へ写す (実例: demo/main.ts の demoReducer)
 5. **`agent` / `guest` → `role: 'player' | 'dedicated' | 'observer'` へ改名** (レビュー決定): 排他 enum にすることで「agent かつ guest」という不正状態を型で排除。dedicated は「常駐プロセスを強制 host にして安定進行・無人進行を担う」ユースケース由来 (dedicated server 文化)。process id は `label` へ分離
 6. **`canRequest` hook を追加** (移植元の readonly 端末対応の一般化)。これがないとテンプレ置換 (Phase 2) が成立しないため
