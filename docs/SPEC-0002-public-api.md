@@ -149,6 +149,7 @@ export type Synqux<TRoot, TSynced, TAction> = {
     groupId: string
     role?: Peer['role']   // 自端末の役割。dedicated の判定材料 (query 等) の取得は consumer 責務
     label?: Peer['label']
+    signal?: AbortSignal  // 初期化 (接続確立・restore) の中断 (ADR-0012)。省略時は無期限待機。timeout 政策は consumer が AbortSignal.timeout() 等で選ぶ
   }) => Promise<() => Promise<void>>
 
   actions: {
@@ -348,8 +349,8 @@ export type SnapshotStore = {
 export function localStorageSnapshotStore(): SnapshotStore
 
 export type SynquxTransport = SnapshotStore & {
-  /** presence 登録。selfId は transport が採番する */
-  connect(options: { groupId: string; role?: Peer['role']; label?: Peer['label'] }): Promise<{ selfId: string }>
+  /** presence 登録。selfId は transport が採番する。signal の abort は presence を残さず reject (契約 8, ADR-0012) */
+  connect(options: { groupId: string; role?: Peer['role']; label?: Peer['label']; signal?: AbortSignal }): Promise<{ selfId: string }>
   disconnect(): Promise<void>
 
   /** サーバ基準時刻 (firebase: .info/serverTimeOffset 補正)。meta.dispatched / requested 用 */
@@ -359,6 +360,7 @@ export type SynquxTransport = SnapshotStore & {
     onAdded(peer: Peer): void
     onChanged(peer: Peer): void
     onRemoved(peer: Peer): void
+    onError?(error: unknown): void  // 購読の回復不能な打ち切りの通知 (契約 8, ADR-0012)。渡されたら発火は adapter の義務
   }): Unsubscribe
 
   pushRequest(envelope: Omit<RequestEnvelope, 'id'>): Promise<{ id: string }>
@@ -377,6 +379,7 @@ export type SynquxTransport = SnapshotStore & {
     handlers: {
       onAdded(envelope: RequestEnvelope): void
       onChanged(envelope: RequestEnvelope): void
+      onError?(error: unknown): void  // 購読の回復不能な打ち切りの通知 (契約 8, ADR-0012)
     },
   ): Unsubscribe
 }

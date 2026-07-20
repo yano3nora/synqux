@@ -39,6 +39,8 @@ export type MemoryHub = {
     holdSnapshot(peerId: Peer['id']): { release(): void }
     /** 端末側の disconnect() を経ない切断 (プロセス死の模擬)。presence cleanup として全端末へ onRemoved を配送する */
     disconnect(peerId: Peer['id']): void
+    /** 該当端末の全購読を回復不能に打ち切り、onError を配送する (permission denied の模擬、契約 8) */
+    cancelSubscriptions(peerId: Peer['id']): void
   }
 
   /** テストの assert 用の覗き窓。返り値はすべて deep copy */
@@ -330,6 +332,9 @@ export function createMemoryHub(): MemoryHub {
         if (connected && !closed) {
           throw new Error('Memory transport is already connected')
         }
+
+        // memory hub の connect は同期完了するため、abort 検査は入口のみで足りる
+        options.signal?.throwIfAborted()
 
         const peer: Peer = {
           id: `peer-${nextPeerSequence.toString()}`,
@@ -633,6 +638,33 @@ export function createMemoryHub(): MemoryHub {
 
       disconnect(peerId) {
         removePeer(peerId)
+      },
+
+      cancelSubscriptions(peerId) {
+        for (const group of groups.values()) {
+          const targets = [
+            ...group.peerSubscribers,
+            ...group.requestSubscribers,
+          ].filter((subscriber) => subscriber.peerId === peerId)
+
+          // 一覧から外して以後の新規配送を止める。queue 済みの配送はそのまま
+          // 流し、onError を最後尾へ積む (実 SDK でも cancel 前に受信済みの
+          // イベントは届き得るため、この順序が現実的)
+          group.peerSubscribers = group.peerSubscribers.filter(
+            (subscriber) => subscriber.peerId !== peerId,
+          )
+          group.requestSubscribers = group.requestSubscribers.filter(
+            (subscriber) => subscriber.peerId !== peerId,
+          )
+
+          for (const subscriber of targets) {
+            enqueue(subscriber, () =>
+              subscriber.handlers.onError?.(
+                new Error('Injected subscription cancellation'),
+              ),
+            )
+          }
+        }
       },
     },
 

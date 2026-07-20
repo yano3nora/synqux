@@ -16,12 +16,15 @@ const h = vi.hoisted(() => {
     unsubscribe: ReturnType<typeof vi.fn>
   }[] = []
   const transactionValues: unknown[] = []
+  /** true にすると .info/connected が発火しない offline 起動を模擬する */
+  const offlineConnected = { value: false }
 
   return {
     refMock,
     pushKeys,
     connectedSubscriptions,
     transactionValues,
+    offlineConnected,
     pushMock: vi.fn((target: { path?: string }, value?: unknown) => {
       const key = pushKeys.shift() ?? 'generated-key'
       return Object.assign(
@@ -59,7 +62,9 @@ const h = vi.hoisted(() => {
         if (target.path === '.info/connected') {
           const unsubscribe = vi.fn()
           connectedSubscriptions.push({ callback, unsubscribe })
-          callback({ val: () => true })
+          if (!offlineConnected.value) {
+            callback({ val: () => true })
+          }
           return unsubscribe
         }
         if (target.path === '.info/serverTimeOffset') {
@@ -69,13 +74,31 @@ const h = vi.hoisted(() => {
       },
     ),
     onChildAddedMock: vi.fn(
-      (_target: unknown, _callback: unknown) => () => undefined,
+      (
+        _target: unknown,
+        _callback: unknown,
+        _cancel?: (error: Error) => void,
+      ) =>
+        () =>
+          undefined,
     ),
     onChildChangedMock: vi.fn(
-      (_target: unknown, _callback: unknown) => () => undefined,
+      (
+        _target: unknown,
+        _callback: unknown,
+        _cancel?: (error: Error) => void,
+      ) =>
+        () =>
+          undefined,
     ),
     onChildRemovedMock: vi.fn(
-      (_target: unknown, _callback: unknown) => () => undefined,
+      (
+        _target: unknown,
+        _callback: unknown,
+        _cancel?: (error: Error) => void,
+      ) =>
+        () =>
+          undefined,
     ),
     onDisconnectMock: vi.fn(() => ({
       remove: vi.fn(async () => undefined),
@@ -134,6 +157,7 @@ beforeEach(() => {
   h.pushKeys.length = 0
   h.connectedSubscriptions.length = 0
   h.transactionValues.length = 0
+  h.offlineConnected.value = false
 })
 
 afterEach(() => {
@@ -197,6 +221,90 @@ describe('firebaseTransport', () => {
 
     expect(h.setMock).toHaveBeenCalledTimes(1)
     expect(h.onDisconnectMock).toHaveBeenCalledTimes(1)
+  })
+
+  it('connect: RTDB key に使えない文字を含む groupId は書き込み前に拒否する', async () => {
+    const transport = firebaseTransport(DB)
+
+    await expect(transport.connect({ groupId: 'rooms/abc' })).rejects.toThrow(
+      /Invalid groupId/,
+    )
+
+    expect(h.pushMock).not.toHaveBeenCalled()
+    expect(h.setMock).not.toHaveBeenCalled()
+  })
+
+  it('connect: offline 中の abort が接続確立待ちを打ち切り、リスナーを解除して reject する', async () => {
+    h.offlineConnected.value = true
+    const controller = new AbortController()
+    const transport = firebaseTransport(DB)
+
+    const pending = transport.connect({
+      groupId: GROUP_ID,
+      signal: controller.signal,
+    })
+    controller.abort(new Error('boot cancelled'))
+
+    await expect(pending).rejects.toThrow('boot cancelled')
+    expect(h.connectedSubscriptions.at(-1)?.unsubscribe).toHaveBeenCalled()
+    expect(h.setMock).not.toHaveBeenCalled()
+  })
+
+  it('connect: presence 書き込み後の abort は登録を取り消してから reject する', async () => {
+    h.pushKeys.push('conn-abort')
+    const controller = new AbortController()
+    // set 完了後の読み戻し中に abort が届いた状況を作る
+    h.getMock.mockImplementationOnce(async () => {
+      controller.abort(new Error('boot cancelled'))
+      return { exists: () => false, val: () => null }
+    })
+    const transport = firebaseTransport(DB)
+
+    await expect(
+      transport.connect({ groupId: GROUP_ID, signal: controller.signal }),
+    ).rejects.toThrow('boot cancelled')
+
+    // presence を残さない契約: 削除と onDisconnect 予約の取り消しが行われる
+    expect(h.removeMock).toHaveBeenCalledTimes(1)
+    const lastDisconnect = h.onDisconnectMock.mock.results.at(-1)?.value as {
+      cancel: ReturnType<typeof vi.fn>
+    }
+    expect(lastDisconnect.cancel).toHaveBeenCalled()
+  })
+
+  it('subscribeRequests: 購読の打ち切り (cancel callback) を onError へ引き渡す', async () => {
+    const { transport } = await connect()
+    const onError = vi.fn()
+
+    transport.subscribeRequests(
+      {},
+      { onAdded: () => undefined, onChanged: () => undefined, onError },
+    )
+
+    const cancel = h.onChildAddedMock.mock.calls.at(-1)?.[2]
+    cancel?.(new Error('permission_denied'))
+
+    expect(onError).toHaveBeenCalledTimes(1)
+    expect(onError).toHaveBeenCalledWith(
+      expect.objectContaining({ message: 'permission_denied' }),
+    )
+  })
+
+  it('subscribePeers: 購読の打ち切り (cancel callback) を onError へ引き渡す', async () => {
+    const { transport } = await connect()
+    const onError = vi.fn()
+
+    transport.subscribePeers({
+      onAdded: () => undefined,
+      onChanged: () => undefined,
+      onRemoved: () => undefined,
+      onError,
+    })
+
+    const cancel = h.onChildRemovedMock.mock.calls.at(-1)?.[2]
+    cancel?.(new Error('permission_denied'))
+
+    expect(onError).toHaveBeenCalledTimes(1)
   })
 
   it('disconnect: watcher を先に解除し、その後の切断・復帰では再登録しない', async () => {

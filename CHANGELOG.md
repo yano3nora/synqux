@@ -11,6 +11,8 @@
 - `stateWithError` / `stateWithResult` / `generateResult` / `useLatestResult` が新しい `Result` 形状・generics に追従
 - `RequestEnvelope.responsed` (serverNow 基準の裁定時刻) を追加し、transport `respondRequest` の patch に `responsed` が必須になった
 - `SYNQUX_SCHEMA_VERSION` を 3 へ increment (新旧混在は検出して明示的に拒否)
+- transport 契約に失敗通知 (契約 8) を追加 (ADR-0012): `subscribePeers` / `subscribeRequests` の handlers に `onError?` を追加。購読が回復不能に打ち切られたとき (permission denied 等) の発火が adapter の義務になり、core は health を `unrecoverable` にして unsubscribe → 再 subscribe の判断を consumer に委ねる (自動リトライしない)
+- transport `connect` が `signal?: AbortSignal` を受け取り、abort で presence を残さず速やかに reject する契約になった
 
 ### Added
 
@@ -23,6 +25,9 @@
 - `assertActionIdempotency` に action repeat contract を宣言する `mode` (`idempotent` / `rejects-repeat` / `repeatable`) を追加 (ADR-0007)
 - `LICENSE` 本文 (MIT) を追加し tarball に同梱
 - pack smoke test (`npm run smoke`): tarball の同梱物・4 entry の runtime import・型解決・`SYNQUX_VERSION` / schema version の突合で stale `dist` の publish を防ぐ。`prepublishOnly` を `test → build → smoke` へ変更
+- `subscribe` の `signal?: AbortSignal` (ADR-0012): offline 起動などの接続確立待ちを consumer 判断で中断できる。省略時は従来どおり無期限待機 (復帰時に無操作で接続)。abort は presence を残さず rollback し、同 instance で再 subscribe できる
+- Firebase adapter: `groupId` の RTDB key 禁止文字 (`. # $ / [ ]`・制御文字・空文字) を connect 入口で明示的に拒否
+- memory hub fault: `cancelSubscriptions(peerId)` (購読の回復不能な打ち切りの注入)
 
 ### Changed
 
@@ -30,6 +35,7 @@
 
 ### Fixed
 
+- Firebase adapter の購読が permission denied 等で打ち切られたとき黙って死んでいたのを、cancel callback で検知して `onError` へ通知するよう修正 (ADR-0012)
 - subscribe 初期化を transactional 化し、途中失敗時の presence・購読・Redux session を逆順 rollback して再 subscribe 可能に修正。初期化中の並行 subscribe も同期ガードで拒否
 - Firebase adapter が一時切断後に同じ connection id と初回 `connected` で presence を自動復元し、host 序列を変えずに候補へ復帰するよう修正 (ADR-0006)
 - 冪等性ハーネスの比較を `result` を除く domain state に修正し、2 回目を明示的に拒否する execute-once 型の誤検知を解消 (ADR-0007)

@@ -149,6 +149,15 @@ export type SynquxSubscribeOptions<TRoot> = {
   groupId: string
   role?: Peer['role']
   label?: Peer['label']
+
+  /**
+   * subscribe 完了までの初期化 (接続確立・restore) の中断 (ADR-0012)。
+   * 省略時は無期限に待つ — offline 起動は transport の自動再接続でそのまま
+   * 復帰できるため、打ち切るかどうか・何秒待つかは consumer の UX 判断とする
+   * (打ち切りたい場合は AbortSignal.timeout() 等を渡す)。
+   * subscribe 完了後の切断には作用しない (返り値の unsubscribe を使う)
+   */
+  signal?: AbortSignal
 }
 
 export type Synqux<TRoot extends { synqux: SynquxState }> = {
@@ -889,7 +898,7 @@ export const createSynqux = <
   // ---------------------------------------------------------------
 
   const initializeSubscription = async (
-    { store, groupId, role, label }: SynquxSubscribeOptions<TRoot>,
+    { store, groupId, role, label, signal }: SynquxSubscribeOptions<TRoot>,
     cleanups: SubscribeCleanup[],
   ): Promise<() => Promise<void>> => {
     if (store.getState().synqux === undefined) {
@@ -915,6 +924,7 @@ export const createSynqux = <
       })
 
       const payload = await config.localSnapshots?.loadSnapshot(groupId)
+      signal?.throwIfAborted()
 
       if (payload) {
         const envelope = parseSnapshotPayload(payload)
@@ -930,13 +940,56 @@ export const createSynqux = <
     }
 
     // ---- synced: presence 登録 → restore → requests 購読 ----
-    const { selfId } = await transport.connect({ groupId, role, label })
+
+    const healthEquals = (left: SynquxHealth, right: SynquxHealth): boolean =>
+      left.phase === right.phase &&
+      left.expectedSeq === right.expectedSeq &&
+      left.maxSeenSeq === right.maxSeenSeq &&
+      left.gapSince === right.gapSince
+
+    const updateHealth = (health: SynquxHealth): void => {
+      if (!healthEquals(store.getState().synqux.health, health)) {
+        store.dispatch(synquxActions.healthChanged(health))
+      }
+    }
+
+    // 購読の回復不能な打ち切り (permission denied 等、transport 契約 8、ADR-0012)。
+    // 自動 retry しない — rules ミス等は購読し直しても失敗し続けるだけなので、
+    // unrecoverable を提示して unsubscribe → 再 subscribe の判断を consumer に委ねる
+    let torndown = false
+    let fatalHealth: SynquxHealth | null = null
+    const handleTransportError = (error: unknown): void => {
+      if (torndown || fatalHealth !== null) {
+        return
+      }
+
+      fatalHealth = {
+        phase: 'unrecoverable',
+        expectedSeq: ordering.appliedSeq() + 1,
+        maxSeenSeq: ordering.maxSeenSeq(),
+        gapSince: Date.now(),
+      }
+      console.error(
+        '[synqux] Transport subscription was terminated (permission denied etc). ' +
+          'Sync is unrecoverable until unsubscribe / resubscribe.',
+        error,
+      )
+
+      // 即時通知は best effort (setEnabled off 中は heartbeat 側の裁定に任せる)
+      if (store.getState().synqux.enabled) {
+        updateHealth(fatalHealth)
+      }
+    }
+
+    const { selfId } = await transport.connect({ groupId, role, label, signal })
     cleanups.push(() => transport.disconnect())
+    signal?.throwIfAborted()
 
     const unsubscribePeers = transport.subscribePeers({
       onAdded: (peer) => store.dispatch(synquxActions.peerUpserted(peer)),
       onChanged: (peer) => store.dispatch(synquxActions.peerUpserted(peer)),
       onRemoved: (peer) => store.dispatch(synquxActions.peerRemoved(peer.id)),
+      onError: handleTransportError,
     })
     cleanups.push(unsubscribePeers)
 
@@ -948,6 +1001,7 @@ export const createSynqux = <
     // 復帰端末は snapshot (synced + 順序状態) を復元してから requests を購読する。
     // 途中参加・リロード・host migration をまたいでも状態と順序保証が継続する
     const payload = await transport.loadSnapshot(groupId)
+    signal?.throwIfAborted()
 
     if (payload) {
       const envelope = parseSnapshotPayload(payload)
@@ -1013,6 +1067,8 @@ export const createSynqux = <
           ordering.observe({ epoch: request.epoch, seq: request.seq })
           store.dispatch(synquxActions.requestChanged({ request }))
         },
+
+        onError: handleTransportError,
       }
 
     // 再購読ではこの関数から同じ routing を開き直す。unsubscribe closure も
@@ -1028,18 +1084,6 @@ export const createSynqux = <
     let recoveryStage: 'none' | 'resubscribed' | 'restored' = 'none'
     let stageStartedAt: number | null = null
     let recoveryInFlight = false
-
-    const healthEquals = (left: SynquxHealth, right: SynquxHealth): boolean =>
-      left.phase === right.phase &&
-      left.expectedSeq === right.expectedSeq &&
-      left.maxSeenSeq === right.maxSeenSeq &&
-      left.gapSince === right.gapSince
-
-    const updateHealth = (health: SynquxHealth): void => {
-      if (!healthEquals(store.getState().synqux.health, health)) {
-        store.dispatch(synquxActions.healthChanged(health))
-      }
-    }
 
     const resetRecovery = (): void => {
       recoveryStage = 'none'
@@ -1150,6 +1194,13 @@ export const createSynqux = <
         return
       }
 
+      // transport 購読の打ち切りは gap の有無と無関係に回復不能 (ADR-0012)。
+      // gap なし (maxSeen <= applied) の ok 巻き戻しより先に判定する
+      if (fatalHealth !== null) {
+        updateHealth(fatalHealth)
+        return
+      }
+
       const maxSeen = ordering.maxSeenSeq()
       const now = Date.now()
 
@@ -1226,6 +1277,12 @@ export const createSynqux = <
     }, HEALTH_CHECK_INTERVAL_MS)
     cleanups.push(() => clearInterval(healthTimer))
 
+    // 最後に push = 逆順 teardown の先頭で立つ。以後に遅れて届く transport の
+    // onError が、破棄済み session の store へ health を書き込むのを防ぐ
+    cleanups.push(() => {
+      torndown = true
+    })
+
     return async () => {
       await runSubscribeCleanups(cleanups, true)
     }
@@ -1237,6 +1294,8 @@ export const createSynqux = <
     if (session || subscribing) {
       throw new Error('synqux is already subscribed')
     }
+
+    options.signal?.throwIfAborted()
 
     // check-then-act の間に await を挟まず、初期化中であることを先に確定する。
     subscribing = true

@@ -47,6 +47,14 @@ const acceptsFence = (stored: SnapshotFence, next: SnapshotFence): boolean =>
   (next.epoch === stored.epoch && next.appliedSeq >= stored.appliedSeq)
 
 /**
+ * RTDB の key に使えない文字 (パス区切り `/` を含む)。groupId はそのまま
+ * `connections/{groupId}` 等の path 断片になるため、通せば別 path への書き込みや
+ * 実行時エラーになる。書き込み前の入口で明示的に拒否する
+ */
+// oxlint-disable-next-line no-control-regex -- RTDB key の禁止対象に制御文字を含める意図的な指定
+const INVALID_GROUP_ID_CHARS = /[.#$/[\]\u0000-\u001f\u007f]/
+
+/**
  * Firebase Realtime Database の transport adapter (ADR-0001 Decision 2)
  *
  * データ配置は移植元テンプレートと同一:
@@ -110,26 +118,46 @@ export const firebaseTransport = (
   })
 
   return {
-    async connect({ groupId, role, label }) {
+    async connect({ groupId, role, label, signal }) {
       if (session) {
         throw new Error('Firebase transport is already connected')
       }
+
+      if (groupId.length === 0 || INVALID_GROUP_ID_CHARS.test(groupId)) {
+        throw new Error(
+          `Invalid groupId "${groupId}": must be a non-empty RTDB key without ".", "#", "$", "/", "[", "]" or control characters`,
+        )
+      }
+
+      signal?.throwIfAborted()
 
       // presence 検知の前提となる db 接続の確立を待つ
       // https://firebase.google.com/docs/database/web/offline-capabilities
       // .info/connected は websocket 確立前に false を即時発火してから true を
       // 発火する 2 段階挙動のため、onlyOnce では最初の false でリスナーが外れて
       // 永遠に接続待ちになる。true が来るまで張り続け、await 復帰後に解除する
-      // (コールバックが同期発火しても unsub 未代入参照にならない順序)
+      // (コールバックが同期発火しても unsub 未代入参照にならない順序)。
+      // offline 起動の無期限待機は signal の abort でのみ打ち切れる (契約 8)
       let unsubConnected: (() => void) | undefined
-      await new Promise<void>((resolve) => {
-        unsubConnected = onValue(ref(db, '.info/connected'), (snap) => {
-          if (snap.val() === true) {
-            resolve()
+      let removeAbortListener: (() => void) | undefined
+      try {
+        await new Promise<void>((resolve, reject) => {
+          if (signal) {
+            const onAbort = (): void => reject(signal.reason)
+            signal.addEventListener('abort', onAbort, { once: true })
+            removeAbortListener = () =>
+              signal.removeEventListener('abort', onAbort)
           }
+          unsubConnected = onValue(ref(db, '.info/connected'), (snap) => {
+            if (snap.val() === true) {
+              resolve()
+            }
+          })
         })
-      })
-      unsubConnected?.()
+      } finally {
+        unsubConnected?.()
+        removeAbortListener?.()
+      }
 
       const selfRef = push(ref(db, connectionsPath(groupId)))
       const selfId = selfRef.key!
@@ -137,6 +165,13 @@ export const firebaseTransport = (
       // 切断時 (プロセス死・ネットワーク断含む) の自動削除を登録してから書き込む
       // (SynquxTransport 契約 5: presence cleanup の保証)
       await onDisconnect(selfRef).remove()
+
+      if (signal?.aborted) {
+        // presence 未登録なので onDisconnect の予約だけ取り消して中断する
+        await onDisconnect(selfRef).cancel()
+        throw signal.reason
+      }
+
       await set(
         selfRef,
         sanitize({
@@ -158,6 +193,13 @@ export const firebaseTransport = (
         }
       } catch {
         // 読み戻し不能でも初回登録自体は成功済み。再登録時だけ serverTimestamp へ戻す
+      }
+
+      if (signal?.aborted) {
+        // presence 登録済みの中断は登録を取り消す (abort で presence を残さない契約)
+        await remove(selfRef)
+        await onDisconnect(selfRef).cancel()
+        throw signal.reason
       }
 
       const currentSession = {
@@ -272,17 +314,34 @@ export const firebaseTransport = (
       const { groupId } = requireSession()
       const connectionsRef = ref(db, connectionsPath(groupId))
 
+      // cancel callback (第 3 引数) は permission denied 等で購読が回復不能に
+      // 打ち切られた合図。SDK 側でリスナーは解除済みなので、onError で core へ
+      // 委ねる (契約 8)。リスナーごとに発火し得るが、重複排除は core が行う
+      const onCancel = (error: Error): void => handlers.onError?.(error)
+
       // 購読開始時、既存 peer は firebase の仕様どおり onChildAdded で一括配送される
       const unsubs = [
-        onChildAdded(connectionsRef, (snap) => {
-          handlers.onAdded(snap.val() as Peer)
-        }),
-        onChildChanged(connectionsRef, (snap) => {
-          handlers.onChanged(snap.val() as Peer)
-        }),
-        onChildRemoved(connectionsRef, (snap) => {
-          handlers.onRemoved(snap.val() as Peer)
-        }),
+        onChildAdded(
+          connectionsRef,
+          (snap) => {
+            handlers.onAdded(snap.val() as Peer)
+          },
+          onCancel,
+        ),
+        onChildChanged(
+          connectionsRef,
+          (snap) => {
+            handlers.onChanged(snap.val() as Peer)
+          },
+          onCancel,
+        ),
+        onChildRemoved(
+          connectionsRef,
+          (snap) => {
+            handlers.onRemoved(snap.val() as Peer)
+          },
+          onCancel,
+        ),
       ]
 
       return () => unsubs.forEach((unsub) => unsub())
@@ -363,14 +422,25 @@ export const firebaseTransport = (
       const { groupId } = requireSession()
       const target = requestsQuery(groupId, after)
 
+      // subscribePeers と同じ理由で cancel を onError へ引き渡す (契約 8)
+      const onCancel = (error: Error): void => handlers.onError?.(error)
+
       const unsubs = [
         // 購読開始時の既存分も onChildAdded で id 順に一括配送される
-        onChildAdded(target, (snap) => {
-          handlers.onAdded(toEnvelope(snap.val(), snap.key))
-        }),
-        onChildChanged(target, (snap) => {
-          handlers.onChanged(toEnvelope(snap.val(), snap.key))
-        }),
+        onChildAdded(
+          target,
+          (snap) => {
+            handlers.onAdded(toEnvelope(snap.val(), snap.key))
+          },
+          onCancel,
+        ),
+        onChildChanged(
+          target,
+          (snap) => {
+            handlers.onChanged(toEnvelope(snap.val(), snap.key))
+          },
+          onCancel,
+        ),
       ]
 
       return () => unsubs.forEach((unsub) => unsub())

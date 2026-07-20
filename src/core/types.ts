@@ -240,6 +240,13 @@ export type SnapshotStore = {
  *    transport インスタンスは connect で指定された 1 グループに束縛される
  * 7. saveSnapshot は保存済み fence と原子的に比較し、(epoch, appliedSeq) が
  *    辞書順で低い書き込みを false で棄却する。同値は冪等な再書き込みとして受理する
+ * 8. 【失敗通知 (ADR-0012)】購読が回復不能に打ち切られたら (permission denied 等)、
+ *    当該 handlers の onError を必ず発火すること (optional なのは caller 都合であり、
+ *    渡された onError の発火は adapter の義務。core は常に渡す)。発火後、その購読への
+ *    配送は保証されない。一時的な切断は adapter / SDK の自動再接続で吸収し、
+ *    onError にしないこと。
+ *    connect は options.signal の abort で速やかに reject し、登録済み presence を
+ *    残さないこと (省略時は接続確立まで無期限に待ってよい)
  */
 export type SynquxTransport = SnapshotStore & {
   /** presence 登録。selfId は transport が採番する */
@@ -247,6 +254,8 @@ export type SynquxTransport = SnapshotStore & {
     groupId: string
     role?: PeerRole
     label?: Peer['label']
+    /** 接続確立待ちの中断 (契約 8)。offline 起動の無期限待機を consumer 判断で打ち切る */
+    signal?: AbortSignal
   }): Promise<{ selfId: Peer['id'] }>
 
   /** presence 解除。完了後は同じ transport instance で再 connect できること */
@@ -262,6 +271,8 @@ export type SynquxTransport = SnapshotStore & {
     onAdded(peer: Peer): void
     onChanged(peer: Peer): void
     onRemoved(peer: Peer): void
+    /** 購読の回復不能な打ち切り (permission denied 等) の通知 (契約 8) */
+    onError?(error: unknown): void
   }): Unsubscribe
 
   /** request の追記 push。封筒の直列化 (payload / result) は core 側で済んでいる */
@@ -306,6 +317,8 @@ export type SynquxTransport = SnapshotStore & {
     handlers: {
       onAdded(envelope: RequestEnvelope): void
       onChanged(envelope: RequestEnvelope): void
+      /** 購読の回復不能な打ち切り (permission denied 等) の通知 (契約 8) */
+      onError?(error: unknown): void
     },
   ): Unsubscribe
 }

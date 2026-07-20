@@ -106,6 +106,8 @@ client                      firebase                     host
 | respondRequest の失敗 / ack 喪失・saveSnapshot の失敗 | response 封筒を裁定時に凍結し ack まで同一内容を再送。snapshot 失敗は log のみで prune をスキップし、確定済み response を上書きしない (ADR-0010) | `src/core/create-synqux.ts` (`spawnHostFork`)、再現テスト: `src/core/host-adjudication.test.ts` |
 | 旧 host の遅延 saveSnapshot による保存済み snapshot の巻き戻し | `(epoch, appliedSeq)` 辞書順 fence の条件付き書き込みで棄却し、fenced-out 時は prune もスキップ (ADR-0011) | `src/core/create-synqux.ts` / transport adapter、再現テスト: `src/core/snapshot-fencing.test.ts` |
 | requests の無限成長 | snapshot ack 後、既存仕様ですでに破棄対象となる適用窓の外だけを host が prune (ADR-0005) | `src/core/create-synqux.ts` / transport adapter、再現テスト: `src/core/retention.test.ts` |
+| 購読の黙殺死 (permission denied 等で transport 購読が打ち切られても core が正常と誤認する) | transport 契約 8 の `onError` で検知し `unrecoverable` を提示。自動リトライせず unsubscribe → 再 subscribe の判断を consumer に委ねる (ADR-0012) | `src/core/create-synqux.ts` / transport adapter、再現テスト: `src/core/transport-failure.test.ts` |
+| offline 起動で `subscribe()` が無期限ハングする | `subscribe` / transport `connect` の `signal?: AbortSignal` で consumer が中断できる (省略時は無期限待機 = 復帰時に無操作で接続)。abort は presence を残さず rollback (ADR-0012) | `src/core/create-synqux.ts` / `src/firebase/index.ts`、再現テスト: `src/core/transport-failure.test.ts` |
 
 ### 既知トレードオフ (仕様として明文化)
 
