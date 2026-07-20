@@ -43,6 +43,7 @@ synqux は、consumer が認証・認可した**協調的な非敵対クライ�
     - host は request を 1 件処理するたびに synced state 全体を canonical JSON の封筒で永続化する (封筒には順序状態 = epoch / appliedSeq / 直近適用窓も載る)。ack 後、適用窓の外 (`seq < appliedSeq - 200`) を fire-and-forget で prune する (ADR-0005)。復帰端末は snapshot を復元してから残存 requests を全量購読し、適用済み分は seq で破棄して追いつく
     - snapshot 保存は `(epoch, appliedSeq)` の辞書順 fence で原子的に条件書き込みし、旧 host の遅延書き込みを棄却して保存地点の単調性を保証する (ADR-0011)
     - restore は ordering の適用窓・適用済み id 集合を snapshot の内容で完全置換し、残存する未適用の裁定済み envelope を再評価する
+    - subscribe 初期化は transactional に行う。途中失敗時は開始済みの presence・購読・Redux session を逆順に cleanup して元の error を rethrow し、同じ instance で再 subscribe できる状態へ戻す。並行初期化は最初の await 前に拒否する
     - → 途中参加・リロード・host migration をまたいでも状態と順序保証が継続し、requests の保存量はセッション長に比例しない
 
 ## 同期の仕組み

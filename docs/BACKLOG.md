@@ -14,13 +14,7 @@
 
 ### P0 — 実践投入ブロッカー
 
-- **subscribe 初期化を transactional にし、途中失敗を rollback する**
-  - connect 後の peer 購読、snapshot load/parse、request 購読の途中で失敗すると presence・購読・Redux session が残り、standalone も再試行不能になり得る
-  - 各段階を逆順 cleanup し、失敗後の再 subscribe 成功までテストする
-- **公開前の法務・version・配布物 gate を整える**
-  - MIT を宣言しているが `LICENSE` 本文がないため追加する
-  - 現在の `0.2.0` に breaking な Result API / wire v3 が混在している。`0.3.0` と `1.0.0` のどちらで出すか、README の「breaking は major」と 0.x 運用を含め人間が決める
-  - stale `dist` を pack しないよう build → tarball を対象に main / react / testing / firebase の runtime import・型・schema version を smoke test する
+- (なし — 0.3.0 の `npm version` / publish 実行はユーザ判断待ち。経緯は [TASK-260720-release-gate](TASK-260720-release-gate.md))
 
 ### P1 — 本番境界と公開契約
 

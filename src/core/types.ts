@@ -249,7 +249,7 @@ export type SynquxTransport = SnapshotStore & {
     label?: Peer['label']
   }): Promise<{ selfId: Peer['id'] }>
 
-  /** presence 解除。以後このインスタンスは再利用しない */
+  /** presence 解除。完了後は同じ transport instance で再 connect できること */
   disconnect(): Promise<void>
 
   /** サーバ基準時刻 (firebase: .info/serverTimeOffset 補正相当) */

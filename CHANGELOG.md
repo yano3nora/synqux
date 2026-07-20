@@ -21,6 +21,8 @@
 - snapshot ack 後に適用窓の外だけを削除する requests retention。optional な `SynquxTransport.pruneRequests` と memory / Firebase adapter 実装 (ADR-0005)
 - prune 対象の request を `logs/` へ原子的に退避し、全量 replay 調査を維持する Firebase adapter の `archivePrunedRequests` option
 - `assertActionIdempotency` に action repeat contract を宣言する `mode` (`idempotent` / `rejects-repeat` / `repeatable`) を追加 (ADR-0007)
+- `LICENSE` 本文 (MIT) を追加し tarball に同梱
+- pack smoke test (`npm run smoke`): tarball の同梱物・4 entry の runtime import・型解決・`SYNQUX_VERSION` / schema version の突合で stale `dist` の publish を防ぐ。`prepublishOnly` を `test → build → smoke` へ変更
 
 ### Changed
 
@@ -28,6 +30,7 @@
 
 ### Fixed
 
+- subscribe 初期化を transactional 化し、途中失敗時の presence・購読・Redux session を逆順 rollback して再 subscribe 可能に修正。初期化中の並行 subscribe も同期ガードで拒否
 - Firebase adapter が一時切断後に同じ connection id と初回 `connected` で presence を自動復元し、host 序列を変えずに候補へ復帰するよう修正 (ADR-0006)
 - 冪等性ハーネスの比較を `result` を除く domain state に修正し、2 回目を明示的に拒否する execute-once 型の誤検知を解消 (ADR-0007)
 

@@ -236,6 +236,34 @@ export const createSynqux = <
 
   // subscribe 後に確定する購読セッション。二重購読ガードを兼ねる
   let session: { groupId: string } | null = null
+  // session 確定前の await 中も、同一 instance の並行初期化を同期的に拒否する
+  let subscribing = false
+
+  type SubscribeCleanup = () => void | Promise<void>
+
+  /**
+   * 初期化と通常 unsubscribe で同じ逆順 cleanup を使う。rollback 時は個々の
+   * cleanup 失敗を記録して続行し、呼び出し元が初期化時の元 error を rethrow する。
+   */
+  const runSubscribeCleanups = async (
+    cleanups: readonly SubscribeCleanup[],
+    rethrowCleanupFailure: boolean,
+  ): Promise<void> => {
+    let firstCleanupError: unknown
+
+    for (const cleanup of [...cleanups].reverse()) {
+      try {
+        await cleanup()
+      } catch (error) {
+        console.error(error)
+        firstCleanupError ??= error
+      }
+    }
+
+    if (rethrowCleanupFailure && firstCleanupError !== undefined) {
+      throw firstCleanupError
+    }
+  }
 
   let hashSequence = 0
   const generateHash = (): string =>
@@ -850,16 +878,10 @@ export const createSynqux = <
   // subscribe (受信ルーティング / restore / presence)
   // ---------------------------------------------------------------
 
-  const subscribe = async ({
-    store,
-    groupId,
-    role,
-    label,
-  }: SynquxSubscribeOptions<TRoot>): Promise<() => Promise<void>> => {
-    if (session) {
-      throw new Error('synqux is already subscribed')
-    }
-
+  const initializeSubscription = async (
+    { store, groupId, role, label }: SynquxSubscribeOptions<TRoot>,
+    cleanups: SubscribeCleanup[],
+  ): Promise<() => Promise<void>> => {
     if (store.getState().synqux === undefined) {
       throw new Error(
         'state.synqux is not mounted. Wire sync.reducer (or createSynquxRootReducer) into your root reducer.',
@@ -868,10 +890,19 @@ export const createSynqux = <
 
     // ---- standalone: transport に触れず local restore だけ行う ----
     if (!instanceEnabled) {
-      session = { groupId }
+      const subscriptionSession = { groupId }
+      session = subscriptionSession
+      cleanups.push(() => {
+        if (session === subscriptionSession) {
+          session = null
+        }
+      })
       store.dispatch(
         synquxActions.sessionStarted({ selfId: null, enabled: false }),
       )
+      cleanups.push(() => {
+        store.dispatch(synquxActions.sessionEnded())
+      })
 
       const payload = await config.localSnapshots?.loadSnapshot(groupId)
 
@@ -884,21 +915,25 @@ export const createSynqux = <
       }
 
       return async () => {
-        session = null
-        store.dispatch(synquxActions.sessionEnded())
+        await runSubscribeCleanups(cleanups, true)
       }
     }
 
     // ---- synced: presence 登録 → restore → requests 購読 ----
     const { selfId } = await transport.connect({ groupId, role, label })
+    cleanups.push(() => transport.disconnect())
 
     const unsubscribePeers = transport.subscribePeers({
       onAdded: (peer) => store.dispatch(synquxActions.peerUpserted(peer)),
       onChanged: (peer) => store.dispatch(synquxActions.peerUpserted(peer)),
       onRemoved: (peer) => store.dispatch(synquxActions.peerRemoved(peer.id)),
     })
+    cleanups.push(unsubscribePeers)
 
     store.dispatch(synquxActions.sessionStarted({ selfId, enabled: true }))
+    cleanups.push(() => {
+      store.dispatch(synquxActions.sessionEnded())
+    })
 
     // 復帰端末は snapshot (synced + 順序状態) を復元してから requests を購読する。
     // 途中参加・リロード・host migration をまたいでも状態と順序保証が継続する
@@ -976,6 +1011,7 @@ export const createSynqux = <
       transport.subscribeRequests({}, requestHandlers)
 
     let unsubscribeRequests = openRequestsSubscription()
+    cleanups.push(() => unsubscribeRequests())
 
     let gapStartedAt: number | null = null
     let lastAppliedSeq = ordering.appliedSeq()
@@ -1014,6 +1050,11 @@ export const createSynqux = <
 
     const subscriptionSession = { groupId }
     session = subscriptionSession
+    cleanups.push(() => {
+      if (session === subscriptionSession) {
+        session = null
+      }
+    })
 
     const restoreFromLatestSnapshot = async (): Promise<void> => {
       recoveryInFlight = true
@@ -1173,16 +1214,33 @@ export const createSynqux = <
         updateHealth(recoveryHealth('unrecoverable', applied, maxSeen))
       }
     }, HEALTH_CHECK_INTERVAL_MS)
+    cleanups.push(() => clearInterval(healthTimer))
 
     return async () => {
-      clearInterval(healthTimer)
-      unsubscribePeers()
-      unsubscribeRequests()
-      if (session === subscriptionSession) {
-        session = null
-      }
-      store.dispatch(synquxActions.sessionEnded())
-      await transport.disconnect()
+      await runSubscribeCleanups(cleanups, true)
+    }
+  }
+
+  const subscribe = async (
+    options: SynquxSubscribeOptions<TRoot>,
+  ): Promise<() => Promise<void>> => {
+    if (session || subscribing) {
+      throw new Error('synqux is already subscribed')
+    }
+
+    // check-then-act の間に await を挟まず、初期化中であることを先に確定する。
+    subscribing = true
+    const cleanups: SubscribeCleanup[] = []
+
+    try {
+      return await initializeSubscription(options, cleanups)
+    } catch (error) {
+      // ordering.restore 済みでも次回の全量 restore が完全置換するため rollback
+      // しない。その他の副作用は逆順に片付け、cleanup 失敗より元 error を優先する。
+      await runSubscribeCleanups(cleanups, false)
+      throw error
+    } finally {
+      subscribing = false
     }
   }
 
