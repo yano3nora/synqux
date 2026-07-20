@@ -70,7 +70,7 @@ connections / requests は core に含めた上で（host 判定は「全端末�
 - **ゲーム開発者層**（教育対象はここだけ、覚えることは 3 つ）:
     1. 「同期 state は直接触るな、action を dispatch しろ」— request 化は自動で起きる。書き方は普通の Redux と同じ
     2. 「validation は reducer で、ダメなら `stateWithError` を返せ」— reducer ヘルパーとして export
-    3. 「host か・誰がいるか・結果通知は selector / hooks で読め」— `selectIsHost` / `selectPeers` / `selectLatestResult` 等。react hooks は `synqux/react` から
+    3. 「host か・誰がいるか・結果通知は selector / hooks で読め」— `selectIsHost` / `selectPeers` 等。react hooks は `synqux/react` から (NOTE: 当初案の `selectLatestResult` は後のレビューで廃止 — result は synced state 直読み。本 ADR 末尾の SPEC-0002 決定を参照)
 - 隠蔽の線引きは「**仕組みと書き込みを隠す、情報は隠さない**」。requests / prev チェーン / revisions は語彙ごと見せない。host / peers / 自身の接続状態 / result は読み取り専用で公開する
 - `result`（判定器が書き host が読むフィールド）は同期 state 側に住む必要があるため、consumer の synced state に `result` 等を持たせる型契約 `SynquxSynced<T>` を提供する
 - ゲーム reducer を独自ラッパー（`createSyncedSlice` 等）で包ませることは**しない**。「普通の RTK の書き方がそのまま同期される」ことが本ライブラリの価値であり、書き方への介入は教育コストを逆に増やす

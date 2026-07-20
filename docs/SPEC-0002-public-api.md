@@ -349,8 +349,9 @@ NOTE: 専用の `createSimulation` ハーネスは**公開しない** (実装時
  * 同期インフラの抽象 (Decision 2 / 11)
  *
  * 【契約 — adapter 実装者向け】
- * 1. pushRequest の id 採番は「挿入順で辞書順単調」であること (firebase push id 相当)。
- *    端末時計依存は許容する (順序判定の seq 化は Phase 3、Decision 10)
+ * 1. pushRequest の id 採番は「group 内で一意かつ不変」であること。順序性は要求しない —
+ *    適用順は host 採番の seq だけが担う (ADR-0002)。firebase push id のような
+ *    挿入順辞書順単調 id は要件を満たす一例 (after オプション対応の前提)
  * 2. respondRequest は永続化 ack で resolve すること (楽観 resolve 禁止)
  * 3. 配送は at-least-once。重複・遅延・順序入れ替えは core 側が吸収するので
  *    adapter で頑張って直列化しなくてよい (素朴に流す)
@@ -440,7 +441,7 @@ export const SYNQUX_SCHEMA_VERSION = 3  // v2 = host 採番 seq (ADR-0002)、v3 
  */
 export type RequestEnvelope = {
   v: number                 // SYNQUX_SCHEMA_VERSION。不一致は「検出して明示的に拒否」(Decision 10)
-  id: string                // transport 採番 (挿入順辞書順単調)
+  id: string                // transport 採番 (group 内で一意・不変。順序は seq が担う)
   groupId: string
   action: {
     type: string

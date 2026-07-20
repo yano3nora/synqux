@@ -30,18 +30,19 @@
 
 ### P2 — 文書・consumer 導入・コスト最適化
 
+> 2026-07-20: 文書不整合の解消 (request id 契約の緩和を含む) は
+> [TASK-260720-doc-consistency](TASK-260720-doc-consistency.md) で解消済み。
+> 「consumer repo の action repeat contract を CI へ組み込む」は独立項目を廃止 —
+> synqux 側の成果物 (`assertActionIdempotency` / ADR-0007 / SPEC-0001 設計ガイドライン 1) は
+> 提供済みで、残作業は consumer repo 側の導入作業のみのため、下記 checklist 項目へ統合した
+
 - **Firebase の本番 rules / data lifecycle checklist を用意する**
   - ADR-0009 のとおり cheat / tamper 耐性は対象外だが、意図しない room 間アクセスや情報漏えいを防ぐ認可、data shape、group 終了時の connections / requests / games / logs 削除は consumer 責務として残る
   - demo の全 read/write rules を流用せず、最初の consumer 導入時に実際の認証・room membership モデルへ合わせて checklist と rules 例を作る
-- **完了済み ADR / 現実装との文書不整合を解消する**
-  - ADR-0003 の「自動回復は未解決」、ADR-0001 の廃止済み `selectLatestResult`、ADR-0002 の旧 `error & console` 語彙、README の ADR-0008 欠落と demo の CI 対象説明、Firebase test の旧 `prevKey` コメントを更新する
-  - transport の request id 契約も seq 方式へ合わせて修正する (P1 から統合・降格): core は id 順を correctness に使っていない (dedup の set membership のみ) のに「挿入順で辞書順単調」を要求している。group 内で一意・安定へ緩和し、SPEC・型コメント・adapter contract test を揃える
-  - 見送りのデメリット (request id 契約): 現 adapter は firebase のみで push id が単調のため実害はないが、将来の adapter 実装者が不要な単調 id 採番を作り込むコストと、契約と実装の乖離が残り続ける
+  - 同じ導入タイミングで、action repeat contract の table 化 (`assertActionIdempotency` の mode 宣言つき table、ADR-0007) を consumer CI へ組み込むことも checklist に含める
 - **Firebase adapter の emulator conformance gate を用意する (P1 から降格・firebase バージョン bump 時がトリガー)**
   - SDK mock だけでなく、server timestamp、local echo が ack より先に届く順序、presence 再登録、retention query / archive を emulator で確認する小さな release gate を作る
   - AGENTS.md の「emulator 依存テストを増やさない」方針と、bs-template 実導入 (Phase 2) が事実上の conformance gate になることから、平時の自動化は行わず firebase バージョン更新時に着手する
   - 見送りのデメリット: SDK の挙動変化 (server timestamp・local echo・presence まわり) を bump 時に SDK mock テストでは検知できず、consumer 側の実機で発覚する
-- **consumer repo の action repeat contract を CI へ組み込む**
-  - 全 synced action を `idempotent` / `rejects-repeat` / `repeatable` の table に載せ、無自覚な toggle は set 型へ移行する
 - **snapshot 書き込み頻度を実運用計測後に見直す**
   - 全量 snapshot の帯域・料金が問題化した時点で、復元の単純性を壊さず N request ごと等へ削減する。判断前に payload サイズ・request 頻度・復旧時間を計測する

@@ -21,7 +21,7 @@
 - 裁定印を `prev` (チェーン参照) から `(epoch, seq)` (連番) へ置き換える
 - 全端末の適用規則は「`appliedSeq + 1` の seq を持つ envelope を適用する」だけになる
 - **順序が request id (= 端末時計) と無関係になるため、`isDelayed` による意図的ドロップが不要になる**。遅配した request は落とされず、次の seq を貰って普通に適用される — ②の根治は「skew 耐性の向上」ではなく「ドロップという概念の消滅」
-- validation 拒否 (error & console) の request も seq を消費する (適用列の ground truth に「拒否の記録」として残る、現行の revisions 記録と同等)
+- validation 拒否の request も seq を消費する (適用列の ground truth に「拒否の記録」として残る、現行の revisions 記録と同等)。NOTE: 執筆時の拒否通知語彙 `error & console` は ADR-0008 で `message` / `log` へ改称済み
 
 ### 2. fencing は「epoch (host 世代) + responsedBy の決定的 tiebreak」
 

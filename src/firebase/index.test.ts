@@ -3,9 +3,9 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 /**
  * firebase adapter の unit test (firebase SDK を全 mock、emulator 依存なし)
  *
- * 検証対象は「SDK をどう呼ぶか」= パス構成・sanitize・prevKey 正規化・
- * onDisconnect の登録順・ack セマンティクス。イベント配送を含む同期挙動の検証は
- * memory hub の simulation test が担う (実機検証はテンプレ置換とセットで行う)
+ * 検証対象は「SDK をどう呼ぶか」= パス構成・sanitize・onDisconnect の登録順・
+ * ack セマンティクス・abort / cancel callback の契約。イベント配送を含む同期挙動の
+ * 検証は memory hub の simulation test が担う (実機検証はテンプレ置換とセットで行う)
  */
 
 const h = vi.hoisted(() => {

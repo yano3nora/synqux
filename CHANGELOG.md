@@ -34,6 +34,7 @@
 
 - `selectIsSyncStalled` / `useIsSyncStalled` は回復中・回復不能を含む `phase !== 'ok'` を返す。リロード案内は `*IsSyncUnrecoverable` を使う
 - peer `firebase` を `>=9` から実証済みの `>=9.9.0` へ狭めた。9.0.0–9.8.0 は package.json `exports` に types 条件がなく、`moduleResolution: Bundler` で adapter の型解決が通らないことを確認 (9.9.0 / 9.23.0 / 10.0.0 / 11.0.0 / 12.x で型検査 PASS)
+- transport 契約 1 の request id 要件を「挿入順で辞書順単調」から「group 内で一意・不変 (順序性は要求しない)」へ緩和。適用順は host 採番 seq だけが担い (ADR-0002)、core は id 順を correctness に使っていないため。単調 id は `subscribeRequests` の `after` オプション対応の前提としてのみ残る
 
 ### Fixed
 

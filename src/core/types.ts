@@ -127,7 +127,7 @@ export type RequestEnvelope = {
   /** SYNQUX_SCHEMA_VERSION。不一致は検出して明示的に拒否する */
   v: number
 
-  /** transport 採番。挿入順で辞書順単調であること (transport 契約) */
+  /** transport 採番。group 内で一意・不変であること (順序は seq が担う、transport 契約 1) */
   id: string
 
   groupId: string
@@ -226,8 +226,9 @@ export type SnapshotStore = {
  * 同期インフラの抽象 (ADR-0001 Decision 2 / 11)
  *
  * 【adapter 実装者への契約】
- * 1. pushRequest の id 採番は「挿入順で辞書順単調」であること (firebase push id 相当)。
- *    端末時計依存は許容する (順序判定の seq 化は Phase 3、Decision 10)
+ * 1. pushRequest の id 採番は「group 内で一意かつ不変」であること。順序性は要求
+ *    しない — 適用順は host 採番の seq だけが担う (ADR-0002)。firebase push id の
+ *    ような挿入順辞書順単調 id は要件を満たす一例 (after オプション対応の前提)
  * 2. respondRequest は永続化 ack で resolve すること (楽観 resolve 禁止)。
  *    なお変更イベント (onChanged) が ack より先に届くこと (local echo) は許容される
  * 3. 配送は at-least-once でよい。重複・遅延・順序入れ替えは core が吸収するので
@@ -305,12 +306,14 @@ export type SynquxTransport = SnapshotStore & {
    * requests の変更購読
    *
    * - after 指定時は「id が after より後の requests」のみを対象とする
-   *   (orderByKey().startAfter 相当)。NOTE: core は v2 (seq 順序) では使わない —
-   *   id 順は端末時計依存で「id は古いが seq は新しい」request を取り逃がすため、
-   *   全量購読して seq で破棄する (ADR-0002 Decision 5)。オプション自体は
-   *   将来の prune 済み transport 向けに残す
-   * - 購読開始時、対象の既存 requests は id 順の onAdded で一括配送されること
-   *   (responsedBy 付きで added に届くケースの振り分けは core が行う)
+   *   (orderByKey().startAfter 相当)。挿入順で辞書順単調な id を持つ transport
+   *   (firebase push id 相当) でのみ意味を持つ。NOTE: core は v2 (seq 順序) では
+   *   使わない — id 順は端末時計依存で「id は古いが seq は新しい」request を
+   *   取り逃がすため、全量購読して seq で破棄する (ADR-0002 Decision 5)。
+   *   オプション自体は将来の prune 済み transport 向けに残す
+   * - 購読開始時、対象の既存 requests は onAdded で一括配送されること。配送順は
+   *   問わない — core が seq で線形化し、responsedBy 付きで added に届くケースの
+   *   振り分けも core が行う
    */
   subscribeRequests(
     options: { after?: RequestEnvelope['id'] },

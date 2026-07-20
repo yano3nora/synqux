@@ -16,14 +16,14 @@ Redux (Redux Toolkit) アプリに「クライアントホスト型のリアル�
 │ ├ firebase/   … Firebase RTDB adapter (synqux/firebase)
 │ ├ react/      … 読み取り hooks (synqux/react)
 │ └ testing/    … in-memory transport / 冪等性ハーネス (synqux/testing)
-├ demo/         … firebase emulator での手動同期確認 (npm 配布・CI 対象外)
+├ demo/         … firebase emulator での手動同期確認 (npm 配布対象外。型検査のみ npm test に含む)
 ├ docs/         … 仕様と意思決定の記録 (SPEC / ADR / TASK)
 └ mise.toml     … Toolchain (node pin, git hooks)
 ```
 
 - 仕様の正: [SPEC-0001-requests-sync](./docs/SPEC-0001-requests-sync.md) (仕組み・不変条件・既知の問題)
 - API 境界: [SPEC-0002-public-api](./docs/SPEC-0002-public-api.md)
-- 設計判断: [ADR-0001](./docs/ADR-0001-design.md) (全体設計) / [ADR-0002](./docs/ADR-0002-host-seq.md) (host 採番 seq) / [ADR-0003](./docs/ADR-0003-sync-health.md) (stall 検知) / [ADR-0004](./docs/ADR-0004-sync-auto-recovery.md) (自動回復) / [ADR-0005](./docs/ADR-0005-requests-retention.md) (retention) / [ADR-0006](./docs/ADR-0006-presence-reregistration.md) (presence 再登録) / [ADR-0007](./docs/ADR-0007-action-repeat-contract.md) (action repeat contract) / [ADR-0008](./docs/ADR-0008-result-envelope-reshape.md) (Result / wire v3) / [ADR-0009](./docs/ADR-0009-trust-model.md) (trust model)
+- 設計判断: [ADR-0001](./docs/ADR-0001-design.md) (全体設計) / [ADR-0002](./docs/ADR-0002-host-seq.md) (host 採番 seq) / [ADR-0003](./docs/ADR-0003-sync-health.md) (stall 検知) / [ADR-0004](./docs/ADR-0004-sync-auto-recovery.md) (自動回復) / [ADR-0005](./docs/ADR-0005-requests-retention.md) (retention) / [ADR-0006](./docs/ADR-0006-presence-reregistration.md) (presence 再登録) / [ADR-0007](./docs/ADR-0007-action-repeat-contract.md) (action repeat contract) / [ADR-0008](./docs/ADR-0008-result-envelope-reshape.md) (Result / wire v3) / [ADR-0009](./docs/ADR-0009-trust-model.md) (trust model) / [ADR-0010](./docs/ADR-0010-response-immutability-and-fork-survival.md) (response 凍結再送) / [ADR-0011](./docs/ADR-0011-snapshot-fencing.md) (snapshot fencing) / [ADR-0012](./docs/ADR-0012-transport-failure-and-abort.md) (失敗通知 / abort)
 
 ## Depends
 - node 20+ (開発は mise で 24 系を pin)

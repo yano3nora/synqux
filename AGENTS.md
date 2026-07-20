@@ -24,7 +24,7 @@
 - **`src/firebase/`**: transport adapter 実装（当面は firebase のみ。subpath export `synqux/firebase`）
 - **`src/testing/`**: 公開 API の一部として提供するテストユーティリティ（in-memory transport、重複/遅延/ドロップ注入、action 冪等性ハーネス）
 - **`src/react/`**: ゲーム開発者層の読み取り hooks（subpath export `synqux/react`）
-- **`demo/`**: firebase emulator での手動確認用 demo（npm 配布・build・CI 対象外）
+- **`demo/`**: firebase emulator での手動確認用 demo（npm 配布・build 対象外。型検査のみ `npm test` に含む）
 - **型**: consumer の State / Action は generics で受ける。ライブラリ都合で `any` / `string` へ widen しない。境界でやむを得ない場合も「比較点・代入点だけを dirty にする」こと
 
 ### 🛠️ Workflow & Development Rules
