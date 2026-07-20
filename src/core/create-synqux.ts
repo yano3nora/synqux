@@ -249,14 +249,18 @@ export const createSynqux = <
   const persistSnapshot = async (
     synced: TSynced,
     orderingState: OrderingState,
-  ): Promise<void> => {
+  ): Promise<boolean> => {
     if (!session) {
-      return
+      return false
     }
 
-    await transport.saveSnapshot(
+    return transport.saveSnapshot(
       session.groupId,
       buildSnapshotPayload({ synced, ordering: orderingState }),
+      {
+        epoch: orderingState.epoch,
+        appliedSeq: orderingState.appliedSeq,
+      },
     )
   }
 
@@ -265,14 +269,19 @@ export const createSynqux = <
       return
     }
 
+    const orderingState = ordering.state()
     // 移植元 saveGameState 踏襲で失敗は握りつぶす (standalone 永続化は best effort)
     void Promise.resolve(
       config.localSnapshots.saveSnapshot(
         session.groupId,
         buildSnapshotPayload({
           synced: config.selectSynced(root),
-          ordering: ordering.state(),
+          ordering: orderingState,
         }),
+        {
+          epoch: orderingState.epoch,
+          appliedSeq: orderingState.appliedSeq,
+        },
       ),
     ).catch((e: unknown) => console.error(e))
   }
@@ -645,20 +654,27 @@ export const createSynqux = <
           if (successfulAdjudication) {
             try {
               const { next, orderingState } = successfulAdjudication
-              await persistSnapshot(config.selectSynced(next), orderingState)
+              const snapshotSaved = await persistSnapshot(
+                config.selectSynced(next),
+                orderingState,
+              )
 
               // stale snapshot + prune の組は復元不能を作るため、snapshot が
-              // 失敗した場合は同じ try 内の prune まで進めない。
-              const beforeSeq = orderingState.appliedSeq - APPLIED_WINDOW_SIZE
-              if (
-                beforeSeq > 1 &&
-                beforeSeq > lastPrunedBeforeSeq &&
-                transport.pruneRequests
-              ) {
-                lastPrunedBeforeSeq = beforeSeq
-                // retention は correctness のクリティカルパスではない。失敗時は
-                // 後続 snapshot のより新しい閾値で再試行されるため待たない。
-                void transport.pruneRequests(beforeSeq).catch(console.error)
+              // 失敗した場合は同じ try 内の prune まで進めない。fenced-out 時も
+              // 自分の prune 線は保存済み snapshot と無関係に先行し得るため、
+              // 進むと stale snapshot + 封筒削除の復元不能を自ら作ってしまう。
+              if (snapshotSaved) {
+                const beforeSeq = orderingState.appliedSeq - APPLIED_WINDOW_SIZE
+                if (
+                  beforeSeq > 1 &&
+                  beforeSeq > lastPrunedBeforeSeq &&
+                  transport.pruneRequests
+                ) {
+                  lastPrunedBeforeSeq = beforeSeq
+                  // retention は correctness のクリティカルパスではない。失敗時は
+                  // 後続 snapshot のより新しい閾値で再試行されるため待たない。
+                  void transport.pruneRequests(beforeSeq).catch(console.error)
+                }
               }
             } catch (postProcessError) {
               // 確定済み response は後処理の成否にかかわらず変更しない
@@ -1027,8 +1043,10 @@ export const createSynqux = <
         if (latestPayload) {
           const envelope = parseSnapshotPayload(latestPayload)
 
-          // 同値を含む過去 snapshot は synced を巻き戻し得るため受理しない。
-          if (envelope.ordering.appliedSeq > applied) {
+          // fencing により同値 snapshot も正史として信頼できる。同値受理は
+          // dual-host 早期適用の同 seq 分岐を正史へ引き戻す唯一の手段であり、
+          // 健全端末に対しては冪等な restore になる。
+          if (envelope.ordering.appliedSeq >= applied) {
             // restore と dispatch は await を挟まない同期ブロックにし、待機 fork の
             // 適用と restore が中途半端な ordering/state の組を観測しないようにする。
             ordering.restore(envelope.ordering)

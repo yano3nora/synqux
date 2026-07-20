@@ -12,6 +12,7 @@ import {
   query,
   ref,
   remove,
+  runTransaction,
   serverTimestamp,
   set,
   startAfter,
@@ -19,7 +20,31 @@ import {
   type Database,
   type Query,
 } from 'firebase/database'
-import type { Peer, RequestEnvelope, SynquxTransport } from '../core/types.js'
+import type {
+  Peer,
+  RequestEnvelope,
+  SnapshotFence,
+  SynquxTransport,
+} from '../core/types.js'
+
+type StoredSnapshot = { fence: SnapshotFence; payload: string }
+
+const isStoredSnapshot = (value: unknown): value is StoredSnapshot => {
+  if (typeof value !== 'object' || value === null) {
+    return false
+  }
+
+  const candidate = value as Partial<StoredSnapshot>
+  return (
+    typeof candidate.payload === 'string' &&
+    typeof candidate.fence?.epoch === 'number' &&
+    typeof candidate.fence.appliedSeq === 'number'
+  )
+}
+
+const acceptsFence = (stored: SnapshotFence, next: SnapshotFence): boolean =>
+  next.epoch > stored.epoch ||
+  (next.epoch === stored.epoch && next.appliedSeq >= stored.appliedSeq)
 
 /**
  * Firebase Realtime Database の transport adapter (ADR-0001 Decision 2)
@@ -28,7 +53,7 @@ import type { Peer, RequestEnvelope, SynquxTransport } from '../core/types.js'
  * - `connections/{groupId}/{peerId}` — presence (onDisconnect で自動削除)
  * - `requests/{groupId}/{requestId}` — request 封筒 (push id 採番 = 挿入順辞書順)
  * - `logs/{groupId}/{requestId}` — prune 済み request の調査ログ (opt-in)
- * - `games/{groupId}` — snapshot (canonical JSON 文字列)
+ * - `games/{groupId}` — fence と canonical JSON snapshot payload
  *
  * 前提: firebase auth (匿名認証等) は consumer が transport 生成前に済ませること。
  * at-least-once の吸収 (重複・遅延・振り分け) は core の責務のため、この adapter は
@@ -351,17 +376,30 @@ export const firebaseTransport = (
       return () => unsubs.forEach((unsub) => unsub())
     },
 
-    async saveSnapshot(key, payload) {
+    async saveSnapshot(key, payload, fence) {
       requireSession()
-      // payload は core が直列化済みの不透明文字列 (Decision 11)。
-      // 文字列 1 本で set するため RTDB の形状保存問題 (undefined 落ち等) が起きない
-      await set(ref(db, snapshotPath(key)), payload)
+      // payload は core が直列化済みの不透明文字列。adapter は parse せず、
+      // fence だけを transaction 内で原子的に比較する (ADR-0011)。
+      const result = await runTransaction(
+        ref(db, snapshotPath(key)),
+        (current: unknown) => {
+          if (
+            isStoredSnapshot(current) &&
+            !acceptsFence(current.fence, fence)
+          ) {
+            return undefined
+          }
+          return { fence, payload }
+        },
+      )
+      return result.committed
     },
 
     async loadSnapshot(key) {
       requireSession()
       const snap = await get(ref(db, snapshotPath(key)))
-      return snap.exists() ? (snap.val() as string) : null
+      const stored: unknown = snap.exists() ? snap.val() : null
+      return isStoredSnapshot(stored) ? stored.payload : null
     },
   }
 }

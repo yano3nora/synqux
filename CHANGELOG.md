@@ -6,6 +6,7 @@
 
 ### Changed (BREAKING: wire format v3)
 
+- transport `saveSnapshot` を `saveSnapshot(key, payload, fence) → boolean` へ変更し、保存形状を `{ fence: { epoch, appliedSeq }, payload }` に刷新。旧形状 snapshot は absent 扱いとなる (ADR-0011)
 - `Result` を刷新 (ADR-0008): `message` を UI 表示想定データ `{ text: string }` へ構造化 (拡張は `TMessage` generics)。`console` / `duration` を削除し `log?: string` へ置換、log の console 出力は synqux の責務 (targets 準拠) になった
 - `stateWithError` / `stateWithResult` / `generateResult` / `useLatestResult` が新しい `Result` 形状・generics に追従
 - `RequestEnvelope.responsed` (serverNow 基準の裁定時刻) を追加し、transport `respondRequest` の patch に `responsed` が必須になった

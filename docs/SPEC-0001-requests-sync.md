@@ -35,6 +35,7 @@
     - → 成否判定器は reducer ただ一つ。host / client / 同期なし (standalone) でロジックが分岐せず、reducer さえ堅牢なら同期しても壊れない
 - **snapshot と restore** — `src/core/snapshot.ts`, `src/core/create-synqux.ts` (`subscribe` / `persistSnapshot`)
     - host は request を 1 件処理するたびに synced state 全体を canonical JSON の封筒で永続化する (封筒には順序状態 = epoch / appliedSeq / 直近適用窓も載る)。ack 後、適用窓の外 (`seq < appliedSeq - 200`) を fire-and-forget で prune する (ADR-0005)。復帰端末は snapshot を復元してから残存 requests を全量購読し、適用済み分は seq で破棄して追いつく
+    - snapshot 保存は `(epoch, appliedSeq)` の辞書順 fence で原子的に条件書き込みし、旧 host の遅延書き込みを棄却して保存地点の単調性を保証する (ADR-0011)
     - restore は ordering の適用窓・適用済み id 集合を snapshot の内容で完全置換し、残存する未適用の裁定済み envelope を再評価する
     - → 途中参加・リロード・host migration をまたいでも状態と順序保証が継続し、requests の保存量はセッション長に比例しない
 
@@ -96,6 +97,7 @@ client                      firebase                     host
 | ①′ responseListener の二重 dispatch 窓: check-then-act (isApplied チェック → dispatch → await → markApplied) の窓に同一 changed の同時二重配送が入ると二重適用され、**非冪等 action が静かに壊れる** | dispatch 直前に同期的な処理中ガード (`ordering.beginProcessing`) を立て、markApplied 後 finally で解放 (synqux Phase 1 で修正)。失敗時は解放して再配送での retry 余地を残す | `src/core/create-synqux.ts` (responseListener) / `src/core/ordering.ts`、再現テスト: `src/core/characterization.test.ts` |
 | response 永久欠落 / dual-host 早期適用による seq gap | sync health で検知し、requests 再購読 → snapshot restore を 1 巡。失敗時だけ unrecoverable を通知 (ADR-0004) | `src/core/create-synqux.ts`、再現テスト: `src/core/recovery.test.ts` |
 | respondRequest の失敗 / ack 喪失・saveSnapshot の失敗 | response 封筒を裁定時に凍結し ack まで同一内容を再送。snapshot 失敗は log のみで prune をスキップし、確定済み response を上書きしない (ADR-0010) | `src/core/create-synqux.ts` (`spawnHostFork`)、再現テスト: `src/core/host-adjudication.test.ts` |
+| 旧 host の遅延 saveSnapshot による保存済み snapshot の巻き戻し | `(epoch, appliedSeq)` 辞書順 fence の条件付き書き込みで棄却し、fenced-out 時は prune もスキップ (ADR-0011) | `src/core/create-synqux.ts` / transport adapter、再現テスト: `src/core/snapshot-fencing.test.ts` |
 | requests の無限成長 | snapshot ack 後、既存仕様ですでに破棄対象となる適用窓の外だけを host が prune (ADR-0005) | `src/core/create-synqux.ts` / transport adapter、再現テスト: `src/core/retention.test.ts` |
 
 ### 既知トレードオフ (仕様として明文化)

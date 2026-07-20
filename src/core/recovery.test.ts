@@ -250,6 +250,85 @@ describe('sync auto recovery', () => {
     expect(selectSyncHealth(a.store.getState()).phase).toBe('ok')
   })
 
+  it('同 seq で分岐した端末を同値 snapshot の restore で正史へ収束させる', async () => {
+    const hub = createMemoryHub()
+    const a = createTrackedClient(hub)
+    const b = createHubClient(hub, { stallAfterMs: STALL_AFTER_MS })
+    const c = createHubClient(hub, { stallAfterMs: STALL_AFTER_MS })
+
+    await a.sync.subscribe({ store: a.store, groupId: GROUP_ID })
+    await b.sync.subscribe({ store: b.store, groupId: GROUP_ID })
+    await c.sync.subscribe({ store: c.store, groupId: GROUP_ID })
+    await settle(10)
+
+    // b だけが c の離脱を誤認し、request X を seq 1 として早期裁定する。
+    b.store.dispatch(synquxActions.peerRemoved('peer-3'))
+    const delayedXToCanonicalHost = hub.faults.delay({
+      requestId: '000000000001',
+      to: 'peer-3',
+    })
+    a.store.dispatch({ type: 'game/increment', payload: 1 })
+    await settle(10)
+
+    // 正史 host c は request Y を同じ seq 1 で裁定する。a への changed を
+    // 遅らせ、a は X@1、c は Y@1 という同 seq 分岐を確定させる。
+    hub.faults.drop({
+      requestId: '000000000002',
+      to: 'peer-2',
+      event: 'added',
+    })
+    hub.faults.drop({
+      requestId: '000000000002',
+      to: 'peer-2',
+      event: 'changed',
+    })
+    const delayedYToA = hub.faults.delay({
+      requestId: '000000000002',
+      to: 'peer-1',
+      event: 'changed',
+    })
+    a.store.dispatch({ type: 'game/increment', payload: 10 })
+    await settle(10)
+    delayedYToA.release()
+    await settle(5)
+
+    const canonicalHost = hub.inspect
+      .peers(GROUP_ID)
+      .find((peer) => peer.id === 'peer-3')
+    expect(canonicalHost).toBeDefined()
+    b.store.dispatch(synquxActions.peerUpserted(canonicalHost!))
+
+    const snapshotAtSeq1 = hub.inspect.snapshot(GROUP_ID)
+    expect(snapshotAtSeq1).not.toBeNull()
+    expect(JSON.parse(snapshotAtSeq1!).ordering.appliedSeq).toBe(1)
+
+    // c が X を seq 2 へ再裁定するが、ack を止めて snapshot は seq 1 のまま。
+    // a は X@2 を appliedIds 残留で破棄し、gap recovery へ入る。
+    const heldXAck = hub.faults.holdAck('000000000001')
+    delayedXToCanonicalHost.release()
+    await settle(20)
+
+    expect(a.store.getState().game.log).toEqual(['increment:1'])
+    expect(c.store.getState().game.log).toEqual(['increment:10', 'increment:1'])
+    expect(
+      JSON.parse(hub.inspect.snapshot(GROUP_ID)!).ordering.appliedSeq,
+    ).toBe(1)
+
+    await advanceToResubscribe()
+    await settle(10)
+    expect(a.store.getState().game.log).toEqual(['increment:1'])
+
+    await advanceToRestore()
+    await settle(20)
+
+    heldXAck.release()
+    await settle(30)
+
+    expect(a.store.getState().game.log).toEqual(c.store.getState().game.log)
+    expect(a.store.getState().game.log).toEqual(['increment:10', 'increment:1'])
+    expect(selectSyncHealth(a.store.getState()).phase).toBe('ok')
+  })
+
   it('回復中の重複・順序入れ替えでも各 request を高々 1 回だけ適用する', async () => {
     const { hub, a, b, c } = await arrangeMissingFirstResponse()
     hub.faults.duplicate({

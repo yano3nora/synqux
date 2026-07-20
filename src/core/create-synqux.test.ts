@@ -212,6 +212,7 @@ describe('createSynqux (end-to-end)', () => {
     const localSnapshots: SnapshotStore = {
       saveSnapshot: (key, payload) => {
         saved.set(key, payload)
+        return true
       },
       loadSnapshot: (key) => saved.get(key) ?? null,
     }

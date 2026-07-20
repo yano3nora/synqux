@@ -201,12 +201,24 @@ export type SnapshotEnvelope<TSynced> = {
 /**
  * 不透明文字列の snapshot KV (Decision 11)
  *
- * 封筒構築と canonical JSON 直列化は core の責務で、store 実装は文字列を
- * そのまま保存・取得するだけでよい。transport の snapshot API と standalone
+ * 封筒構築と canonical JSON 直列化は core の責務で、store 実装は payload を
+ * parse せず fence と並べて保存する。transport の snapshot API と standalone
  * (enabled=false) の localSnapshots が本契約を共有する
  */
+export type SnapshotFence = { epoch: number; appliedSeq: number }
+
 export type SnapshotStore = {
-  saveSnapshot(key: string, payload: string): Promise<void> | void
+  /**
+   * payload を不透明なまま fence と共に保存する条件付き書き込み。
+   * 比較と保存は CAS / transaction で原子的に行い、保存済み fence より
+   * 辞書順で低い書き込みは正常系として棄却し false を返す。同値は受理する。
+   * fence を別引数にするのは adapter に payload を parse させないため。
+   */
+  saveSnapshot(
+    key: string,
+    payload: string,
+    fence: SnapshotFence,
+  ): Promise<boolean> | boolean
   loadSnapshot(key: string): Promise<string | null> | string | null
 }
 
@@ -226,6 +238,8 @@ export type SnapshotStore = {
  *    onRemoved が発火すること (onDisconnect 相当の presence cleanup を保証する)
  * 6. connect / serverNow 以外のメソッドは connect 完了後にのみ呼ばれる。
  *    transport インスタンスは connect で指定された 1 グループに束縛される
+ * 7. saveSnapshot は保存済み fence と原子的に比較し、(epoch, appliedSeq) が
+ *    辞書順で低い書き込みを false で棄却する。同値は冪等な再書き込みとして受理する
  */
 export type SynquxTransport = SnapshotStore & {
   /** presence 登録。selfId は transport が採番する */

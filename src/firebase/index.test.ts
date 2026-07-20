@@ -15,11 +15,13 @@ const h = vi.hoisted(() => {
     callback: (snap: { val: () => unknown }) => void
     unsubscribe: ReturnType<typeof vi.fn>
   }[] = []
+  const transactionValues: unknown[] = []
 
   return {
     refMock,
     pushKeys,
     connectedSubscriptions,
+    transactionValues,
     pushMock: vi.fn((target: { path?: string }, value?: unknown) => {
       const key = pushKeys.shift() ?? 'generated-key'
       return Object.assign(
@@ -30,6 +32,16 @@ const h = vi.hoisted(() => {
     setMock: vi.fn(async (_target: unknown, _value: unknown) => undefined),
     updateMock: vi.fn(async (_target: unknown, _patch: unknown) => undefined),
     removeMock: vi.fn(async (_target: unknown) => undefined),
+    runTransactionMock: vi.fn(
+      async (
+        _target: unknown,
+        updater: (current: unknown) => unknown | undefined,
+      ) => {
+        const current = transactionValues.shift() ?? null
+        const next = updater(current)
+        return { committed: next !== undefined }
+      },
+    ),
     getMock: vi.fn(
       async (
         _target: unknown,
@@ -87,6 +99,7 @@ vi.mock('firebase/database', () => ({
   set: h.setMock,
   update: h.updateMock,
   remove: h.removeMock,
+  runTransaction: h.runTransactionMock,
   get: h.getMock,
   onValue: h.onValueMock,
   onChildAdded: h.onChildAddedMock,
@@ -120,6 +133,7 @@ beforeEach(() => {
   vi.clearAllMocks()
   h.pushKeys.length = 0
   h.connectedSubscriptions.length = 0
+  h.transactionValues.length = 0
 })
 
 afterEach(() => {
@@ -424,23 +438,76 @@ describe('firebaseTransport', () => {
     expect(h.updateMock).not.toHaveBeenCalled()
   })
 
-  it('saveSnapshot / loadSnapshot: games/{key} に不透明文字列をそのまま読み書きする', async () => {
+  it('saveSnapshot: runTransaction で fence を条件比較し payload と共に保存する', async () => {
     h.pushKeys.push('conn-1')
     const { transport } = await connect()
 
-    await transport.saveSnapshot(GROUP_ID, '{"v":1}')
-    const [target, payload] = h.setMock.mock.calls[1] as unknown as [
+    await expect(
+      transport.saveSnapshot(GROUP_ID, '{"v":1}', {
+        epoch: 2,
+        appliedSeq: 3,
+      }),
+    ).resolves.toBe(true)
+    const [target, updater] = h.runTransactionMock.mock.calls[0] as unknown as [
       { path: string },
-      string,
+      (current: unknown) => unknown,
     ]
     expect(target.path).toBe(`games/${GROUP_ID}`)
-    expect(payload).toBe('{"v":1}')
+    expect(updater(null)).toEqual({
+      fence: { epoch: 2, appliedSeq: 3 },
+      payload: '{"v":1}',
+    })
+    expect(updater('{"v":0}')).toEqual({
+      fence: { epoch: 2, appliedSeq: 3 },
+      payload: '{"v":1}',
+    })
+    expect(
+      updater({
+        fence: { epoch: 3, appliedSeq: 1 },
+        payload: 'newer',
+      }),
+    ).toBeUndefined()
+
+    h.transactionValues.push({
+      fence: { epoch: 2, appliedSeq: 4 },
+      payload: 'newer',
+    })
+    await expect(
+      transport.saveSnapshot(GROUP_ID, 'stale', {
+        epoch: 2,
+        appliedSeq: 3,
+      }),
+    ).resolves.toBe(false)
+
+    h.transactionValues.push({
+      fence: { epoch: 2, appliedSeq: 3 },
+      payload: 'same-fence',
+    })
+    await expect(
+      transport.saveSnapshot(GROUP_ID, 'idempotent', {
+        epoch: 2,
+        appliedSeq: 3,
+      }),
+    ).resolves.toBe(true)
+  })
+
+  it('loadSnapshot: 新形状の payload だけを返し、旧文字列形状は absent 扱いにする', async () => {
+    h.pushKeys.push('conn-1')
+    const { transport } = await connect()
 
     h.getMock.mockResolvedValueOnce({
       exists: () => true,
-      val: () => '{"v":1}',
+      val: () => ({
+        fence: { epoch: 1, appliedSeq: 1 },
+        payload: '{"v":1}',
+      }),
     })
     await expect(transport.loadSnapshot(GROUP_ID)).resolves.toBe('{"v":1}')
+    h.getMock.mockResolvedValueOnce({
+      exists: () => true,
+      val: () => '{"v":0}',
+    })
+    await expect(transport.loadSnapshot(GROUP_ID)).resolves.toBeNull()
     await expect(transport.loadSnapshot(GROUP_ID)).resolves.toBeNull()
   })
 

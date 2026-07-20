@@ -6,7 +6,12 @@ import {
   type GameAction,
   type RootState,
 } from './test-fixtures.js'
-import type { RequestEnvelope, Result, SynquxTransport } from './types.js'
+import type {
+  RequestEnvelope,
+  Result,
+  SnapshotFence,
+  SynquxTransport,
+} from './types.js'
 
 /**
  * requests 同期ステートマシンの仕様テスト
@@ -40,7 +45,7 @@ const createStubTransport = () => {
     ) => undefined,
   )
   const saveSnapshot = vi.fn(
-    async (_key: string, _payload: string) => undefined,
+    async (_key: string, _payload: string, _fence: SnapshotFence) => true,
   )
   const pushRequest = vi.fn(async (_envelope: Omit<RequestEnvelope, 'id'>) => ({
     id: 'pushed-id',
@@ -233,6 +238,10 @@ describe('host 裁定 fork (requestListener)', () => {
     expect((snapshot.synced as RootState['game']).count).toBe(1)
     expect(snapshot.ordering.appliedSeq).toBe(1)
     expect(snapshot.ordering.applied[1]).toBe(request.id)
+    expect(saveSnapshot.mock.calls[0]?.[2]).toEqual({
+      epoch: 1,
+      appliedSeq: 1,
+    })
   })
 
   it('validation NG の action は error result として response する', async () => {

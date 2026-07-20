@@ -26,7 +26,7 @@ const noopTransport: SynquxTransport = {
   pushRequest: async () => ({ id: 'req-1' }),
   respondRequest: async () => undefined,
   subscribeRequests: () => () => undefined,
-  saveSnapshot: () => undefined,
+  saveSnapshot: () => true,
   loadSnapshot: () => null,
 }
 

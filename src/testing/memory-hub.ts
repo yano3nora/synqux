@@ -1,4 +1,9 @@
-import type { Peer, RequestEnvelope, SynquxTransport } from '../core/types.js'
+import type {
+  Peer,
+  RequestEnvelope,
+  SnapshotFence,
+  SynquxTransport,
+} from '../core/types.js'
 
 export type FaultTarget = {
   requestId: RequestEnvelope['id']
@@ -30,6 +35,8 @@ export type MemoryHub = {
     loseAck(requestId: RequestEnvelope['id']): void
     /** saveSnapshot を指定回数 reject し、snapshot を更新しない */
     failSnapshot(options?: { times?: number }): void
+    /** 該当端末の snapshot 書き込みを保留し、release 時に呼び出し順で着地させる */
+    holdSnapshot(peerId: Peer['id']): { release(): void }
     /** 端末側の disconnect() を経ない切断 (プロセス死の模擬)。presence cleanup として全端末へ onRemoved を配送する */
     disconnect(peerId: Peer['id']): void
   }
@@ -93,6 +100,13 @@ type AckHold = {
   resolvers: (() => void)[]
 }
 
+type SnapshotHold = {
+  released: boolean
+  buffered: (() => void)[]
+}
+
+type StoredSnapshot = { fence: SnapshotFence; payload: string }
+
 type CountedFailure = {
   remaining: number
 }
@@ -121,7 +135,7 @@ export function createMemoryHub(): MemoryHub {
   let nextDeliveryId = 1
 
   const groups = new Map<string, GroupState>()
-  const snapshots = new Map<string, string>()
+  const snapshots = new Map<string, StoredSnapshot>()
   const duplicateFaults: OneShotFault[] = []
   const dropFaults: OneShotFault[] = []
   const delayFaults: DelayFault[] = []
@@ -129,6 +143,7 @@ export function createMemoryHub(): MemoryHub {
   const respondFailures = new Map<RequestEnvelope['id'], CountedFailure>()
   const lostAcks = new Set<RequestEnvelope['id']>()
   const snapshotFailure: CountedFailure = { remaining: 0 }
+  const snapshotHolds = new Map<Peer['id'], SnapshotHold>()
 
   const consumeFailure = (failure: CountedFailure | undefined): boolean => {
     if (failure === undefined || failure.remaining <= 0) {
@@ -137,6 +152,27 @@ export function createMemoryHub(): MemoryHub {
     if (failure.remaining !== Number.POSITIVE_INFINITY) {
       failure.remaining -= 1
     }
+    return true
+  }
+
+  const saveFencedSnapshot = (
+    key: string,
+    payload: string,
+    fence: SnapshotFence,
+  ): boolean => {
+    const stored = snapshots.get(key)
+    if (
+      stored !== undefined &&
+      !(
+        fence.epoch > stored.fence.epoch ||
+        (fence.epoch === stored.fence.epoch &&
+          fence.appliedSeq >= stored.fence.appliedSeq)
+      )
+    ) {
+      return false
+    }
+
+    snapshots.set(key, { fence: clone(fence), payload })
     return true
   }
 
@@ -481,17 +517,29 @@ export function createMemoryHub(): MemoryHub {
         }
       },
 
-      async saveSnapshot(key, payload) {
-        assertConnected()
+      async saveSnapshot(key, payload, fence) {
+        const { peerId } = assertConnected()
         if (consumeFailure(snapshotFailure)) {
           throw new Error('Injected saveSnapshot failure')
         }
-        snapshots.set(key, payload)
+
+        const hold = snapshotHolds.get(peerId)
+        if (hold !== undefined && !hold.released) {
+          return new Promise<boolean>((resolve) => {
+            const capturedFence = clone(fence)
+            // key / payload / fence は closure へ呼び出し時点の値を capture する。
+            // release は transport の接続状態を再検査せず、プロセス死後も着地させる。
+            hold.buffered.push(() => {
+              resolve(saveFencedSnapshot(key, payload, capturedFence))
+            })
+          })
+        }
+        return saveFencedSnapshot(key, payload, fence)
       },
 
       async loadSnapshot(key) {
         assertConnected()
-        return snapshots.get(key) ?? null
+        return snapshots.get(key)?.payload ?? null
       },
     }
   }
@@ -563,6 +611,26 @@ export function createMemoryHub(): MemoryHub {
         snapshotFailure.remaining = options?.times ?? 1
       },
 
+      holdSnapshot(peerId) {
+        const hold: SnapshotHold = { released: false, buffered: [] }
+        snapshotHolds.set(peerId, hold)
+
+        return {
+          release() {
+            if (hold.released) {
+              return
+            }
+            hold.released = true
+            snapshotHolds.delete(peerId)
+            const buffered = [...hold.buffered]
+            hold.buffered = []
+            for (const write of buffered) {
+              write()
+            }
+          },
+        }
+      },
+
       disconnect(peerId) {
         removePeer(peerId)
       },
@@ -578,7 +646,7 @@ export function createMemoryHub(): MemoryHub {
       },
 
       snapshot(key) {
-        return snapshots.get(key) ?? null
+        return snapshots.get(key)?.payload ?? null
       },
     },
   }

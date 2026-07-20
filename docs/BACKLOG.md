@@ -14,10 +14,6 @@
 
 ### P0 — 実践投入ブロッカー
 
-- **snapshot の単調性を fencing で保証する**
-  - `saveSnapshot(key, payload)` が無条件上書きのため、旧 host の遅延書き込みが新 host の snapshot を巻き戻し、その後の prune と組み合わさると復元不能になる
-  - `(epoch, appliedSeq)` の後退を拒否する CAS / transaction 等を ADR で決め、transport 契約と Firebase / memory adapter の競合テストへ反映する
-  - 併せて restore の受理条件 `snapshot.appliedSeq > applied` を再判断する。現状は「同値 snapshot による早期適用是正」を拒否しており、snapshot の信頼性が fencing で確保されるなら `>=` 受理に緩められる (TASK-260719-ordering-restore-replacement で発見)
 - **subscribe 初期化を transactional にし、途中失敗を rollback する**
   - connect 後の peer 購読、snapshot load/parse、request 購読の途中で失敗すると presence・購読・Redux session が残り、standalone も再試行不能になり得る
   - 各段階を逆順 cleanup し、失敗後の再 subscribe 成功までテストする

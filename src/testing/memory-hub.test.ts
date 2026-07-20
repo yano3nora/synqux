@@ -480,16 +480,84 @@ describe('createMemoryHub', () => {
     const { hub, a } = await connectTwo()
     hub.faults.failSnapshot({ times: 2 })
 
-    await expect(a.saveSnapshot('snapshot', 'first')).rejects.toThrow(
-      'Injected saveSnapshot failure',
-    )
-    await expect(a.saveSnapshot('snapshot', 'second')).rejects.toThrow(
-      'Injected saveSnapshot failure',
-    )
+    await expect(
+      a.saveSnapshot('snapshot', 'first', { epoch: 1, appliedSeq: 1 }),
+    ).rejects.toThrow('Injected saveSnapshot failure')
+    await expect(
+      a.saveSnapshot('snapshot', 'second', { epoch: 1, appliedSeq: 2 }),
+    ).rejects.toThrow('Injected saveSnapshot failure')
     expect(hub.inspect.snapshot('snapshot')).toBeNull()
 
-    await expect(a.saveSnapshot('snapshot', 'third')).resolves.toBeUndefined()
+    await expect(
+      a.saveSnapshot('snapshot', 'third', { epoch: 1, appliedSeq: 3 }),
+    ).resolves.toBe(true)
     expect(hub.inspect.snapshot('snapshot')).toBe('third')
+  })
+
+  it('saveSnapshot: (epoch, appliedSeq) fence の後退を棄却し、同値と前進を受理する', async () => {
+    const { hub, a } = await connectTwo()
+
+    await expect(
+      a.saveSnapshot('snapshot', 'baseline', { epoch: 2, appliedSeq: 3 }),
+    ).resolves.toBe(true)
+    await expect(
+      a.saveSnapshot('snapshot', 'lower-epoch', {
+        epoch: 1,
+        appliedSeq: 999,
+      }),
+    ).resolves.toBe(false)
+    await expect(
+      a.saveSnapshot('snapshot', 'lower-seq', { epoch: 2, appliedSeq: 2 }),
+    ).resolves.toBe(false)
+    expect(hub.inspect.snapshot('snapshot')).toBe('baseline')
+
+    await expect(
+      a.saveSnapshot('snapshot', 'equal', { epoch: 2, appliedSeq: 3 }),
+    ).resolves.toBe(true)
+    expect(hub.inspect.snapshot('snapshot')).toBe('equal')
+
+    await expect(
+      a.saveSnapshot('snapshot', 'forward-seq', {
+        epoch: 2,
+        appliedSeq: 4,
+      }),
+    ).resolves.toBe(true)
+    await expect(
+      a.saveSnapshot('snapshot', 'forward-epoch', {
+        epoch: 3,
+        appliedSeq: 0,
+      }),
+    ).resolves.toBe(true)
+    expect(hub.inspect.snapshot('snapshot')).toBe('forward-epoch')
+  })
+
+  it('faults.holdSnapshot: 書き込みを保留順に解放し、端末のプロセス死後も着地させる', async () => {
+    const { hub, a, aId } = await connectTwo()
+    const hold = hub.faults.holdSnapshot(aId)
+    const resolved: string[] = []
+
+    const first = a.saveSnapshot('snapshot', 'first', {
+      epoch: 1,
+      appliedSeq: 1,
+    })
+    const second = a.saveSnapshot('snapshot', 'second', {
+      epoch: 1,
+      appliedSeq: 2,
+    })
+    void Promise.resolve(first).then(() => resolved.push('first'))
+    void Promise.resolve(second).then(() => resolved.push('second'))
+    await Promise.resolve()
+
+    expect(resolved).toEqual([])
+    expect(hub.inspect.snapshot('snapshot')).toBeNull()
+
+    hub.faults.disconnect(aId)
+    hold.release()
+
+    await expect(first).resolves.toBe(true)
+    await expect(second).resolves.toBe(true)
+    expect(resolved).toEqual(['first', 'second'])
+    expect(hub.inspect.snapshot('snapshot')).toBe('second')
   })
 
   it('respondRequest の result: null は RTDB の update 同様に既存 result を除去する', async () => {
@@ -649,9 +717,9 @@ describe('createMemoryHub', () => {
         { onAdded: () => undefined, onChanged: () => undefined },
       ),
     ).toThrow('not connected')
-    await expect(transport.saveSnapshot('key', 'payload')).rejects.toThrow(
-      'not connected',
-    )
+    await expect(
+      transport.saveSnapshot('key', 'payload', { epoch: 1, appliedSeq: 1 }),
+    ).rejects.toThrow('not connected')
     await expect(transport.loadSnapshot('key')).rejects.toThrow('not connected')
   })
 })
