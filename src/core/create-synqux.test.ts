@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { createMemoryHub } from '../testing/memory-hub.js'
+import { createWaker } from './create-synqux.js'
 import { selectIsHost } from './selectors.js'
 import { parseSnapshotPayload } from './snapshot.js'
 import { createHubClient, settle, type GameState } from './test-fixtures.js'
@@ -233,5 +234,40 @@ describe('createSynqux (end-to-end)', () => {
     await second.sync.subscribe({ store: second.store, groupId: 'solo' })
     expect(second.store.getState().game.count).toBe(11)
     expect(second.store.getState().game.result).toBeNull()
+  })
+})
+
+describe('createWaker', () => {
+  beforeEach(() => {
+    vi.useFakeTimers()
+  })
+
+  afterEach(() => {
+    vi.useRealTimers()
+  })
+
+  it('notify は待機中の全 waiter を起こし、解放する', async () => {
+    const waker = createWaker()
+    const first = waker.wait(1000)
+    const second = waker.wait(1000)
+    expect(waker.waiterCount()).toBe(2)
+
+    waker.notify()
+    await Promise.all([first, second])
+    expect(waker.waiterCount()).toBe(0)
+  })
+
+  it('timeout 済み waiter は次の notify を待たずに解放される (host 不在時の無限成長防止)', async () => {
+    const waker = createWaker()
+
+    // host 不在の fallback loop 相当: notify が一度も来ないまま
+    // timeout → 再 wait を繰り返しても waiter が積み上がらないこと
+    for (let i = 0; i < 100; i++) {
+      const waiting = waker.wait(1000)
+      await vi.advanceTimersByTimeAsync(1000)
+      await waiting
+    }
+
+    expect(waker.waiterCount()).toBe(0)
   })
 })

@@ -60,14 +60,16 @@ const OK_HEALTH: SynquxHealth = {
 /**
  * イベント駆動待機のシグナル (ADR-0002 / イベント駆動化)
  * notify で全 waiter を起こす。timeout は安全網 (起きて再評価して損はない)
+ *
+ * export はユニットテスト用で、公開 API (src/index.ts) には含めない
  */
-const createWaker = () => {
-  let waiters: (() => void)[] = []
+export const createWaker = () => {
+  let waiters = new Set<() => void>()
 
   return {
     notify(): void {
       const pending = waiters
-      waiters = []
+      waiters = new Set()
       for (const resolve of pending) {
         resolve()
       }
@@ -75,15 +77,23 @@ const createWaker = () => {
 
     wait(timeoutMs: number): Promise<void> {
       return new Promise<void>((resolve) => {
+        const done = (): void => {
+          clearTimeout(timer)
+          // timeout 経由でも自分を掃除する。notify 経由では既に新 Set に
+          // 差し替わっているため delete は no-op (host 不在が長引いても
+          // timeout 済み waiter が次の notify まで残留しない)
+          waiters.delete(done)
+          resolve()
+        }
         const timer = setTimeout(done, timeoutMs)
 
-        function done(): void {
-          clearTimeout(timer)
-          resolve() // 二重呼び出し (notify 後の timeout 等) は no-op
-        }
-
-        waiters.push(done)
+        waiters.add(done)
       })
+    },
+
+    /** テスト用: 未解放 waiter 数 (メモリ有界性の検証にのみ使う) */
+    waiterCount(): number {
+      return waiters.size
     },
   }
 }
