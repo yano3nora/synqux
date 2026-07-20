@@ -465,7 +465,8 @@ export const createSynqux = <
    * request ごとの host 裁定 fork (ADR-0002)
    *
    * 全端末が request ごとに fork を持ち、「自分が host か」を監視し続ける。
-   * fork は request が**適用されるまで**生存し (v1 の「応答済みまで」から延長)、
+   * fork は裁定 response の ack 後も終了せず、request が**適用されるまで**
+   * 生存し (v1 の「応答済みまで」から延長)、
    * 自分が host のとき以下を裁定する:
    * - 未裁定の request → 通常の裁定 (試し実行 → seq 採番 → respond)
    * - seq スロットを別 request に取られた確定敗者 (dual-host 窓の産物) → 再裁定
@@ -551,6 +552,14 @@ export const createSynqux = <
           const epoch = ordering.beginHosting()
           const seq = ordering.issueSeq()
 
+          let successfulAdjudication: {
+            next: TRoot
+            orderingState: OrderingState
+          } | null = null
+          let frozenResponse: Readonly<
+            Parameters<SynquxTransport['respondRequest']>[1]
+          >
+
           try {
             // reducer が唯一の判定器: rootReducer の試し実行で成否を判定する
             const next = config.rootReducer(current, entity.action as TAction)
@@ -572,56 +581,92 @@ export const createSynqux = <
               )
             }
 
-            await transport.respondRequest(id, {
+            // ここが裁定の確定点。以後の transport / snapshot 障害で内容を
+            // 差し替えないよう、配信前に response 封筒を凍結する (ADR-0010)
+            frozenResponse = Object.freeze({
               epoch,
               seq,
               responsedBy,
               responsed,
               result: result ? serializeResult(result) : null,
             })
-
-            await persistSnapshot(config.selectSynced(next), orderingState)
-
-            // 窓の外は既存仕様ですでに適用済み扱いで破棄されるため、削除しても
-            // 端末挙動は変わらない。snapshot ack 前に固定した同じ orderingState
-            // から安全線を求め、live ordering の先行を誤って prune 線へ混ぜない。
-            const beforeSeq = orderingState.appliedSeq - APPLIED_WINDOW_SIZE
-            if (
-              beforeSeq > 1 &&
-              beforeSeq > lastPrunedBeforeSeq &&
-              transport.pruneRequests
-            ) {
-              lastPrunedBeforeSeq = beforeSeq
-              // retention は correctness のクリティカルパスではない。失敗時は
-              // 後続 snapshot のより新しい閾値で再試行されるため待たない。
-              void transport.pruneRequests(beforeSeq).catch(console.error)
-            }
+            successfulAdjudication = { next, orderingState }
           } catch (e) {
-            // reducer 内で throw された時用 (transport 失敗もここに落ちる)
+            // reducer throw も正当な拒否裁定として、この時点で内容を確定する
             console.error(e)
+            frozenResponse = Object.freeze({
+              epoch,
+              seq,
+              responsedBy,
+              responsed,
+              result: serializeResult({
+                action: entity.action as TAction,
+                type: 'error',
+                targets: [entity.requestedBy],
+                // message なし = log 専用の拒否として dispatch を省略させる
+                log: e instanceof Error ? e.message : String(e),
+              }),
+            })
+          }
 
+          let abandonedDelivery = false
+          while (true) {
             try {
-              await transport.respondRequest(id, {
-                epoch,
-                seq, // 同一 seq を使う。二重発行になっても tiebreak が収束させる
-                responsedBy,
-                responsed,
-                result: serializeResult({
-                  action: entity.action as TAction,
-                  type: 'error',
-                  targets: [entity.requestedBy],
-                  // message なし = log 専用の拒否として dispatch を省略させる
-                  log: e instanceof Error ? e.message : String(e),
-                }),
-              })
+              await transport.respondRequest(id, frozenResponse)
+              break
             } catch (respondError) {
-              // respond 自体が失敗: 発行を取り消して host の永久停止を防ぐ
               console.error(respondError)
-              ordering.retractIssue()
+
+              const latest = listener.getState() as TRoot
+              const latestEntity = latest.synqux.requests.entities[id]
+              const latestSelfId = latest.synqux.connections.selfId
+              if (
+                ordering.isApplied(id) ||
+                !latestEntity ||
+                !latestSelfId ||
+                !selectIsHost(latest)
+              ) {
+                // 復帰後に同じ state から再裁定しても決定的に同値となり、
+                // 二重発行時は fencing の tiebreak が収束させる (ADR-0002)
+                ordering.retractIssue()
+                abandonedDelivery = true
+                break
+              }
+
+              await waker.wait(WAKE_FALLBACK_MS)
             }
           }
 
-          break
+          if (abandonedDelivery) {
+            // fork は終了せず、外側の既存分岐で host / entity / 適用を再評価する
+            continue
+          }
+
+          if (successfulAdjudication) {
+            try {
+              const { next, orderingState } = successfulAdjudication
+              await persistSnapshot(config.selectSynced(next), orderingState)
+
+              // stale snapshot + prune の組は復元不能を作るため、snapshot が
+              // 失敗した場合は同じ try 内の prune まで進めない。
+              const beforeSeq = orderingState.appliedSeq - APPLIED_WINDOW_SIZE
+              if (
+                beforeSeq > 1 &&
+                beforeSeq > lastPrunedBeforeSeq &&
+                transport.pruneRequests
+              ) {
+                lastPrunedBeforeSeq = beforeSeq
+                // retention は correctness のクリティカルパスではない。失敗時は
+                // 後続 snapshot のより新しい閾値で再試行されるため待たない。
+                void transport.pruneRequests(beforeSeq).catch(console.error)
+              }
+            } catch (postProcessError) {
+              // 確定済み response は後処理の成否にかかわらず変更しない
+              console.error(postProcessError)
+            }
+          }
+
+          // changed の適用完了まで fork を生存させ、敗者化も自ら再裁定する
         }
       } finally {
         hostForkActive.delete(id)

@@ -21,6 +21,15 @@ export type MemoryHub = {
     drop(target: FaultTarget): void
     /** respondRequest の resolve (ack) だけを保留する。変更イベントの配送は保留しない */
     holdAck(requestId: RequestEnvelope['id']): { release(): void }
+    /** 該当 respondRequest を指定回数 reject し、request の更新も配送も行わない */
+    failRespond(
+      requestId: RequestEnvelope['id'],
+      options?: { times?: number },
+    ): void
+    /** 次の該当 respondRequest は更新・配送し、ack だけを reject する */
+    loseAck(requestId: RequestEnvelope['id']): void
+    /** saveSnapshot を指定回数 reject し、snapshot を更新しない */
+    failSnapshot(options?: { times?: number }): void
     /** 端末側の disconnect() を経ない切断 (プロセス死の模擬)。presence cleanup として全端末へ onRemoved を配送する */
     disconnect(peerId: Peer['id']): void
   }
@@ -84,6 +93,10 @@ type AckHold = {
   resolvers: (() => void)[]
 }
 
+type CountedFailure = {
+  remaining: number
+}
+
 const clone = <T>(value: T): T => structuredClone(value)
 
 const formatRequestId = (sequence: number): string =>
@@ -113,6 +126,19 @@ export function createMemoryHub(): MemoryHub {
   const dropFaults: OneShotFault[] = []
   const delayFaults: DelayFault[] = []
   const ackHolds = new Map<RequestEnvelope['id'], AckHold>()
+  const respondFailures = new Map<RequestEnvelope['id'], CountedFailure>()
+  const lostAcks = new Set<RequestEnvelope['id']>()
+  const snapshotFailure: CountedFailure = { remaining: 0 }
+
+  const consumeFailure = (failure: CountedFailure | undefined): boolean => {
+    if (failure === undefined || failure.remaining <= 0) {
+      return false
+    }
+    if (failure.remaining !== Number.POSITIVE_INFINITY) {
+      failure.remaining -= 1
+    }
+    return true
+  }
 
   const getGroup = (groupId: string): GroupState => {
     const existing = groups.get(groupId)
@@ -364,6 +390,10 @@ export function createMemoryHub(): MemoryHub {
           throw new Error(`Unknown request: ${id}`)
         }
 
+        if (consumeFailure(respondFailures.get(id))) {
+          throw new Error(`Injected respondRequest failure: ${id}`)
+        }
+
         const current = group.requests[index]
         const updated: RequestEnvelope = {
           ...current,
@@ -390,6 +420,10 @@ export function createMemoryHub(): MemoryHub {
             event: 'changed',
             task: () => subscriber.handlers.onChanged(clone(updated)),
           })
+        }
+
+        if (lostAcks.delete(id)) {
+          throw new Error(`Injected respondRequest ack loss: ${id}`)
         }
 
         await new Promise<void>((resolve) => resolveAckNextTick(id, resolve))
@@ -449,6 +483,9 @@ export function createMemoryHub(): MemoryHub {
 
       async saveSnapshot(key, payload) {
         assertConnected()
+        if (consumeFailure(snapshotFailure)) {
+          throw new Error('Injected saveSnapshot failure')
+        }
         snapshots.set(key, payload)
       },
 
@@ -512,6 +549,18 @@ export function createMemoryHub(): MemoryHub {
             }
           },
         }
+      },
+
+      failRespond(requestId, options) {
+        respondFailures.set(requestId, { remaining: options?.times ?? 1 })
+      },
+
+      loseAck(requestId) {
+        lostAcks.add(requestId)
+      },
+
+      failSnapshot(options) {
+        snapshotFailure.remaining = options?.times ?? 1
       },
 
       disconnect(peerId) {

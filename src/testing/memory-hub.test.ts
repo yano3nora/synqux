@@ -406,6 +406,92 @@ describe('createMemoryHub', () => {
     expect(resolved).toBe(true)
   })
 
+  it('faults.failRespond: 指定回数は commit・配送せず reject し、以後は正常に戻す', async () => {
+    const { hub, a, aId } = await connectTwo()
+    const changed: RequestEnvelope[] = []
+    a.subscribeRequests(
+      {},
+      {
+        onAdded: () => undefined,
+        onChanged: (envelope) => changed.push(envelope),
+      },
+    )
+    const { id } = await a.pushRequest(createEnvelope({ requestedBy: aId }))
+    const patch = {
+      epoch: 1,
+      seq: 1,
+      responsedBy: aId,
+      responsed: 1,
+      result: '{"type":"success"}',
+    }
+    hub.faults.failRespond(id, { times: 2 })
+
+    await expect(a.respondRequest(id, patch)).rejects.toThrow(
+      'Injected respondRequest failure',
+    )
+    await expect(a.respondRequest(id, patch)).rejects.toThrow(
+      'Injected respondRequest failure',
+    )
+    expect(hub.inspect.requests(GROUP_ID)[0]).not.toHaveProperty('seq')
+    await flushDeliveries()
+    expect(changed).toEqual([])
+
+    const response = a.respondRequest(id, patch)
+    await flushDeliveries()
+    await response
+    expect(hub.inspect.requests(GROUP_ID)[0]).toMatchObject(patch)
+    expect(changed).toHaveLength(1)
+  })
+
+  it('faults.loseAck: 1 回だけ commit・配送後に reject し、以後は正常に戻す', async () => {
+    const { hub, a, aId } = await connectTwo()
+    const changed: RequestEnvelope[] = []
+    a.subscribeRequests(
+      {},
+      {
+        onAdded: () => undefined,
+        onChanged: (envelope) => changed.push(envelope),
+      },
+    )
+    const { id } = await a.pushRequest(createEnvelope({ requestedBy: aId }))
+    const patch = {
+      epoch: 1,
+      seq: 1,
+      responsedBy: aId,
+      responsed: 1,
+      result: '{"type":"success"}',
+    }
+    hub.faults.loseAck(id)
+
+    await expect(a.respondRequest(id, patch)).rejects.toThrow(
+      'Injected respondRequest ack loss',
+    )
+    await flushDeliveries()
+    expect(hub.inspect.requests(GROUP_ID)[0]).toMatchObject(patch)
+    expect(changed).toHaveLength(1)
+
+    const response = a.respondRequest(id, patch)
+    await flushDeliveries()
+    await response
+    expect(changed).toHaveLength(2)
+  })
+
+  it('faults.failSnapshot: 指定回数は commit せず reject し、以後は正常に戻す', async () => {
+    const { hub, a } = await connectTwo()
+    hub.faults.failSnapshot({ times: 2 })
+
+    await expect(a.saveSnapshot('snapshot', 'first')).rejects.toThrow(
+      'Injected saveSnapshot failure',
+    )
+    await expect(a.saveSnapshot('snapshot', 'second')).rejects.toThrow(
+      'Injected saveSnapshot failure',
+    )
+    expect(hub.inspect.snapshot('snapshot')).toBeNull()
+
+    await expect(a.saveSnapshot('snapshot', 'third')).resolves.toBeUndefined()
+    expect(hub.inspect.snapshot('snapshot')).toBe('third')
+  })
+
   it('respondRequest の result: null は RTDB の update 同様に既存 result を除去する', async () => {
     const { hub, a, aId, bId } = await connectTwo()
     const { id } = await a.pushRequest(createEnvelope({ requestedBy: aId }))

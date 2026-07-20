@@ -95,6 +95,7 @@ client                      firebase                     host
 | ② clock skew による request の取りこぼし (v1 の isDelayed ドロップ) | **seq 化で機構ごと根絶** (Phase 3 / ADR-0002)。順序が request id と無関係になり、遅配 request は次の seq を貰って普通に適用される | 反転テスト: `src/core/characterization.test.ts` |
 | ①′ responseListener の二重 dispatch 窓: check-then-act (isApplied チェック → dispatch → await → markApplied) の窓に同一 changed の同時二重配送が入ると二重適用され、**非冪等 action が静かに壊れる** | dispatch 直前に同期的な処理中ガード (`ordering.beginProcessing`) を立て、markApplied 後 finally で解放 (synqux Phase 1 で修正)。失敗時は解放して再配送での retry 余地を残す | `src/core/create-synqux.ts` (responseListener) / `src/core/ordering.ts`、再現テスト: `src/core/characterization.test.ts` |
 | response 永久欠落 / dual-host 早期適用による seq gap | sync health で検知し、requests 再購読 → snapshot restore を 1 巡。失敗時だけ unrecoverable を通知 (ADR-0004) | `src/core/create-synqux.ts`、再現テスト: `src/core/recovery.test.ts` |
+| respondRequest の失敗 / ack 喪失・saveSnapshot の失敗 | response 封筒を裁定時に凍結し ack まで同一内容を再送。snapshot 失敗は log のみで prune をスキップし、確定済み response を上書きしない (ADR-0010) | `src/core/create-synqux.ts` (`spawnHostFork`)、再現テスト: `src/core/host-adjudication.test.ts` |
 | requests の無限成長 | snapshot ack 後、既存仕様ですでに破棄対象となる適用窓の外だけを host が prune (ADR-0005) | `src/core/create-synqux.ts` / transport adapter、再現テスト: `src/core/retention.test.ts` |
 
 ### 既知トレードオフ (仕様として明文化)

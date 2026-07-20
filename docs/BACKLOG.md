@@ -14,14 +14,6 @@
 
 ### P0 — 実践投入ブロッカー
 
-- **host 裁定の失敗状態を分離し、response 確定後の上書きを禁止する**
-  - `respondRequest` 成功後の `saveSnapshot` 失敗まで同じ catch で扱うため、先に配信した success を同一 `(requestId, epoch, seq)` の error で上書きし、端末間を恒久分岐させ得る
-  - response の ack 喪失 (サーバでは確定したが Promise は reject) も含め、「未確定」「確定済み」「snapshot のみ失敗」を区別する。確定後の裁定結果は変更しない
-  - `respondRequest` / `saveSnapshot` の各失敗点を fault injection し、不変条件 2〜4 を固定する
-- **未裁定 request の response 失敗を retry し、fork を適用完了まで生存させる**
-  - 現状は response の二重失敗後に `retractIssue()` して fork を終了し、再起動イベントも health 検知もないため、未裁定 request が永久滞留する
-  - ack 前 local echo 中は `hostForkActive` が changed 起点の fork を抑止し、元 forkも無条件終了するため、dual-host 敗者が再裁定されない実運用タイミングがある
-  - backoff・host 再判定・unsubscribe cancellation と「ack 前 local echo + 同一 seq 衝突」の決定的 simulation test を追加する
 - **snapshot の単調性を fencing で保証する**
   - `saveSnapshot(key, payload)` が無条件上書きのため、旧 host の遅延書き込みが新 host の snapshot を巻き戻し、その後の prune と組み合わさると復元不能になる
   - `(epoch, appliedSeq)` の後退を拒否する CAS / transaction 等を ADR で決め、transport 契約と Firebase / memory adapter の競合テストへ反映する
