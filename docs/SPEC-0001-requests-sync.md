@@ -11,6 +11,12 @@
 
 採用しているのは Server / Client 方式のうち**クライアントホスト型 (リレーサーバ)**。専用サーバ型と比べてサーバの開発・保守運用コストを丸ごとカットでき、協力型・ターン制の少人数マルチプレイに向く。反面 host に負荷とロジックが集中するため、同期速度・平等性が重視されるリアルタイム対戦には不向き。P2P・専用サーバ型との比較と選定背景は下図を参照。
 
+### Trust model
+
+synqux は、consumer が認証・認可した**協調的な非敵対クライアント**間の同期を対象とする。改造クライアント、チート、transport データの直接改ざんに対する耐性は提供しない (ADR-0009)。書き込み権限を持つ端末は request / response / `(epoch, seq)` / snapshot / presence を偽造できるため、敵対クライアントを想定する用途では client-host 型を採用せず、信頼できるサーバで判定・採番・永続化すること。
+
+ただし、room 外からの読み書きや情報漏えいを防ぐアクセス制御まで不要になるわけではない。Firebase Authentication、room membership に基づく Security Rules、group 終了時のデータ削除は consumer の責務とする。`demo/database.rules.json` の全 read/write 許可は emulator 専用であり、本番へ流用しない。
+
 ![Realtime Sync by Client-Host Model](assets/realtime-sync-by-client-host-model.svg)
 
 ## 前提知識

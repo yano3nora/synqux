@@ -23,7 +23,7 @@ Redux (Redux Toolkit) アプリに「クライアントホスト型のリアル�
 
 - 仕様の正: [SPEC-0001-requests-sync](./docs/SPEC-0001-requests-sync.md) (仕組み・不変条件・既知の問題)
 - API 境界: [SPEC-0002-public-api](./docs/SPEC-0002-public-api.md)
-- 設計判断: [ADR-0001](./docs/ADR-0001-design.md) (全体設計) / [ADR-0002](./docs/ADR-0002-host-seq.md) (host 採番 seq) / [ADR-0003](./docs/ADR-0003-sync-health.md) (stall 検知) / [ADR-0004](./docs/ADR-0004-sync-auto-recovery.md) (自動回復) / [ADR-0005](./docs/ADR-0005-requests-retention.md) (retention) / [ADR-0006](./docs/ADR-0006-presence-reregistration.md) (presence 再登録) / [ADR-0007](./docs/ADR-0007-action-repeat-contract.md) (action repeat contract)
+- 設計判断: [ADR-0001](./docs/ADR-0001-design.md) (全体設計) / [ADR-0002](./docs/ADR-0002-host-seq.md) (host 採番 seq) / [ADR-0003](./docs/ADR-0003-sync-health.md) (stall 検知) / [ADR-0004](./docs/ADR-0004-sync-auto-recovery.md) (自動回復) / [ADR-0005](./docs/ADR-0005-requests-retention.md) (retention) / [ADR-0006](./docs/ADR-0006-presence-reregistration.md) (presence 再登録) / [ADR-0007](./docs/ADR-0007-action-repeat-contract.md) (action repeat contract) / [ADR-0008](./docs/ADR-0008-result-envelope-reshape.md) (Result / wire v3) / [ADR-0009](./docs/ADR-0009-trust-model.md) (trust model)
 
 ## Depends
 - node 20+ (開発は mise で 24 系を pin)
@@ -31,6 +31,9 @@ Redux (Redux Toolkit) アプリに「クライアントホスト型のリアル�
 - demo の emulator 実行のみ Java が必要
 
 ## Quick Start
+
+> [!IMPORTANT]
+> synqux は、認証・認可済みの協調的なクライアントを前提とし、改造クライアント・チート・Firebase データの直接改ざんへの耐性は提供しない。敵対クライアントを想定する場合は、判定・採番・永続化を信頼できるサーバへ置くこと。`demo/database.rules.json` は emulator 専用であり、本番へ流用しない。
 
 動く完成形は [demo/](./demo/) (firebase emulator + 複数タブで同期を体験できる) にあり、以下は demo と同じ構成を最小手順に分解したもの。
 
@@ -80,6 +83,7 @@ export const counterReducer: Reducer<CounterState> = (
 セットアップ層はテンプレに 1 ファイル。feature 開発者は触らない (全文: [demo/main.ts](./demo/main.ts))。firebase の匿名認証等は transport 生成前に済ませること。
 
 Firebase RTDB の rules では retention query 用に `requests/$groupId` へ `".indexOn": ["seq"]` を設定することを推奨する。
+Authentication と room membership に基づく read/write 認可は consumer が設計する。匿名認証を行うだけでは、別 room へのアクセスやデータ改ざんを防ぐ認可にはならない。
 prune 後も全量 replay 調査を可能にするには `firebaseTransport(db, { archivePrunedRequests: true })` で削除対象を `logs/` へ退避できる。
 `logs/` は無限成長するため、容量とグループ破棄時の削除は consumer 側で管理する。
 
