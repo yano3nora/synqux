@@ -1,6 +1,6 @@
 {
   "name": "synqux",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "description": "Client-host realtime sync for Redux apps",
   "keywords": [
     "redux",
@@ -44,7 +44,6 @@
     "demo:emulator": "npx -y firebase-tools emulators:start --only database --project synqux-demo --config demo/firebase.json",
     "prepublishOnly": "run-s test build smoke",
     "smoke": "node scripts/pack-smoke.mjs",
-    "version": "node -e \"const fs=require('fs');const v=require('./package.json').version;fs.writeFileSync('src/index.ts',fs.readFileSync('src/index.ts','utf-8').replace(/SYNQUX_VERSION = '[^']+'/,\\\"SYNQUX_VERSION = '\\\"+v+\\\"'\\\"))\" && git add src/index.ts",
     "test": "run-s test:*",
     "test:vitest": "vitest run --passWithNoTests",
     "test:oxlint": "oxlint",

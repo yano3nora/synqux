@@ -32,3 +32,13 @@ run = [
   "mise generate git-pre-commit --task pre-commit --write",
   "npm ci",
 ]
+
+# Release : version の 3 点同期・test/build/smoke・publish ゲートを scripts/release.mjs に集約。
+#           npm publish が配布本体、GitHub Release は gh --generate-notes で作る (詳細は README)。
+[tasks."release:prepare"]
+description = "Bump version, sync src, run test/build/smoke (no publish)"
+run = "node scripts/release.mjs prepare"
+
+[tasks."release:publish"]
+description = "Push tag, npm publish, and create the GitHub Release (human-only)"
+run = "node scripts/release.mjs publish"

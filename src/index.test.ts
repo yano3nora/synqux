@@ -14,7 +14,7 @@ describe('package smoke test', () => {
 
   it('main entry の runtime export は SPEC-0002 の公開一覧と一致する (公開 surface の回帰検出)', () => {
     // 増減どちらも意図的な変更のみ許す。増やす / 減らす場合は SPEC-0002 の
-    // subpath exports 一覧・CHANGELOG (breaking の可能性) とセットで更新すること
+    // subpath exports 一覧とセットで更新する (breaking の可能性を release notes に明記)
     expect(Object.keys(synqux).sort()).toEqual(
       [
         'SYNQUX_SCHEMA_VERSION',

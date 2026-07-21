@@ -238,19 +238,32 @@ npm run build      # dist へ d.ts 込みでビルド
 ```
 
 ## Publishment
-publish は人間が判断して手動で行う (Agent は実行しない)。`prepublishOnly` が test + build を強制するので、緑でない状態では公開できない。
+publish は人間が判断して手動で行う (Agent は実行しない)。version bump・test/build/smoke・
+publish ゲートは [`scripts/release.mjs`](./scripts/release.mjs) に集約する。配布の本体は `npm publish`
+(`prepublishOnly` が test + build + smoke を強制するので緑でしか出せない)、変更履歴は
+`gh release create --generate-notes` が commit / PR から自動生成する GitHub Release に残す
+(手書きの CHANGELOG は持たない)。version は package.json を正とし、`prepare` が package.json /
+package-lock / `src/index.ts` の `SYNQUX_VERSION` を一括同期する (旧 `npm version` の inline sync は
+廃止。手動で `npm version` を叩くと src が同期されず `src/index.test.ts` が落ちる)。
 
 ```sh
-# 1. CHANGELOG.md の Unreleased を新バージョンの節に整理してコミット
-# 2. バージョンを上げる (src/index.ts の SYNQUX_VERSION も version script が自動同期する)
-npm version minor   # または patch / major。semver 厳守 (ADR-0001 Decision 6)
-# 3. commit と tag を push
-git push --follow-tags
-# 4. 公開前の中身確認 (dist + README + CHANGELOG のみであること)
-npm pack --dry-run
-# 5. 公開 (prepublishOnly で test + build が走る)
-npm publish --access public
+# 1. prepare: version 3 点同期 + test → build → smoke (publish なし)
+mise run release:prepare -- 0.3.0   # semver 厳守 (ADR-0001 Decision 6)
+
+# 2. 人間: diff を確認して bump を commit し、tag を打つ
+git add .
+git commit -m "release: release v0.3.0"
+git tag v0.3.0
+
+# 3. publish: 整合チェック → push → npm publish → GitHub Release 作成 (人間のみ)
+mise run release:publish -- 0.3.0 --i-understand-this-pushes-and-publishes
 ```
+
+同一 version での `prepare` 再実行は bump が冪等なので安全。breaking (wire format schema version の
+変更) を含む release は GitHub Release の notes で「協調デプロイの要否」を明記すること。
+
+`publish` は「焼き込み version == tag」「working tree clean」「tag が HEAD を指す」を満たさないと
+中断する。push は npm publish (取り消し困難) より先に行い、tag だけ remote に進んでも消して再実行できる。
 
 - 消費者の運用は「テンプレは `^latest` 追従、出荷済みゲーム repo は exact pin」。breaking change (wire format の schema version 変更を含む) は必ず major
 - wire format (schema version) を変えるデプロイは「進行中セッションがない時間帯」に行う運用で新旧混在を吸収する

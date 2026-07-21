@@ -43,7 +43,7 @@
     - 原則、全開発タスクが適切な粒度で `docs/TASK-YYMMDD-*.md` に残るようにする
         - 同期の仕組み・不変条件を変えたら `docs/SPEC-0001-requests-sync.md` を必ず更新する
     - 画像などは `docs/assets/` へ配置してリンクする
-- **Versioning**: semver を厳守し CHANGELOG を保守する。消費者 repo は「テンプレは ^latest 追従、出荷済みプロジェクトは exact pin」で運用される前提
+- **Versioning**: semver を厳守する。変更履歴は release 時に GitHub Release (`gh --generate-notes`) が commit / PR から自動生成する (手書き CHANGELOG は持たない)。消費者 repo は「テンプレは ^latest 追従、出荷済みプロジェクトは exact pin」で運用される前提。release 手順は README > Publishment を参照
 
 ## Domains
 - `request`
