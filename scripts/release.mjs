@@ -182,9 +182,9 @@ function publish(version, publishAllowed) {
   run('gh', ['auth', 'status'], { quiet: true })
 
   // 先に remote を tag まで揃える (push は失敗しても tag を消して再実行できる)。
+  // --atomic で branch だけ進んで tag が落ちる半端な状態を防ぐ。
   // その後 npm publish で prepublishOnly (test/build/smoke) が最終ゲートとして走る
-  run('git', ['push', 'origin', 'HEAD'])
-  run('git', ['push', 'origin', tag])
+  run('git', ['push', '--atomic', 'origin', 'HEAD', tag])
   run('npm', ['publish', '--access', 'public'], { stream: true })
 
   // GitHub Release へ添付する tarball を作る (古いものが混ざらないよう掃除してから pack)。

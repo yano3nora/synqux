@@ -13,29 +13,12 @@
 ## 次イテレーション候補
 
 ### P0 — 実践投入ブロッカー
-
-- (なし — 0.3.0 の `npm version` / publish 実行はユーザ判断待ち。経緯は [TASK-260720-release-gate](TASK-260720-release-gate.md))
+- xxx
 
 ### P1 — 本番境界と公開契約
-
-> 2026-07-20 の P1 評価で再構成し、同日中に全件解消。
-> 入力検証の設計は縮小 (ADR-0009 で tamper 耐性は対象外と決定済みのため、同一 schema の
-> 壊れた封筒への深い検証は YAGNI と判断)、request id 契約と emulator gate は P2 へ降格。
-> 解消記録: [waker-timeout-cleanup](TASK-260720-waker-timeout-cleanup.md) /
-> [wire-adapter-failure-handling](TASK-260720-wire-adapter-failure-handling.md) (ADR-0012) /
-> [primitive-contract](TASK-260720-primitive-contract.md) /
-> [firebase-peer-range](TASK-260720-firebase-peer-range.md)
-
-- (なし)
+- xxx
 
 ### P2 — 文書・consumer 導入・コスト最適化
-
-> 2026-07-20: 文書不整合の解消 (request id 契約の緩和を含む) は
-> [TASK-260720-doc-consistency](TASK-260720-doc-consistency.md) で解消済み。
-> 「consumer repo の action repeat contract を CI へ組み込む」は独立項目を廃止 —
-> synqux 側の成果物 (`assertActionIdempotency` / ADR-0007 / SPEC-0001 設計ガイドライン 1) は
-> 提供済みで、残作業は consumer repo 側の導入作業のみのため、下記 checklist 項目へ統合した
-
 - **Firebase の本番 rules / data lifecycle checklist を用意する**
   - ADR-0009 のとおり cheat / tamper 耐性は対象外だが、意図しない room 間アクセスや情報漏えいを防ぐ認可、data shape、group 終了時の connections / requests / games / logs 削除は consumer 責務として残る
   - demo の全 read/write rules を流用せず、最初の consumer 導入時に実際の認証・room membership モデルへ合わせて checklist と rules 例を作る
