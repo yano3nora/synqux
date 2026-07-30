@@ -255,7 +255,10 @@ git add .
 git commit -m "release: release v0.3.0"
 git tag v0.3.0
 
-# 3. publish: 整合チェック → push → npm publish → GitHub Release 作成 (人間のみ)
+# 3. publish 前に browser 経由で npm login
+npm login
+
+# 4. publish: 整合チェック → push → npm publish → GitHub Release 作成 (人間のみ)
 mise run release:publish -- 0.3.0 --i-understand-this-pushes-and-publishes
 ```
 
