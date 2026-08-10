@@ -32,6 +32,7 @@ export {
 } from './core/slice.js'
 
 // ゲーム開発者層: reducer ヘルパーと読み取り selector
+export { createSyncedActionMatchers } from './core/matchers.js'
 export {
   generateResult,
   stateWithDefaultResult,

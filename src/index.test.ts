@@ -21,6 +21,7 @@ describe('package smoke test', () => {
         'SYNQUX_VERSION',
         'createSynqux',
         'createSynquxRootReducer',
+        'createSyncedActionMatchers',
         'generateResult',
         'localStorageSnapshotStore',
         'selectIsHost',

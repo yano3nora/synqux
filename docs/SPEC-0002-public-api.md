@@ -260,6 +260,29 @@ export function stateWithTransaction<TSynced, TAction, TMessage extends ResultMe
 export function generateResult<TAction, TMessage extends ResultMessage = ResultMessage>(props: ...): Result<TAction, TMessage>
 
 // ============================================================
+// locals 用成功判定 matcher (ゲーム開発者層、Decision 8 / ADR-0013)
+// ============================================================
+
+/**
+ * locals reducer 専用。createSynquxRootReducer の返り値をそのまま渡す。
+ * meta.root が付かない synced reducer 内では常に false になり、そこで端末ローカル
+ * 情報を読む用途には使えない (決定性を壊すため、その用途自体を禁止する)。
+ */
+export function createSyncedActionMatchers<
+  TAction extends Action,
+  TSynced extends SynquxSynced,
+  TRoot extends { synqux: SynquxState },
+>(config: {
+  isSyncedAction: (action: Action) => action is TAction
+  selectSynced: (root: TRoot) => TSynced
+}): {
+  /** result が action と同じ hash の success なら true。非 synced action は常に false */
+  isSucceededAction: (action: Action) => action is TAction
+  /** standalone なら成功時 true。同期中は requestedBy === selfId も要求する */
+  isMySucceededAction: (action: Action) => action is TAction
+}
+
+// ============================================================
 // 読み取り selector (ゲーム開発者層、Decision 7)
 // state.synqux が予約 key のため instance 不要の静的関数として提供できる
 // ============================================================
@@ -496,7 +519,7 @@ type SnapshotEnvelope<TSynced> = {
 
 | subpath | 主な export | 対象 |
 | --- | --- | --- |
-| `synqux` | `createSynqux` / `createSynquxRootReducer` / `synquxReducer` / `synquxRestored` (primitive 方式の restore 契約。dispatch 禁止・match 専用) / `stateWithDefaultResult` / `stateWithError` / `stateWithResult` / `stateWithTransaction` / `generateResult` / `selectIsHost` / `selectPeers` / `selectSelfId` / `selectSyncHealth` / `selectIsSyncStalled` / `selectIsSyncUnrecoverable` / `localStorageSnapshotStore` / 型 (`SynquxSynced` / `SynquxHealth` / `Result` / `ResultMessage` / `Peer` / `SynquxActionMeta` / `SynquxTransport` / `SnapshotStore` / `RequestEnvelope` / `SynquxState` / `PendingRequest`) | セットアップ層 + reducer ヘルパー |
+| `synqux` | `createSynqux` / `createSynquxRootReducer` / `synquxReducer` / `synquxRestored` (primitive 方式の restore 契約。dispatch 禁止・match 専用) / `stateWithDefaultResult` / `stateWithError` / `stateWithResult` / `stateWithTransaction` / `generateResult` / `createSyncedActionMatchers` / `selectIsHost` / `selectPeers` / `selectSelfId` / `selectSyncHealth` / `selectIsSyncStalled` / `selectIsSyncUnrecoverable` / `localStorageSnapshotStore` / 型 (`SynquxSynced` / `SynquxHealth` / `Result` / `ResultMessage` / `Peer` / `SynquxActionMeta` / `SynquxTransport` / `SnapshotStore` / `RequestEnvelope` / `SynquxState` / `PendingRequest`) | セットアップ層 + reducer ヘルパー |
 | `synqux/react` | `SynquxProvider` / `useIsHost` / `usePeers` / `useSelfId` / `useSyncHealth` / `useIsSyncStalled` / `useIsSyncUnrecoverable` / `useLatestResult` | ゲーム開発者層 |
 | `synqux/testing` | `createMemoryHub` / `verifyActionIdempotency` / `assertActionIdempotency` | consumer CI / 本 repo の simulation test |
 | `synqux/firebase` | `firebaseTransport(db, options?: { archivePrunedRequests?: boolean })` | Phase 2 で実装 |

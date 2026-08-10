@@ -48,7 +48,7 @@ core のテストフィクスチャは各分岐に手書きの `result: null` �
 
 ## Out of scope
 
-- **isSucceededGameAction 相当の locals 用 helper の提供**: consumer 側の数行で書けるため、テンプレ移行で必要性が確認できるまで synqux には持たない (YAGNI)
+- **isSucceededGameAction 相当の locals 用 helper の提供**: consumer 側の数行で書けるため、テンプレ移行で必要性が確認できるまで synqux には持たない (YAGNI)。その後、必要性が確認されたため `TASK-260810-succeeded-action-matchers` で提供済み
 - **result の自動クリア (時限・消費時)**: 「次の synced action まで残る」という現行の transient 性は変えない。表示済み判定は従来どおり hash 照合で行う
 
 ## Consequences

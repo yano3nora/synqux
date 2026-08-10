@@ -236,6 +236,7 @@ reducer ヘルパー (ゲーム開発者層。同期・standalone によらず�
 
 | export | 説明 |
 | --- | --- |
+| `createSyncedActionMatchers({ isSyncedAction, selectSynced })` | locals reducer で「適用 action が成功したか / 自分の依頼か」を判定する type guard (`isSucceededAction` / `isMySucceededAction`) を返す。`createSynquxRootReducer` の返り値をそのまま渡せる。synced reducer では使用禁止 |
 | `stateWithError(state, action, option?)` | validation 失敗を表明する。state を変えず error result を積む。`message` なしなら log 専用の拒否 (dispatch 省略) |
 | `stateWithResult(state, result)` | 任意の result (success + message 等) を積む |
 | `stateWithTransaction(state, mutate)` | mutate 内の複数変更を一括適用し、途中で error result が積まれたら**全変更を巻き戻して** error だけを残す。state 全体をコピーするため高頻度 action には使わない |
