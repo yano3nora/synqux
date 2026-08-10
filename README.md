@@ -215,6 +215,81 @@ const count = useAppSelector((s) => s.counter.count)
 
 `synqux/react` の hooks (`useIsHost` / `useLatestResult` 等) は Provider 経由で型解決するため、この配線がなくても動く。
 
+## API Reference
+
+公開 API の境界・型シグネチャ・提供しない理由の正は [SPEC-0002](./docs/SPEC-0002-public-api.md)。ここは全 export の一覧と一言説明のみ (公開 surface は `src/index.test.ts` の回帰テストで固定しており、この表と SPEC-0002 は増減とセットで更新する)。
+
+### `synqux` (main entry)
+
+セットアップ層 (テンプレの setup 1 ファイルだけが触る):
+
+| export | 説明 |
+| --- | --- |
+| `createSynqux(config)` | 同期 instance を生成する。`middlewares` / `rootReducer` / `reducer` / `subscribe` / `actions.setEnabled` / `selectSynced` を返す |
+| `createSynquxRootReducer({ isSyncedAction, synced, locals })` | 「synced は純粋、locals は前段参照」の直列 rootReducer helper。synced action へ default success result を自動 stamp する (ADR-0013)。返り値 (`rootReducer` / `selectSynced` / `isSyncedAction`) をそのまま `createSynqux` config へ spread する |
+| `localStorageSnapshotStore()` | standalone (`enabled: false`) の synced 永続化に使う localStorage 実装。`localSnapshots` config へ渡す |
+| `synquxReducer` | 予約 key `state.synqux` に mount する内部 slice reducer (primitive 方式用) |
+| `synquxRestored` | snapshot restore の内部 action。primitive 方式の rootReducer で match して synced を全量差し替える (**consumer からの dispatch は禁止**) |
+| `SYNQUX_VERSION` / `SYNQUX_SCHEMA_VERSION` | パッケージ version / wire format (封筒) の形式 version |
+
+reducer ヘルパー (ゲーム開発者層。同期・standalone によらず同じ書き方):
+
+| export | 説明 |
+| --- | --- |
+| `stateWithError(state, action, option?)` | validation 失敗を表明する。state を変えず error result を積む。`message` なしなら log 専用の拒否 (dispatch 省略) |
+| `stateWithResult(state, result)` | 任意の result (success + message 等) を積む |
+| `stateWithTransaction(state, mutate)` | mutate 内の複数変更を一括適用し、途中で error result が積まれたら**全変更を巻き戻して** error だけを残す。state 全体をコピーするため高頻度 action には使わない |
+| `stateWithDefaultResult(state, action)` | action 自身の default success result を immutable に載せる。`createSynquxRootReducer` 利用時は自動。primitive 方式では synced reducer の前段で必ず呼ぶ (ADR-0013) |
+| `generateResult(props)` | result object の生成 (上記 helper の低レベル材料) |
+
+selector (instance 不要の静的関数。react なしでも使える):
+
+| export | 説明 |
+| --- | --- |
+| `selectIsHost(root)` | 自端末が host か |
+| `selectPeers(root)` / `selectSelfId(root)` | 接続端末一覧 / 自端末 id |
+| `selectSyncHealth(root)` | 同期健全性 (`phase` ほか) |
+| `selectIsSyncStalled(root)` | 適用停滞中か (自動回復中を含む進行表示向け) |
+| `selectIsSyncUnrecoverable(root)` | 自動回復に失敗したか (リロード案内向け) |
+
+型 (契約型はすべて main entry から export):
+
+| export | 説明 |
+| --- | --- |
+| `SynquxSynced<TAction, TMessage>` | 同期対象 slice の型契約 (`result` を持つ) |
+| `Result` / `ResultMessage` | reducer が書き host が読む成否判定と、その UI 表示データ |
+| `SynquxActionMeta` | synqux が action へ載せる meta (reducer が読んでよいのは `requestedBy` / `dispatched` のみ) |
+| `Peer` / `PeerRole` | 接続端末と役割 (`player` / `dedicated` / `observer`) |
+| `SynquxHealth` | `selectSyncHealth` の返り値 |
+| `Synqux` / `CreateSynquxConfig` / `SynquxSubscribeOptions` | `createSynqux` の返り値 / config / `subscribe` オプション |
+| `SynquxRootState` / `SynquxState` / `PendingRequest` | rootReducer の合成 state / 内部 slice の state と pending request |
+| `SynquxTransport` / `RequestEnvelope` | transport 抽象と request 封筒 (adapter 実装者向け契約) |
+| `SnapshotStore` / `SnapshotFence` / `SnapshotEnvelope` | snapshot 永続化の契約 (fence つき条件付き書き込み) |
+| `Unsubscribe` | 購読解除関数 |
+
+### `synqux/react`
+
+| export | 説明 |
+| --- | --- |
+| `SynquxProvider` | hooks の解決コンテキスト。`createSynqux` の返り値を `sync` prop に渡す |
+| `useIsHost()` / `usePeers()` / `useSelfId()` | selector 群の hooks 版 |
+| `useSyncHealth()` / `useIsSyncStalled()` / `useIsSyncUnrecoverable()` | 同期健全性の hooks 版 |
+| `useLatestResult()` | 最新の result を読む (toast 等の通知向け。synced state の直読みでも可) |
+
+### `synqux/testing`
+
+| export | 説明 |
+| --- | --- |
+| `createMemoryHub()` | fault injection (重複 / 遅延 / ドロップ / 購読打ち切り) つきの決定的 in-memory transport hub。consumer の simulation test 向け |
+| `assertActionIdempotency(...)` / `verifyActionIdempotency(...)` | mode 宣言つき action 冪等性ハーネス (`idempotent` / `rejects-repeat` / `repeatable`) の assert 版 / report 版 |
+| `MemoryHub` / `FaultTarget` / `IdempotencyReport` | 上記の型 |
+
+### `synqux/firebase`
+
+| export | 説明 |
+| --- | --- |
+| `firebaseTransport(db, options?)` | Firebase RTDB adapter。`options.archivePrunedRequests` で prune 対象を `logs/` へ退避 |
+
 ## Development
 ### Getting Started
 ```sh
