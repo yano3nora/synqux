@@ -38,6 +38,7 @@ synqux は、consumer が認証・認可した**協調的な非敵対クライ�
     - → 到着順がバラついても全端末の適用順は host 基準で一致する。封筒に焼かれた seq 自体が「実際に適用された順序」の ground truth (requests export を seq 順に並べれば適用列が復元できる)
 - **reducer の作り方 (validation = result)** — `src/core/results.ts` (`stateWithError` / `generateResult`)
     - reducer は logic validation に失敗したら state を変えず `state.result` に error を積む。host は `rootReducer` を試し実行し、`selectSynced(next).result.type` (`error` / `success`) で request の受理・拒否を判定する
+    - dev の決定性検出網は host の試し実行後の synced と実適用後の synced を比較し、不一致時は最初に分岐した path と expected / actual 値を出力する。`synquxRestored` による全量置換時と unsubscribe 時は、古い state を土台に控えた expected を破棄する
     - → 成否判定器は reducer ただ一つ。host / client / 同期なし (standalone) でロジックが分岐せず、reducer さえ堅牢なら同期しても壊れない
 - **snapshot と restore** — `src/core/snapshot.ts`, `src/core/create-synqux.ts` (`subscribe` / `persistSnapshot`)
     - host は request を 1 件処理するたびに synced state 全体を canonical JSON の封筒で永続化する (封筒には順序状態 = epoch / appliedSeq / 直近適用窓も載る)。ack 後、適用窓の外 (`seq < appliedSeq - 200`) を fire-and-forget で prune する (ADR-0005)。復帰端末は snapshot を復元してから残存 requests を全量購読し、適用済み分は seq で破棄して追いつく

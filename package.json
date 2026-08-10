@@ -1,6 +1,6 @@
 {
   "name": "synqux",
-  "version": "0.3.1",
+  "version": "0.4.0",
   "description": "Client-host realtime sync for Redux apps",
   "keywords": [
     "redux",

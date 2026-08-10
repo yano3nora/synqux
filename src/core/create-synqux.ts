@@ -13,6 +13,7 @@ import {
   createOrdering,
   type OrderingState,
 } from './ordering.js'
+import { findFirstDivergence } from './diff.js'
 import { selectIsHost } from './selectors.js'
 import {
   buildSnapshotPayload,
@@ -232,6 +233,12 @@ export const createSynqux = <
    */
   const expectedSyncedByRequest = new Map<RequestEnvelope['id'], string>()
 
+  const formatDivergedValue = (value: unknown): string => {
+    const json = JSON.stringify(value)
+    const rendered = json === undefined ? 'undefined' : json
+    return rendered.length > 200 ? `${rendered.slice(0, 200)}...` : rendered
+  }
+
   const verifyDeterminism = (
     id: RequestEnvelope['id'],
     actual: TSynced,
@@ -244,11 +251,22 @@ export const createSynqux = <
 
     expectedSyncedByRequest.delete(id)
 
-    if (expected !== canonicalStringify(actual)) {
+    const canonicalActual = canonicalStringify(actual)
+
+    if (expected !== canonicalActual) {
+      const divergence = findFirstDivergence(
+        JSON.parse(expected),
+        JSON.parse(canonicalActual),
+      )
+      const path = divergence?.path || '(root)'
+      const expectedValue = formatDivergedValue(divergence?.expected)
+      const actualValue = formatDivergedValue(divergence?.actual)
+
       console.error(
         `[synqux] Determinism check failed for request ${id}: ` +
           'the state applied locally differs from the host trial run. ' +
-          'A synced reducer is probably non-deterministic (Date.now / Math.random / external reads).',
+          'A synced reducer is probably non-deterministic (Date.now / Math.random / external reads). ' +
+          `synced diverged at "${path}": expected ${expectedValue}, actual ${actualValue}`,
       )
     }
   }
@@ -920,6 +938,7 @@ export const createSynqux = <
         synquxActions.sessionStarted({ selfId: null, enabled: false }),
       )
       cleanups.push(() => {
+        expectedSyncedByRequest.clear()
         store.dispatch(synquxActions.sessionEnded())
       })
 
@@ -929,6 +948,7 @@ export const createSynqux = <
       if (payload) {
         const envelope = parseSnapshotPayload(payload)
         ordering.restore(envelope.ordering)
+        expectedSyncedByRequest.clear()
         store.dispatch(
           synquxRestored({ synced: clearRestoredResult(envelope.synced) }),
         )
@@ -995,6 +1015,7 @@ export const createSynqux = <
 
     store.dispatch(synquxActions.sessionStarted({ selfId, enabled: true }))
     cleanups.push(() => {
+      expectedSyncedByRequest.clear()
       store.dispatch(synquxActions.sessionEnded())
     })
 
@@ -1006,6 +1027,7 @@ export const createSynqux = <
     if (payload) {
       const envelope = parseSnapshotPayload(payload)
       ordering.restore(envelope.ordering)
+      expectedSyncedByRequest.clear()
       store.dispatch(
         synquxRestored({ synced: clearRestoredResult(envelope.synced) }),
       )
@@ -1145,6 +1167,7 @@ export const createSynqux = <
             // restore と dispatch は await を挟まない同期ブロックにし、待機 fork の
             // 適用と restore が中途半端な ordering/state の組を観測しないようにする。
             ordering.restore(envelope.ordering)
+            expectedSyncedByRequest.clear()
             store.dispatch(
               synquxRestored({
                 synced: clearRestoredResult(envelope.synced),

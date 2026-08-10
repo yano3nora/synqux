@@ -248,18 +248,18 @@ package-lock / `src/index.ts` の `SYNQUX_VERSION` を一括同期する (旧 `n
 
 ```sh
 # 1. prepare: version 3 点同期 + test → build → smoke (publish なし)
-mise run release:prepare -- 0.3.0   # semver 厳守 (ADR-0001 Decision 6)
+mise run release:prepare -- 0.1.0   # semver 厳守 (ADR-0001 Decision 6)
 
 # 2. 人間: diff を確認して bump を commit し、tag を打つ
 git add .
-git commit -m "release: release v0.3.0"
-git tag v0.3.0
+git commit -m "release: release v0.1.0"
+git tag v0.1.0
 
 # 3. publish 前に browser 経由で npm login
 npm login
 
 # 4. publish: 整合チェック → push → npm publish → GitHub Release 作成 (人間のみ)
-mise run release:publish -- 0.3.0 --i-understand-this-pushes-and-publishes
+mise run release:publish -- 0.1.0 --i-understand-this-pushes-and-publishes
 ```
 
 同一 version での `prepare` 再実行は bump が冪等なので安全。breaking (wire format schema version の

@@ -1,6 +1,15 @@
+import {
+  configureStore,
+  isAction,
+  type Action,
+  type Reducer,
+} from '@reduxjs/toolkit'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { createMemoryHub } from '../testing/memory-hub.js'
+import { createSynqux } from './create-synqux.js'
+import { synquxReducer, synquxRestored, type SynquxState } from './slice.js'
 import { createHubClient, settle } from './test-fixtures.js'
+import type { Result, SynquxActionMeta, SynquxSynced } from './types.js'
 
 /**
  * 決定性検出網 (ADR-0001 Decision 8 / D4) の検証
@@ -40,6 +49,12 @@ describe('devDeterminismCheck', () => {
     expect(consoleError).toHaveBeenCalledWith(
       expect.stringContaining('Determinism check failed'),
     )
+    expect(consoleError).toHaveBeenCalledWith(
+      expect.stringContaining('diverged at "count"'),
+    )
+    expect(consoleError).toHaveBeenCalledWith(
+      expect.stringMatching(/diverged at "count": expected .+, actual .+/),
+    )
 
     consoleError.mockRestore()
   })
@@ -59,6 +74,78 @@ describe('devDeterminismCheck', () => {
     await settle()
 
     expect(client.store.getState().game.count).toBe(1)
+    expect(consoleError).not.toHaveBeenCalled()
+
+    consoleError.mockRestore()
+  })
+
+  it('封筒 meta を result.action に保持する決定的な consumer reducer では報告されない', async () => {
+    type GameAction = Action<'game/increment'> & {
+      payload: number
+      meta?: SynquxActionMeta
+    }
+    type GameState = SynquxSynced<GameAction> & { count: number }
+    type RootState = { synqux: SynquxState; game: GameState }
+
+    const initialGame: GameState = { result: null, count: 0 }
+    const isGameAction = (action: Action): action is GameAction =>
+      action.type === 'game/increment'
+    const gameReducer: Reducer<GameState> = (state = initialGame, action) => {
+      if (!isAction(action) || !isGameAction(action)) {
+        return state
+      }
+
+      // consumer の matcher 相当: transport が付けた封筒 meta を含む action
+      // 自体を result に保存しても、試し実行と実適用は一致する必要がある。
+      const result: Result<GameAction> = {
+        action,
+        type: 'success',
+        targets: [],
+      }
+      return { result, count: state.count + action.payload }
+    }
+    const rootReducer: Reducer<RootState> = (state, action) => {
+      if (synquxRestored.match(action)) {
+        return {
+          synqux: synquxReducer(state?.synqux, action),
+          game: action.payload.synced as GameState,
+        }
+      }
+
+      return {
+        synqux: synquxReducer(state?.synqux, action),
+        game: gameReducer(state?.game, action),
+      }
+    }
+
+    const hub = createMemoryHub()
+    const sync = createSynqux<RootState, GameState, GameAction>({
+      transport: hub.createTransport(),
+      isSyncedAction: isGameAction,
+      rootReducer,
+      selectSynced: (root) => root.game,
+    })
+    const store = configureStore({
+      reducer: rootReducer,
+      middleware: (getDefaultMiddleware) =>
+        getDefaultMiddleware().prepend(...sync.middlewares),
+    })
+    const consoleError = vi
+      .spyOn(console, 'error')
+      .mockImplementation(() => undefined)
+
+    await sync.subscribe({ store, groupId: GROUP_ID })
+    await settle()
+
+    store.dispatch({ type: 'game/increment', payload: 1 })
+    await settle()
+
+    expect(store.getState().game.count).toBe(1)
+    expect(store.getState().game.result?.action.meta).toMatchObject({
+      hash: expect.any(String),
+      requestedBy: expect.any(String),
+      dispatched: expect.any(Number),
+    })
     expect(consoleError).not.toHaveBeenCalled()
 
     consoleError.mockRestore()
