@@ -59,6 +59,32 @@ describe('devDeterminismCheck', () => {
     consoleError.mockRestore()
   })
 
+  it('entity 消滅待ち poll より速く後続 request が適用されても false positive にならない', async () => {
+    const consoleError = vi
+      .spyOn(console, 'error')
+      .mockImplementation(() => undefined)
+
+    const hub = createMemoryHub()
+    const client = createHubClient(hub)
+
+    await client.sync.subscribe({ store: client.store, groupId: GROUP_ID })
+    await settle()
+
+    // 1 つ目の適用直後、entity 消滅待ち poll (WAKE_FALLBACK_MS = 1000ms) の
+    // 初回判定が走る前に 2 つ目を適用させる。照合をこの poll の後に行うと
+    // 「2 つ目適用後の state」を 1 つ目の期待値と比較してしまい誤検知する
+    // (実機で 1 秒未満の間隔の連続操作により毎回発生した回帰の再現)
+    client.store.dispatch({ type: 'game/increment', payload: 1 })
+    await settle(5) // 500ms: 配送・裁定・適用は進むが poll の初回判定はまだ
+    client.store.dispatch({ type: 'game/increment', payload: 2 })
+    await settle()
+
+    expect(client.store.getState().game.count).toBe(3)
+    expect(consoleError).not.toHaveBeenCalled()
+
+    consoleError.mockRestore()
+  })
+
   it('決定的な reducer では何も報告されない (対照)', async () => {
     const consoleError = vi
       .spyOn(console, 'error')

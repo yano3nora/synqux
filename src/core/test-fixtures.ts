@@ -7,6 +7,7 @@ import {
 import { vi } from 'vitest'
 import type { createMemoryHub } from '../testing/memory-hub.js'
 import { createSynqux, type CreateSynquxConfig } from './create-synqux.js'
+import { stateWithDefaultResult } from './results.js'
 import { synquxReducer, synquxRestored, type SynquxState } from './slice.js'
 import type { Result, SynquxSynced, SynquxTransport } from './types.js'
 
@@ -48,7 +49,6 @@ export const gameReducer: Reducer<GameState> = (
     case 'game/increment':
       return {
         ...state,
-        result: null,
         count: state.count + (action.payload ?? 1),
         log: state.log.concat(`increment:${action.payload ?? 1}`),
       }
@@ -57,7 +57,6 @@ export const gameReducer: Reducer<GameState> = (
     case 'game/toggle':
       return {
         ...state,
-        result: null,
         count: state.count === 0 ? 1 : 0,
         log: state.log.concat('toggle'),
       }
@@ -66,7 +65,6 @@ export const gameReducer: Reducer<GameState> = (
     case 'game/random':
       return {
         ...state,
-        result: null,
         count: Math.random(),
         log: state.log.concat('random'),
       }
@@ -79,6 +77,16 @@ export const gameReducer: Reducer<GameState> = (
         type: 'error',
         targets: action.meta?.requestedBy ? [action.meta.requestedBy] : [],
         log: 'forbidden',
+      }
+      return { ...state, result }
+    }
+
+    case 'game/message-forbidden': {
+      const result: Result<GameAction> = {
+        action,
+        type: 'error',
+        targets: action.meta?.requestedBy ? [action.meta.requestedBy] : [],
+        message: { text: 'forbidden' },
       }
       return { ...state, result }
     }
@@ -111,7 +119,12 @@ export const rootReducer: Reducer<RootState> = (state, action) => {
 
   return {
     synqux: synquxReducer(state?.synqux, action),
-    game: gameReducer(state?.game, action),
+    game: gameReducer(
+      isGameAction(action)
+        ? stateWithDefaultResult(state?.game ?? gameInitialState, action)
+        : state?.game,
+      action,
+    ),
   }
 }
 

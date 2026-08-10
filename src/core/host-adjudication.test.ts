@@ -25,6 +25,36 @@ describe('host 裁定 lifecycle', () => {
     vi.useRealTimers()
   })
 
+  it('message 付き error の残留後も、result を書かない次 request を受理して全端末へ適用する', async () => {
+    const hub = createMemoryHub()
+    const a = createHubClient(hub)
+    const b = createHubClient(hub)
+    await a.sync.subscribe({ store: a.store, groupId: GROUP_ID })
+    await b.sync.subscribe({ store: b.store, groupId: GROUP_ID })
+    await settle()
+
+    a.store.dispatch({ type: 'game/message-forbidden' })
+    await settle()
+
+    expect(resultType(hub.inspect.requests(GROUP_ID)[0]!)).toBe('error')
+    expect(a.store.getState().game.result).toMatchObject({
+      type: 'error',
+      message: { text: 'forbidden' },
+    })
+
+    a.store.dispatch({ type: 'game/increment', payload: 2 })
+    await settle()
+
+    expect(resultType(hub.inspect.requests(GROUP_ID)[1]!)).toBe('success')
+    for (const client of [a, b]) {
+      expect(client.store.getState().game.count).toBe(2)
+      expect(client.store.getState().game.result).toMatchObject({
+        type: 'success',
+        action: { type: 'game/increment' },
+      })
+    }
+  })
+
   it('snapshot 失敗が確定済み success response を error で上書きしない', async () => {
     const hub = createMemoryHub()
     const a = createHubClient(hub)

@@ -7,6 +7,7 @@ import {
   selectIsHost,
   selectPeers,
   selectSelfId,
+  stateWithDefaultResult,
   type PeerRole,
   type SynquxSynced,
 } from 'synqux'
@@ -66,12 +67,18 @@ const demoInitialState: DemoState = {
  */
 const demoReducer: Reducer<DemoState> = (state = demoInitialState, action) => {
   if (isCounterAction(action)) {
-    const counter = counterReducer(state.counter, action)
+    const counter = counterReducer(
+      stateWithDefaultResult(state.counter, action),
+      action,
+    )
     return { ...state, result: counter.result, counter }
   }
 
   if (isLedgerAction(action)) {
-    const ledger = ledgerReducer(state.ledger, action)
+    const ledger = ledgerReducer(
+      stateWithDefaultResult(state.ledger, action),
+      action,
+    )
     return { ...state, result: ledger.result, ledger }
   }
 
@@ -83,8 +90,8 @@ const isSyncedAction = (action: Action): action is DemoAction =>
 
 const sync = createSynqux({
   transport: firebaseTransport(db, { archivePrunedRequests: true }),
-  isSyncedAction,
   ...createSynquxRootReducer({
+    isSyncedAction,
     synced: { demo: demoReducer },
     locals: {},
   }),
@@ -173,7 +180,7 @@ const render = (): void => {
 
   // 判定結果は synced state を直読みする (SPEC-public-api の作法)。
   // message は UI 表示想定データ (ADR-0008)。log 専用の result はここに出さない
-  const result = state.demo.counter.result
+  const result = state.demo.result
   el('result').textContent = result?.message
     ? `${result.type}: ${result.message.text}`
     : ''

@@ -1,4 +1,5 @@
 import type { Action, Reducer, UnknownAction } from '@reduxjs/toolkit'
+import { stateWithDefaultResult } from './results.js'
 import { synquxReducer, synquxRestored, type SynquxState } from './slice.js'
 import type { SynquxSynced } from './types.js'
 
@@ -8,9 +9,10 @@ import type { SynquxSynced } from './types.js'
  *
  * 実行順:
  *   1. synqux 内部 slice
- *   2. synced (meta.root **なし**) — host の試し実行と各端末での適用が同一結果に
- *      なること (決定性) を構成上保証する。端末ローカル state 参照による同期分岐も
- *      構造的に不可能になる
+ *   2. synced (meta.root **なし**) — synced domain action は default success result を
+ *      stamp してから実行する (ADR-0013)。host の試し実行と各端末での適用が同一
+ *      結果になること (決定性) を構成上保証し、端末ローカル state 参照による同期
+ *      分岐も構造的に不可能にする
  *   3. locals (**宣言順**、meta.root 付き) — 「適用後の synced state」と
  *      「自分より前に実行された local state」を meta.root で読める
  *
@@ -26,9 +28,12 @@ export type SynquxRootState<
 
 export const createSynquxRootReducer = <
   TSyncedKey extends string,
+  TAction extends Action,
   TSynced extends SynquxSynced,
   TLocals extends Record<string, unknown>,
 >(config: {
+  /** default result を付与する synced domain action の判定述語 */
+  isSyncedAction: (action: Action) => action is TAction
   /** 同期対象 slice。v1 は 1 エントリのみサポートする (移植元同様) */
   synced: Record<TSyncedKey, Reducer<TSynced>>
   /** 端末ローカル slice 群。ここに書いた順で直列実行される */
@@ -36,6 +41,7 @@ export const createSynquxRootReducer = <
 }): {
   rootReducer: Reducer<SynquxRootState<TSyncedKey, TSynced, TLocals>>
   selectSynced: (root: SynquxRootState<TSyncedKey, TSynced, TLocals>) => TSynced
+  isSyncedAction: (action: Action) => action is TAction
 } => {
   const syncedEntries = Object.entries(config.synced) as [
     TSyncedKey,
@@ -63,7 +69,15 @@ export const createSynquxRootReducer = <
     // されるため、meta.root 経由で「復元後の synced」に反応できる
     const synced = synquxRestored.match(action)
       ? (action.payload.synced as TSynced)
-      : syncedReducer(state?.[syncedKey], action)
+      : syncedReducer(
+          state && config.isSyncedAction(action)
+            ? (stateWithDefaultResult(
+                state[syncedKey] as SynquxSynced<TAction>,
+                action,
+              ) as unknown as TSynced)
+            : state?.[syncedKey],
+          action,
+        )
 
     // locals へ直列進行に応じた root を引き渡す。accumulator を進めながら
     // 実行することで「自分より前の local の結果」も読める
@@ -92,6 +106,7 @@ export const createSynquxRootReducer = <
   return {
     rootReducer,
     selectSynced: (root) => root[syncedKey],
+    isSyncedAction: config.isSyncedAction,
   }
 }
 

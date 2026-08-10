@@ -47,7 +47,7 @@ npm install firebase
 
 ### 2. 同期対象 slice を書く
 
-普通の Redux reducer に「`result` を持つ (`SynquxSynced`)」「validation 失敗は state を変えず `stateWithError` で表現する」の 2 点を足すだけ。独自ラッパーは無い (全文: [demo/counter.ts](./demo/counter.ts))。
+普通の Redux reducer に「`result` を持つ (`SynquxSynced`)」「validation 失敗は state を変えず `stateWithError` で表現する」の 2 点を足すだけ。成功時の result は root reducer helper が action ごとに自動生成する (全文: [demo/counter.ts](./demo/counter.ts))。
 
 ```ts
 import { stateWithError, type SynquxSynced } from 'synqux'
@@ -70,7 +70,7 @@ export const counterReducer: Reducer<CounterState> = (
         })
       }
 
-      return { ...state, result: null, count: next }
+      return { ...state, count: next }
     }
     default:
       return state
@@ -96,9 +96,9 @@ import { scenesReducer } from './scenes/reducers'  // 端末ローカル (同期
 
 export const sync = createSynqux({
   transport: firebaseTransport(db),                // 匿名認証等の auth は transport 生成前に済ませる
-  isSyncedAction: (a): a is CounterAction => a.type.startsWith('counter/'),
-  // rootReducer と selectSynced が返るので、そのまま config へ spread する
+  // rootReducer / selectSynced / isSyncedAction が返るので、そのまま config へ spread する
   ...createSynquxRootReducer({
+    isSyncedAction: (a): a is CounterAction => a.type.startsWith('counter/'),
     synced: { counter: counterReducer },
     locals: { scenes: scenesReducer },             // 宣言順に直列実行、meta.root で前段を読める
   }),

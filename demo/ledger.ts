@@ -61,7 +61,6 @@ export const ledgerReducer: Reducer<LedgerState> = (
       const { by, n } = action.payload
       return {
         ...state,
-        result: null,
         count: state.count + 1,
         hash: fnv1a(`${state.hash}|${by}|${String(n)}`),
       }
@@ -70,7 +69,6 @@ export const ledgerReducer: Reducer<LedgerState> = (
     case 'ledger/setLocked':
       return {
         ...state,
-        result: null,
         locked: action.payload,
       }
 

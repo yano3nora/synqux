@@ -50,11 +50,11 @@ export const counterReducer: Reducer<CounterState> = (
         })
       }
 
-      return { ...state, result: null, count: next }
+      return { ...state, count: next }
     }
 
     case 'counter/set':
-      return { ...state, result: null, count: action.payload ?? 0 }
+      return { ...state, count: action.payload ?? 0 }
 
     default:
       return state

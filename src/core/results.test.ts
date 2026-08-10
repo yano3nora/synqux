@@ -1,5 +1,12 @@
+import { createReducer } from '@reduxjs/toolkit'
 import { describe, expect, it } from 'vitest'
-import { generateResult, stateWithError } from './results.js'
+import {
+  generateResult,
+  stateWithDefaultResult,
+  stateWithError,
+  stateWithResult,
+  stateWithTransaction,
+} from './results.js'
 import type { SynquxSynced } from './types.js'
 
 /**
@@ -99,5 +106,152 @@ describe('stateWithError', () => {
     })
     expect(state.result?.message).toEqual({ text: 'NG' })
     expect(state.result?.log).toBe('rejected: game/test')
+  })
+})
+
+describe('stateWithDefaultResult', () => {
+  it('state を変更せず action 自身の silent success result を持つ新オブジェクトを返す', () => {
+    const state: SynquxSynced<TestAction> & { count: number } = {
+      result: null,
+      count: 1,
+    }
+    const next = stateWithDefaultResult(state, action)
+
+    expect(next).not.toBe(state)
+    expect(state.result).toBeNull()
+    expect(next.result).toMatchObject({
+      type: 'success',
+      action: { type: action.type, meta: { hash: action.meta?.hash } },
+    })
+    expect(next.result?.message).toBeUndefined()
+    expect(next.result?.log).toBeUndefined()
+  })
+})
+
+describe('stateWithTransaction', () => {
+  type TransactionState = SynquxSynced<TestAction> & {
+    count: number
+    items: string[]
+  }
+
+  const transactionAction: TestAction = {
+    type: 'game/transaction',
+    meta: { hash: 'transaction-hash', requestedBy: 'peer-1' },
+  }
+
+  const stampedState = (): TransactionState =>
+    stateWithDefaultResult(
+      { result: null, count: 1, items: ['before'] },
+      transactionAction,
+    )
+
+  it('success では複数 mutation を採用し、事前の default success stamp を保持する', () => {
+    const base = stampedState()
+    const next = stateWithTransaction(base, (draft) => {
+      draft.count += 2
+      draft.items.push('after')
+    })
+
+    expect(next).toEqual({
+      ...base,
+      count: 3,
+      items: ['before', 'after'],
+    })
+    expect(next.result).toBe(base.result)
+  })
+
+  it('mutate 内の stateWithResult が success message を上書きして保持する', () => {
+    const base = stampedState()
+    const next = stateWithTransaction(base, (draft) => {
+      draft.count += 1
+      stateWithResult(draft, {
+        action: transactionAction,
+        type: 'success',
+        message: { text: 'committed' },
+      })
+    })
+
+    expect(next.count).toBe(2)
+    expect(next.result).toMatchObject({
+      type: 'success',
+      message: { text: 'committed' },
+    })
+  })
+
+  it('mutate 途中の error では全 domain mutation を巻き戻し、error result だけを載せる', () => {
+    const base = stampedState()
+    const next = stateWithTransaction(base, (draft) => {
+      draft.count = 99
+      draft.items.push('rolled-back')
+      stateWithError(draft, transactionAction, {
+        message: { text: 'rollback' },
+      })
+    })
+
+    expect(next.count).toBe(base.count)
+    expect(next.items).toEqual(base.items)
+    expect(next.result).toMatchObject({
+      type: 'error',
+      message: { text: 'rollback' },
+    })
+  })
+
+  it('RTK createReducer の immer producer 内で success / error の両経路が動く', () => {
+    const reducer = createReducer(stampedState(), (builder) => {
+      builder
+        .addCase('transaction/success', (state) =>
+          stateWithTransaction(state as TransactionState, (draft) => {
+            draft.count += 1
+            draft.items.push('committed')
+          }),
+        )
+        .addCase('transaction/error', (state) =>
+          stateWithTransaction(state as TransactionState, (draft) => {
+            draft.count = 999
+            draft.items.push('rolled-back')
+            stateWithError(draft, transactionAction)
+          }),
+        )
+    })
+
+    const success = reducer(undefined, { type: 'transaction/success' })
+    const error = reducer(undefined, { type: 'transaction/error' })
+
+    expect(success).toMatchObject({ count: 2, items: ['before', 'committed'] })
+    expect(error).toMatchObject({ count: 1, items: ['before'] })
+    expect(error.result?.type).toBe('error')
+  })
+
+  it('plain object でも success / error の両経路が動く', () => {
+    const successBase = stampedState()
+    const success = stateWithTransaction(successBase, (draft) => {
+      draft.count = 2
+    })
+    const errorBase = stampedState()
+    const error = stateWithTransaction(errorBase, (draft) => {
+      draft.count = 999
+      stateWithError(draft, transactionAction)
+    })
+
+    expect(success.count).toBe(2)
+    expect(successBase.count).toBe(1)
+    expect(error.count).toBe(1)
+    expect(error.result?.type).toBe('error')
+    expect(errorBase.result?.type).toBe('success')
+  })
+
+  it('producer 内で外側 draft を先に変更してから呼ぶ契約違反は throw する', () => {
+    const reducer = createReducer(stampedState(), (builder) => {
+      builder.addCase('transaction/invalid', (state) => {
+        state.count += 1
+        return stateWithTransaction(state as TransactionState, (draft) => {
+          draft.items.push('invalid')
+        })
+      })
+    })
+
+    expect(() => reducer(undefined, { type: 'transaction/invalid' })).toThrow(
+      /returned a new value/,
+    )
   })
 })

@@ -34,8 +34,10 @@ export {
 // ゲーム開発者層: reducer ヘルパーと読み取り selector
 export {
   generateResult,
+  stateWithDefaultResult,
   stateWithError,
   stateWithResult,
+  stateWithTransaction,
 } from './core/results.js'
 export {
   selectIsHost,

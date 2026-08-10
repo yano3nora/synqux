@@ -223,8 +223,15 @@ describe('host 裁定 fork (requestListener)', () => {
     expect(patch.seq).toBe(1) // 採番は appliedSeq + 1
     // 裁定時刻 (serverNow 基準) が封筒へ焼かれる (ADR-0008)
     expect(typeof patch.responsed).toBe('number')
-    // increment は result を積まない (= null) ので success 扱いで受理される
-    expect(patch.result).toBeNull()
+    // result を書かない action も action 自身の default success になる (ADR-0013)
+    const result = JSON.parse(patch.result as string) as Result
+    expect(result).toMatchObject({
+      type: 'success',
+      action: {
+        type: 'game/increment',
+        meta: { hash: request.action.meta?.hash },
+      },
+    })
 
     // 試し実行は store を書き換えない。適用は response 受信側の責務
     expect(store.getState().game.count).toBe(0)

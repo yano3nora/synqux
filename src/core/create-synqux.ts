@@ -879,6 +879,16 @@ export const createSynqux = <
           try {
             listener.dispatch(entity.action as TAction)
 
+            // 決定性検出網: 実適用後の synced を host の試し実行結果と照合する。
+            // dispatch は同期のため、await を挟まないここでの getState() だけが
+            // 「この request 適用直後」の state を正確に指す — 以前は下の entity
+            // 消滅待ち (interval poll) の後に読んでいたため、poll の初回判定までに
+            // 次の request が適用されると false positive になった (TASK-260810)
+            verifyDeterminism(
+              id,
+              config.selectSynced(listener.getState() as TRoot),
+            )
+
             // dispatch は同期で、成功した時点で適用は確定している。markApplied を
             // ここ (dispatch 直後・await なし) で行い、「entity は消えたが
             // appliedSeq が進んでいない」観測窓を作らない — この窓があると
@@ -893,12 +903,6 @@ export const createSynqux = <
               () =>
                 !(listener.getState() as TRoot).synqux.requests.entities[id],
               { intervalMillis: WAKE_FALLBACK_MS },
-            )
-
-            // 決定性検出網: 実適用後の synced を host の試し実行結果と照合する
-            verifyDeterminism(
-              id,
-              config.selectSynced(listener.getState() as TRoot),
             )
           } finally {
             // markApplied 済みなら不要。失敗時も解放し、再配送での retry 余地を残す

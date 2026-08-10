@@ -62,7 +62,12 @@ describe('snapshot fencing', () => {
     const d = createHubClient(hub)
     await d.sync.subscribe({ store: d.store, groupId: GROUP_ID })
     await settle(20)
-    expect(d.store.getState().game).toEqual(c.store.getState().game)
+    expect(d.store.getState().game).toMatchObject({
+      count: c.store.getState().game.count,
+      log: c.store.getState().game.log,
+    })
+    // restore は transient な result を null へ落とす既存契約を維持する
+    expect(d.store.getState().game.result).toBeNull()
   })
 
   it('fenced-out になった snapshot の後処理では prune しない', async () => {

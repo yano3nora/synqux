@@ -36,8 +36,9 @@ synqux は、consumer が認証・認可した**協調的な非敵対クライ�
 - **順序保証 (host 採番 seq)** — `src/core/ordering.ts`, `src/core/create-synqux.ts` (`responseListener`)
     - transport のイベント順序も request id (端末時計) も信頼せず、host が裁定時に連番 `(epoch, seq)` を封筒へ焼き込む。全端末は「appliedSeq + 1 の seq を適用する」規則で適用順を線形化する。同一 seq の衝突 (dual-host 窓) は (epoch 降順, responsedBy 辞書順降順) の決定的 tiebreak で全端末が同じ勝者に合意する
     - → 到着順がバラついても全端末の適用順は host 基準で一致する。封筒に焼かれた seq 自体が「実際に適用された順序」の ground truth (requests export を seq 順に並べれば適用列が復元できる)
-- **reducer の作り方 (validation = result)** — `src/core/results.ts` (`stateWithError` / `generateResult`)
+- **reducer の作り方 (validation = result)** — `src/core/results.ts` (`stateWithDefaultResult` / `stateWithError` / `generateResult`)
     - reducer は logic validation に失敗したら state を変えず `state.result` に error を積む。host は `rootReducer` を試し実行し、`selectSynced(next).result.type` (`error` / `success`) で request の受理・拒否を判定する
+    - synced domain action の直前には、その action 自身の default success result を毎回生成する (ADR-0013)。reducer が result を明示しない silent success も success stamp が残り、過去の error / success は今回の裁定に影響しない。`createSynquxRootReducer` は自動で行い、primitive 方式は `stateWithDefaultResult` を synced reducer の前段で呼ぶ
     - dev の決定性検出網は host の試し実行後の synced と実適用後の synced を比較し、不一致時は最初に分岐した path と expected / actual 値を出力する。`synquxRestored` による全量置換時と unsubscribe 時は、古い state を土台に控えた expected を破棄する
     - → 成否判定器は reducer ただ一つ。host / client / 同期なし (standalone) でロジックが分岐せず、reducer さえ堅牢なら同期しても壊れない
 - **snapshot と restore** — `src/core/snapshot.ts`, `src/core/create-synqux.ts` (`subscribe` / `persistSnapshot`)
@@ -126,6 +127,7 @@ NOTE: `markApplied` を dispatch **前**へ前倒しする案は不可 (dispatch
 2. **1 度しか発火しない自動 dispatch を作らない**: 取りこぼし前提の基盤のため、state 監視 + retry かユーザ操作起点にする
 3. **判定系 action は入力のスナップショットを result / log に残す**: 「現在 state を見て判定する」action は、判定時点の入力を記録しておくと replay 再現なしで調査が終わる
 4. **validation は reducer に集約し、`stateWithError` で表現する**: middleware や UI 側に成否判定を分散させない。reducer が唯一の判定器であることが同期の前提
+5. **result は synced action ごとに再生成する** (ADR-0013): `createSynquxRootReducer` なら自動。primitive 方式では synced reducer の前段で `stateWithDefaultResult` を必ず呼ぶ。これを省くと過去の error が次の request を誤って拒否する
 
 ## 改善ロードマップ
 
