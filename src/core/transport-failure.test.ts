@@ -1,4 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import type { MockInstance } from 'vitest'
 import { createMemoryHub } from '../testing/memory-hub.js'
 import {
   selectIsSyncUnrecoverable,
@@ -16,12 +17,18 @@ import { createHubClient, settle } from './test-fixtures.js'
 const GROUP_ID = 'group-a'
 
 describe('transport 購読の打ち切り (契約 8)', () => {
+  let consoleErrorSpy: MockInstance
+
   beforeEach(() => {
     vi.useFakeTimers()
     vi.setSystemTime(new Date('2026-07-20T00:00:00.000Z'))
+    consoleErrorSpy = vi
+      .spyOn(console, 'error')
+      .mockImplementation(() => undefined)
   })
 
   afterEach(() => {
+    vi.restoreAllMocks()
     vi.useRealTimers()
   })
 
@@ -38,6 +45,7 @@ describe('transport 購読の打ち切り (契約 8)', () => {
     hub.faults.cancelSubscriptions(selectSelfId(a.store.getState())!)
     await settle()
 
+    expect(consoleErrorSpy).toHaveBeenCalledTimes(1)
     expect(selectIsSyncUnrecoverable(a.store.getState())).toBe(true)
 
     // gap なし (maxSeen <= applied) でも health heartbeat が ok へ戻さないこと
@@ -63,6 +71,7 @@ describe('transport 購読の打ち切り (契約 8)', () => {
 
     hub.faults.cancelSubscriptions(selectSelfId(a.store.getState())!)
     await settle()
+    expect(consoleErrorSpy).toHaveBeenCalledTimes(1)
     expect(selectIsSyncUnrecoverable(a.store.getState())).toBe(true)
 
     await unsubscribe()
@@ -73,6 +82,7 @@ describe('transport 購読の打ち切り (契約 8)', () => {
     a.store.dispatch({ type: 'game/increment', payload: 1 })
     await settle()
     expect(a.store.getState().game.count).toBe(1)
+    expect(consoleErrorSpy).toHaveBeenCalledTimes(1)
   })
 })
 
