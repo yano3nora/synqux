@@ -46,7 +46,12 @@ connectDatabaseEmulator(db, '127.0.0.1', 9000)
 // ---- store 構築 (README の Getting Started と同じ形) ----
 const params = new URLSearchParams(window.location.search)
 const groupId = params.get('group') ?? 'demo-room'
-const role = (params.get('role') ?? undefined) as PeerRole | undefined
+const roleParam = params.get('role')
+// query は型境界の外なので、旧値や typo を PeerRole へ cast せず既定値へ戻す。
+const role: PeerRole | undefined =
+  roleParam === 'player' || roleParam === 'dedicated' || roleParam === 'guest'
+    ? roleParam
+    : undefined
 const stormTotal = Number(params.get('storm'))
 
 type DemoAction = CounterAction | LedgerAction
@@ -171,7 +176,10 @@ const render = (): void => {
   el('ledger-sent').textContent = String(stormSent)
   el('self').textContent = selectSelfId(state) ?? '(接続中...)'
   el('host').textContent = selectIsHost(state) ? 'HOST 👑' : 'client'
-  el('peers').innerHTML = selectPeers(state)
+  const peers = selectPeers(state)
+  const self = peers.find((peer) => peer.id === selectSelfId(state))
+  el('role').textContent = self?.role ?? 'player'
+  el('peers').innerHTML = peers
     .map(
       (peer) =>
         `<li>${peer.id}${peer.role ? ` <em>(${peer.role})</em>` : ''}</li>`,
@@ -205,6 +213,17 @@ el('lock-toggle').onclick = () =>
     type: 'ledger/setLocked',
     payload: !store.getState().demo.ledger.locked,
   })
+
+const setRole = async (nextRole: PeerRole): Promise<void> => {
+  try {
+    await sync.setRole(nextRole)
+  } catch (error) {
+    console.error(error)
+    el('status').textContent = 'role の変更に失敗しました'
+  }
+}
+el('role-guest').onclick = () => void setRole('guest')
+el('role-player').onclick = () => void setRole('player')
 
 // ---- 同期開始 (presence 登録 → snapshot restore → requests 購読) ----
 void sync

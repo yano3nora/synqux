@@ -94,22 +94,22 @@ describe('host migration 境界', () => {
 
   it('host 不在で滞留した request は、dedicated の参加 (昇格) を待って処理される', async () => {
     const hub = createMemoryHub()
-    const observer = createHubClient(hub)
+    const guest = createHubClient(hub)
 
-    // observer しかいない = 昇格可能な端末がいない
-    await observer.sync.subscribe({
-      store: observer.store,
+    // guest しかいない = 昇格可能な端末がいない
+    await guest.sync.subscribe({
+      store: guest.store,
       groupId: GROUP_ID,
-      role: 'observer',
+      role: 'guest',
     })
     await settle()
-    expect(selectIsHost(observer.store.getState())).toBe(false)
+    expect(selectIsHost(guest.store.getState())).toBe(false)
 
-    observer.store.dispatch({ type: 'game/increment', payload: 1 })
+    guest.store.dispatch({ type: 'game/increment', payload: 1 })
     await settle(20)
 
     // host 不在のため request は滞留する (取りこぼしはしない)
-    expect(observer.store.getState().game.count).toBe(0)
+    expect(guest.store.getState().game.count).toBe(0)
 
     // dedicated (常駐プロセス) が参加すると host になり、
     // 購読開始時の一括配送で滞留 request を受け取って処理する
@@ -122,7 +122,85 @@ describe('host migration 境界', () => {
     await settle(30)
 
     expect(selectIsHost(dedicated.store.getState())).toBe(true)
-    expect(observer.store.getState().game.count).toBe(1)
+    expect(guest.store.getState().game.count).toBe(1)
     expect(dedicated.store.getState().game.count).toBe(1)
+  })
+
+  it('guest が player へ切り替わると host に昇格し、滞留 request を裁定する', async () => {
+    const hub = createMemoryHub()
+    const guest = createHubClient(hub)
+
+    await guest.sync.subscribe({
+      store: guest.store,
+      groupId: GROUP_ID,
+      role: 'guest',
+    })
+    await settle()
+    expect(selectIsHost(guest.store.getState())).toBe(false)
+
+    guest.store.dispatch({ type: 'game/increment', payload: 1 })
+    await settle(20)
+    expect(guest.store.getState().game.count).toBe(0)
+
+    await guest.sync.setRole('player')
+    await settle(30)
+
+    expect(selectIsHost(guest.store.getState())).toBe(true)
+    expect(guest.store.getState().game.count).toBe(1)
+    expect(hub.inspect.requests(GROUP_ID)[0]?.responsedBy).toBe('peer-1')
+  })
+
+  it('host が guest へ切り替わると次点 player へ移譲し、滞留 request を裁定する', async () => {
+    const hub = createMemoryHub()
+    const b = createHubClient(hub)
+    const a = createHubClient(hub)
+
+    await b.sync.subscribe({ store: b.store, groupId: GROUP_ID })
+    await a.sync.subscribe({ store: a.store, groupId: GROUP_ID })
+    await settle()
+    expect(selectIsHost(a.store.getState())).toBe(true)
+
+    // a への request 配送を落とし、降格後に b が引き継ぐ経路だけで裁定させる。
+    hub.faults.drop({
+      requestId: '000000000001',
+      to: 'peer-2',
+      event: 'added',
+    })
+    const requested = a.store.dispatch({
+      type: 'game/increment',
+      payload: 1,
+    })
+    await a.sync.setRole('guest')
+    await requested
+    await settle(30)
+
+    expect(selectIsHost(a.store.getState())).toBe(false)
+    expect(selectIsHost(b.store.getState())).toBe(true)
+    expect(a.store.getState().game.count).toBe(1)
+    expect(b.store.getState().game.count).toBe(1)
+    expect(hub.inspect.requests(GROUP_ID)[0]?.responsedBy).toBe('peer-1')
+  })
+
+  it('role 切替では自 peer の id と connected を変更しない', async () => {
+    const hub = createMemoryHub()
+    const client = createHubClient(hub)
+
+    await client.sync.subscribe({
+      store: client.store,
+      groupId: GROUP_ID,
+      role: 'guest',
+    })
+    await settle()
+    const before = hub.inspect.peers(GROUP_ID)[0]!
+
+    await client.sync.setRole('player')
+    await settle()
+    const after = hub.inspect.peers(GROUP_ID)[0]!
+
+    expect(after).toMatchObject({
+      id: before.id,
+      connected: before.connected,
+      role: 'player',
+    })
   })
 })

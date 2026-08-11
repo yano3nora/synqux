@@ -365,6 +365,23 @@ export function createMemoryHub(): MemoryHub {
         closed = true
       },
 
+      async updateSelf(patch) {
+        const { group, peerId } = assertConnected()
+        const index = group.peers.findIndex((peer) => peer.id === peerId)
+        const current = group.peers[index]
+        if (current === undefined) {
+          throw new Error(`Unknown peer: ${peerId}`)
+        }
+
+        const updated: Peer = { ...current, role: patch.role }
+        group.peers[index] = updated
+        for (const subscriber of group.peerSubscribers) {
+          enqueue(subscriber, () =>
+            subscriber.handlers.onChanged(clone(updated)),
+          )
+        }
+      },
+
       async serverNow() {
         return Date.now()
       },

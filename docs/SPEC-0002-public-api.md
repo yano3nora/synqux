@@ -17,6 +17,8 @@
 // 共有語彙 (synqux main entry)
 // ============================================================
 
+export type PeerRole = 'player' | 'dedicated' | 'guest'
+
 /** 同期グループ内の接続端末。読み取り専用で公開する (Decision 7) */
 export type Peer = {
   id: string
@@ -29,9 +31,9 @@ export type Peer = {
    * - dedicated: ゲームに常駐するプロセス (lambda 等) を強制的に host にし、
    *   安定進行・無人進行を担う。存在時は最新接続の dedicated が host になる
    *   (移植元の agent 相当。dedicated server 文化からの命名)
-   * - observer: monitor / readonly 端末。host 選定から除外 (移植元の guest 相当)
+   * - guest: host 選定から除外される参加者。request 発行は制限しない
    */
-  role?: 'player' | 'dedicated' | 'observer'
+  role?: PeerRole
   /** 端末の識別ラベル (移植元で agent が持っていた process id 相当)。host 導出には使わない */
   label?: string
 }
@@ -151,6 +153,9 @@ export type Synqux<TRoot, TSynced, TAction> = {
     label?: Peer['label']
     signal?: AbortSignal  // 初期化 (接続確立・restore) の中断 (ADR-0012)。省略時は無期限待機。timeout 政策は consumer が AbortSignal.timeout() 等で選ぶ
   }) => Promise<() => Promise<void>>
+
+  /** 自端末の role を presence 上で in-place 更新する。未 subscribe は throw、standalone は no-op */
+  setRole(role: PeerRole): Promise<void>
 
   actions: {
     /** tutorial 等で runtime に同期を on/off する (移植元 _prepareTutorial 相当) */
@@ -421,6 +426,8 @@ export type SynquxTransport = SnapshotStore & {
   /** presence 登録。selfId は transport が採番する。signal の abort は presence を残さず reject (契約 8, ADR-0012) */
   connect(options: { groupId: string; role?: Peer['role']; label?: Peer['label']; signal?: AbortSignal }): Promise<{ selfId: string }>
   disconnect(): Promise<void>
+  /** id / connected を維持して presence を更新し、全 peer 購読へ onChanged を配送する (契約 9, ADR-0014) */
+  updateSelf(patch: { role?: PeerRole }): Promise<void>
 
   /** サーバ基準時刻 (firebase: .info/serverTimeOffset 補正)。meta.dispatched / requested 用 */
   serverNow(): Promise<number>
@@ -462,6 +469,7 @@ export type SynquxTransport = SnapshotStore & {
 | interface | firebase RTDB での実装 | 移植元の対応物 |
 | --- | --- | --- |
 | `connect` / presence | 匿名 auth + `.info/connected` 常駐監視 + `onDisconnect().remove()`。切断後の復帰では同じ id / 初回 `connected` で自動再登録 | `subscribe-connections.ts` / `register-connection.ts` |
+| `updateSelf` | 自 presence ref への `update()`。session に更新値を保持し、切断復帰時も同じ role で再登録 | `toggleGuestConnection` 相当 |
 | `serverNow` | `.info/serverTimeOffset` 補正 | `currentServerTimestamp()` |
 | `pushRequest` | `push()` (push id = 挿入順辞書順単調・端末時計依存) | `create-request.ts` |
 | `respondRequest` | `update()` (ack で resolve — local echo が先に発火する点が既知の問題①の再現条件) | `response-to-request.ts` |
@@ -545,5 +553,6 @@ type SnapshotEnvelope<TSynced> = {
 3. **createSynquxRootReducer の返り値を config へ spread する形**で、ADR が山場と呼んだ「rootReducer × selectSynced × isSyncedAction × consumer State 型」の接続点を 1 箇所に畳んだ。primitive 方式は `synquxReducer` + `synquxRestored` の match + `stateWithDefaultResult` + 手書き rootReducer + 手動 `selectSynced` で成立する (契約の正式化は 2026-07-20、result stamp の追加は ADR-0013。上記「primitive 方式の正式契約」と公開 surface 回帰テスト `src/index.test.ts` を参照)
 4. **synced slice は 1 つに限定 — 仕様として確定 (2026-07-18)**。当初は「v1 暫定・複数対応は必要になってから」だったが、host の成否判定 (result の読み取り位置) と snapshot の単位が単一 subtree に固定されることが同期機構の単純さの源泉であり、複数エントリ対応は判定・復元の分割という複雑さだけを持ち込むため採らない。複数ドメインは consumer が合成 reducer で 1 slice に畳み、直近に実行した対象 reducer の result を top-level へ写す (実例: demo/main.ts の demoReducer)
 5. **`agent` / `guest` → `role: 'player' | 'dedicated' | 'observer'` へ改名** (レビュー決定): 排他 enum にすることで「agent かつ guest」という不正状態を型で排除。dedicated は「常駐プロセスを強制 host にして安定進行・無人進行を担う」ユースケース由来 (dedicated server 文化)。process id は `label` へ分離
+   - その後 `observer` → `guest` へ再改名した (TASK-260811 / ADR-0014)。observer は readonly を暗示する一方、role の実際の作用は host 適格性だけであり、request 発行を制限しないため
 6. **`canRequest` hook を追加** (移植元の readonly 端末対応の一般化)。これがないとテンプレ置換 (Phase 2) が成立しないため
 7. **standalone の local 永続化を責務に含める** (レビュー決定): `localSnapshots: SnapshotStore` として snapshot 機構と統合。保存は「適用 synced action ごと」で host の snapshot 永続化と同じ policy 点を通る。runtime の `setEnabled(false)` では保存しない (移植元の tutorial 除外の一般化)

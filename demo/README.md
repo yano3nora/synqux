@@ -13,7 +13,7 @@ npm run demo
 # → http://localhost:5173 を複数タブで開く
 ```
 
-- `?group=xxx` で部屋を分ける / `?role=dedicated` `?role=observer` で役割を変える
+- `?group=xxx` で部屋を分ける / `?role=dedicated` `?role=guest` で役割を変える
 - src を alias で直接読むため、ビルド不要で API 変更が即反映される
 
 ## Testcases
@@ -23,7 +23,8 @@ npm run demo
 3. リロードで count が復元される (snapshot restore)
 4. +10 連打で 100 を超えると拒否され、押した本人にだけ message が出る (reducer validation)
 5. `?role=dedicated` のタブが常に host に固定される
-6. `?role=observer` のタブは host にならない
+6. `?role=guest` のタブは host にならない (request 発行は可能)
+7. role の guest / player ボタンで `setRole` しても self id は変わらず、host が移譲・昇格する
 
 ## Stress mode
 

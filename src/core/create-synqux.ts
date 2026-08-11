@@ -31,6 +31,7 @@ import {
 import {
   SYNQUX_SCHEMA_VERSION,
   type Peer,
+  type PeerRole,
   type RequestEnvelope,
   type Result,
   type SnapshotStore,
@@ -187,6 +188,12 @@ export type Synqux<TRoot extends { synqux: SynquxState }> = {
   subscribe: (
     options: SynquxSubscribeOptions<TRoot>,
   ) => Promise<() => Promise<void>>
+
+  /**
+   * 自端末の role を presence 上で切り替える。
+   * subscribe 中でなければ throw。standalone (enabled=false) 時は no-op
+   */
+  setRole: (role: PeerRole) => Promise<void>
 
   actions: {
     /** tutorial 等で runtime に同期を on/off する */
@@ -1340,6 +1347,19 @@ export const createSynqux = <
     }
   }
 
+  const setRole = async (role: PeerRole): Promise<void> => {
+    if (!session) {
+      throw new Error(
+        'synqux is not subscribed. Call subscribe() before setRole().',
+      )
+    }
+    if (!instanceEnabled) {
+      return
+    }
+
+    await transport.updateSelf({ role })
+  }
+
   return {
     // 実行順: meta 付与 → (fork 系) → request 化。listener 2 つは actionRequest より
     // 前段に置き、内部 action (requestAdded/Changed) の匹配を request 化と分離する
@@ -1352,6 +1372,7 @@ export const createSynqux = <
     reducer: synquxReducer,
     rootReducer: config.rootReducer,
     subscribe,
+    setRole,
     actions: {
       setEnabled: synquxActions.setEnabled,
     },

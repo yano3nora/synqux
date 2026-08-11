@@ -53,6 +53,32 @@ describe('createMemoryHub', () => {
     vi.useRealTimers()
   })
 
+  it('updateSelf は presence を in-place 更新して全端末へ onChanged を配送する', async () => {
+    const { hub, a, b, aId } = await connectTwo()
+    const changedA: Peer[] = []
+    const changedB: Peer[] = []
+    const before = hub.inspect.peers(GROUP_ID).find((peer) => peer.id === aId)!
+
+    a.subscribePeers({
+      onAdded: () => undefined,
+      onChanged: (peer) => changedA.push(peer),
+      onRemoved: () => undefined,
+    })
+    b.subscribePeers({
+      onAdded: () => undefined,
+      onChanged: (peer) => changedB.push(peer),
+      onRemoved: () => undefined,
+    })
+
+    await a.updateSelf({ role: 'guest' })
+    await flushDeliveries()
+
+    const expected = { ...before, role: 'guest' as const }
+    expect(changedA).toEqual([expected])
+    expect(changedB).toEqual([expected])
+    expect(hub.inspect.peers(GROUP_ID)).toContainEqual(expected)
+  })
+
   it('基本フロー: pushRequest と respondRequest を全端末へ非同期配送する', async () => {
     const { a, b, aId } = await connectTwo()
     const addedA: RequestEnvelope[] = []

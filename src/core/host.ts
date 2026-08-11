@@ -9,7 +9,7 @@ import type { Peer } from './types.js'
  * このロジックは consumer に委ねない (ADR-0001 Decision 7)
  *
  * 優先順位: 最新接続の dedicated → いなければ最新接続の player。
- * observer は昇格しない。player もいなければ host 不在 (undefined)
+ * guest は昇格しない。player もいなければ host 不在 (undefined)
  */
 export const deriveHostId = (peers: Peer[]): Peer['id'] | undefined => {
   const dedicated = peers.filter((peer) => peer.role === 'dedicated')

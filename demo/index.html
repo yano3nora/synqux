@@ -64,7 +64,7 @@
     <h1>synqux demo</h1>
     <p>
       複数タブで開いて同期を確認する。<code>?group=</code> で部屋を、
-      <code>?role=dedicated|observer</code> で役割を変えられる。
+      <code>?role=dedicated|guest</code> で役割を変えられる。
     </p>
 
     <section>
@@ -107,7 +107,11 @@
       <dt>self</dt>
       <dd id="self"></dd>
       <dt>role</dt>
-      <dd id="role"></dd>
+      <dd>
+        <span id="role"></span>
+        <button id="role-guest">guest</button>
+        <button id="role-player">player</button>
+      </dd>
       <dt>host?</dt>
       <dd id="host"></dd>
       <dt>peers</dt>

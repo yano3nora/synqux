@@ -21,6 +21,7 @@ import {
 const noopTransport: SynquxTransport = {
   connect: async () => ({ selfId: 'peer-self' }),
   disconnect: async () => undefined,
+  updateSelf: async () => undefined,
   serverNow: async () => Date.now(),
   subscribePeers: () => () => undefined,
   pushRequest: async () => ({ id: 'req-1' }),

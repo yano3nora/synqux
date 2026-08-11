@@ -16,9 +16,10 @@ export type Unsubscribe = () => void
  * - player: 通常端末。dedicated 不在時、最新接続の player が host になる
  * - dedicated: ゲームに常駐するプロセス (lambda 等) を強制的に host にし、
  *   安定進行・無人進行を担う (移植元の agent 相当)
- * - observer: monitor / readonly 端末。host 選定から除外する (移植元の guest 相当)
+ * - guest: host 選定から除外される参加者 (移植元の guest)。request 発行は
+ *   制限しない — readonly が必要なら consumer が UI 層で dispatch を抑止する
  */
-export type PeerRole = 'player' | 'dedicated' | 'observer'
+export type PeerRole = 'player' | 'dedicated' | 'guest'
 
 /** 同期グループ内の接続端末。consumer へは読み取り専用で公開する */
 export type Peer = {
@@ -248,6 +249,9 @@ export type SnapshotStore = {
  *    onError にしないこと。
  *    connect は options.signal の abort で速やかに reject し、登録済み presence を
  *    残さないこと (省略時は接続確立まで無期限に待ってよい)
+ * 9. 【updateSelf】自 peer の presence を in-place 更新すること。id / connected は
+ *    不変であること。更新は全端末の subscribePeers へ onChanged として配送し、
+ *    切断復帰時の presence 再登録 (契約 5 / ADR-0006) は更新後の値で行うこと
  */
 export type SynquxTransport = SnapshotStore & {
   /** presence 登録。selfId は transport が採番する */
@@ -261,6 +265,9 @@ export type SynquxTransport = SnapshotStore & {
 
   /** presence 解除。完了後は同じ transport instance で再 connect できること */
   disconnect(): Promise<void>
+
+  /** 自 peer の presence 属性を in-place 更新する (契約 9) */
+  updateSelf(patch: { role?: PeerRole }): Promise<void>
 
   /** サーバ基準時刻 (firebase: .info/serverTimeOffset 補正相当) */
   serverNow(): Promise<number>

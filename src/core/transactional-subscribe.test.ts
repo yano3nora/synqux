@@ -79,8 +79,11 @@ describe('subscribe initialization transaction', () => {
 
   it('subscribePeers 失敗では presence を解除し、再 subscribe できる', async () => {
     const hub = createMemoryHub()
-    const observer = createHubClient(hub)
-    await observer.sync.subscribe({ store: observer.store, groupId: GROUP_ID })
+    const baselineClient = createHubClient(hub)
+    await baselineClient.sync.subscribe({
+      store: baselineClient.store,
+      groupId: GROUP_ID,
+    })
 
     const client = createClient(
       failOnce(hub.createTransport(), 'subscribePeers'),
@@ -91,7 +94,7 @@ describe('subscribe initialization transaction', () => {
     await settle()
 
     expect(
-      Object.keys(observer.store.getState().synqux.connections.entities),
+      Object.keys(baselineClient.store.getState().synqux.connections.entities),
     ).toHaveLength(1)
     const probe = hub.createTransport()
     await probe.connect({ groupId: GROUP_ID })
@@ -103,8 +106,11 @@ describe('subscribe initialization transaction', () => {
 
   it('loadSnapshot reject では peers/session/presence を戻し、再 subscribe できる', async () => {
     const hub = createMemoryHub()
-    const observer = createHubClient(hub)
-    await observer.sync.subscribe({ store: observer.store, groupId: GROUP_ID })
+    const baselineClient = createHubClient(hub)
+    await baselineClient.sync.subscribe({
+      store: baselineClient.store,
+      groupId: GROUP_ID,
+    })
 
     const client = createClient(failOnce(hub.createTransport(), 'loadSnapshot'))
     await expect(
@@ -115,7 +121,7 @@ describe('subscribe initialization transaction', () => {
     expect(client.store.getState().synqux.connections.selfId).toBeNull()
     expect(client.store.getState().synqux.connections.entities).toEqual({})
     expect(
-      Object.keys(observer.store.getState().synqux.connections.entities),
+      Object.keys(baselineClient.store.getState().synqux.connections.entities),
     ).toHaveLength(1)
     const probe = hub.createTransport()
     await probe.connect({ groupId: GROUP_ID })
@@ -127,8 +133,11 @@ describe('subscribe initialization transaction', () => {
 
   it('壊れた snapshot は peers/session/presence を戻し、再 subscribe できる', async () => {
     const hub = createMemoryHub()
-    const observer = createHubClient(hub)
-    await observer.sync.subscribe({ store: observer.store, groupId: GROUP_ID })
+    const baselineClient = createHubClient(hub)
+    await baselineClient.sync.subscribe({
+      store: baselineClient.store,
+      groupId: GROUP_ID,
+    })
 
     const transport = hub.createTransport()
     const loadSnapshot = transport.loadSnapshot.bind(transport)
@@ -150,7 +159,7 @@ describe('subscribe initialization transaction', () => {
     expect(client.store.getState().synqux.connections.selfId).toBeNull()
     expect(client.store.getState().synqux.connections.entities).toEqual({})
     expect(
-      Object.keys(observer.store.getState().synqux.connections.entities),
+      Object.keys(baselineClient.store.getState().synqux.connections.entities),
     ).toHaveLength(1)
     const probe = hub.createTransport()
     await probe.connect({ groupId: GROUP_ID })
@@ -162,8 +171,11 @@ describe('subscribe initialization transaction', () => {
 
   it('subscribeRequests 失敗では購読を残さず、再 subscribe できる', async () => {
     const hub = createMemoryHub()
-    const observer = createHubClient(hub)
-    await observer.sync.subscribe({ store: observer.store, groupId: GROUP_ID })
+    const baselineClient = createHubClient(hub)
+    await baselineClient.sync.subscribe({
+      store: baselineClient.store,
+      groupId: GROUP_ID,
+    })
 
     const client = createClient(
       failOnce(hub.createTransport(), 'subscribeRequests'),
@@ -172,7 +184,7 @@ describe('subscribe initialization transaction', () => {
       client.sync.subscribe({ store: client.store, groupId: GROUP_ID }),
     ).rejects.toThrow('Injected subscribeRequests failure')
 
-    observer.store.dispatch({ type: 'game/increment', payload: 10 })
+    baselineClient.store.dispatch({ type: 'game/increment', payload: 10 })
     await settle()
     expect(client.store.getState().game.count).toBe(0)
     expect(client.store.getState().synqux.connections.selfId).toBeNull()

@@ -54,6 +54,7 @@ const createStubTransport = () => {
   const transport: SynquxTransport = {
     connect: async () => ({ selfId: SELF }),
     disconnect: async () => undefined,
+    updateSelf: async () => undefined,
     serverNow: async () => Date.now(),
     subscribePeers: () => () => undefined,
     pushRequest,

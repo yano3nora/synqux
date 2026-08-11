@@ -121,6 +121,9 @@ NOTE: `synced` に渡せる slice は**ちょうど 1 つ** (仕様。2 つ以�
 // 起動時に 1 回 (standalone でも呼ぶ。snapshot restore がここで走る)
 await sync.subscribe({ store, groupId: 'room-1' })
 
+// タイトル画面では host 候補から外し、参加時に in-place で切り替えられる
+await sync.setRole('player') // subscribe 時に role: 'guest' で開始した場合
+
 // あとは普通に dispatch するだけ。middleware が request 化 → host 裁定 →
 // 全端末が同じ順序で適用、まで面倒を見る (楽観更新なし = 画面が同期済み state)
 store.dispatch({ type: 'counter/add', payload: 1 })
@@ -225,7 +228,7 @@ const count = useAppSelector((s) => s.counter.count)
 
 | export | 説明 |
 | --- | --- |
-| `createSynqux(config)` | 同期 instance を生成する。`middlewares` / `rootReducer` / `reducer` / `subscribe` / `actions.setEnabled` / `selectSynced` を返す |
+| `createSynqux(config)` | 同期 instance を生成する。`middlewares` / `rootReducer` / `reducer` / `subscribe` / `setRole` / `actions.setEnabled` / `selectSynced` を返す |
 | `createSynquxRootReducer({ isSyncedAction, synced, locals })` | 「synced は純粋、locals は前段参照」の直列 rootReducer helper。synced action へ default success result を自動 stamp する (ADR-0013)。返り値 (`rootReducer` / `selectSynced` / `isSyncedAction`) をそのまま `createSynqux` config へ spread する |
 | `localStorageSnapshotStore()` | standalone (`enabled: false`) の synced 永続化に使う localStorage 実装。`localSnapshots` config へ渡す |
 | `synquxReducer` | 予約 key `state.synqux` に mount する内部 slice reducer (primitive 方式用) |
@@ -260,7 +263,7 @@ selector (instance 不要の静的関数。react なしでも使える):
 | `SynquxSynced<TAction, TMessage>` | 同期対象 slice の型契約 (`result` を持つ) |
 | `Result` / `ResultMessage` | reducer が書き host が読む成否判定と、その UI 表示データ |
 | `SynquxActionMeta` | synqux が action へ載せる meta (reducer が読んでよいのは `requestedBy` / `dispatched` のみ) |
-| `Peer` / `PeerRole` | 接続端末と役割 (`player` / `dedicated` / `observer`) |
+| `Peer` / `PeerRole` | 接続端末と役割 (`player` / `dedicated` / `guest`)。guest も request 発行は可能 |
 | `SynquxHealth` | `selectSyncHealth` の返り値 |
 | `Synqux` / `CreateSynquxConfig` / `SynquxSubscribeOptions` | `createSynqux` の返り値 / config / `subscribe` オプション |
 | `SynquxRootState` / `SynquxState` / `PendingRequest` | rootReducer の合成 state / 内部 slice の state と pending request |

@@ -290,6 +290,28 @@ export const firebaseTransport = (
       await onDisconnect(selfRef).cancel()
     },
 
+    async updateSelf(patch) {
+      const currentSession = requireSession()
+      const selfRef = ref(
+        db,
+        `${connectionsPath(currentSession.groupId)}/${currentSession.selfId}`,
+      )
+      const previousRole = currentSession.role
+      const nextRole = patch.role ?? null
+
+      // 再接続処理が並行しても更新後の role で再登録するため、await より先に
+      // session を更新する。書き込み失敗時は後続更新を壊さない場合だけ戻す。
+      currentSession.role = nextRole
+      try {
+        await update(selfRef, { role: nextRole })
+      } catch (error) {
+        if (currentSession.role === nextRole) {
+          currentSession.role = previousRole
+        }
+        throw error
+      }
+    },
+
     async serverNow() {
       if (serverTimeOffset !== null) {
         return Date.now() + serverTimeOffset

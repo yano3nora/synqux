@@ -13,7 +13,7 @@
 - A1 型シグネチャ / A2 transport interface (firebase セマンティクスで机上検証、対応表を SPEC に記載) / A3 封筒 wire format (schemaVersion 含む)
 - 実装契約の正: `src/core/types.ts` (adapter 実装者向けの 6 契約を doc comment に焼き込み)
 - **レビュー決定 (2026-07-05)**:
-    1. `agent`/`guest` → 排他 enum `role: 'player' | 'dedicated' | 'observer'` (+ `label`)。dedicated = 常駐プロセスを強制 host にする用途
+    1. `agent`/`guest` → 排他 enum `role: 'player' | 'dedicated' | 'guest'` (+ `label`)。dedicated = 常駐プロセスを強制 host にする用途
     2. `selectLatestResult` 廃止 — result は consumer の synced state 直読み (`s.game.result`)。react の `useLatestResult` のみ提供
     3. standalone の local 永続化をライブラリ責務に内包 — `SnapshotStore` 契約を transport と共有、`localSnapshots` config + `localStorageSnapshotStore` 同梱
     4. `@yano3nora/ts-utils` は内製化せず dependencies に含める (publish 前提: public + ライセンス整合)

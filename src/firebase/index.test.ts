@@ -214,6 +214,23 @@ describe('firebaseTransport', () => {
     expect(h.serverTimestampMock).toHaveBeenCalledTimes(1)
   })
 
+  it('updateSelf 後の切断復帰では更新後の role で presence を再登録する', async () => {
+    h.pushKeys.push('conn-1')
+    const { transport } = await connect()
+    const watcher = h.connectedSubscriptions.at(-1)!
+
+    await transport.updateSelf({ role: 'guest' })
+    watcher.callback({ val: () => false })
+    watcher.callback({ val: () => true })
+
+    await vi.waitFor(() => expect(h.setMock).toHaveBeenCalledTimes(2))
+    expect(h.updateMock).toHaveBeenCalledWith(
+      expect.objectContaining({ path: `connections/${GROUP_ID}/conn-1` }),
+      { role: 'guest' },
+    )
+    expect(h.setMock.mock.calls[1]?.[1]).toMatchObject({ role: 'guest' })
+  })
+
   it('connect: watcher の初回 true では presence を二重登録しない', async () => {
     h.pushKeys.push('conn-1')
 
@@ -350,6 +367,9 @@ describe('firebaseTransport', () => {
   it('connect 前のメソッド呼び出しは throw する', async () => {
     const transport = firebaseTransport(DB)
 
+    await expect(transport.updateSelf({ role: 'guest' })).rejects.toThrow(
+      'not connected',
+    )
     await expect(
       transport.pushRequest({} as Omit<RequestEnvelope, 'id'>),
     ).rejects.toThrow('not connected')

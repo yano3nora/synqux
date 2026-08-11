@@ -235,6 +235,25 @@ describe('createSynqux (end-to-end)', () => {
     expect(second.store.getState().game.count).toBe(11)
     expect(second.store.getState().game.result).toBeNull()
   })
+
+  it('setRole は未 subscribe なら拒否し、standalone session では no-op になる', async () => {
+    const hub = createMemoryHub()
+    const synced = createHubClient(hub)
+
+    await expect(synced.sync.setRole('guest')).rejects.toThrow(
+      'synqux is not subscribed. Call subscribe() before setRole().',
+    )
+
+    const standalone = createHubClient(hub, { enabled: false })
+    await standalone.sync.subscribe({
+      store: standalone.store,
+      groupId: 'solo-role',
+      role: 'guest',
+    })
+
+    await expect(standalone.sync.setRole('player')).resolves.toBeUndefined()
+    expect(hub.inspect.peers('solo-role')).toEqual([])
+  })
 })
 
 describe('createWaker', () => {

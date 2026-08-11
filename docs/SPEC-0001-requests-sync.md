@@ -27,7 +27,7 @@ synqux は、consumer が認証・認可した**協調的な非敵対クライ�
     - synced domain action を横取りして transport へ push し、ローカル適用を中断する。楽観更新をしない
     - → 画面に出る state は常に「同期済み state」であり、画面と判定 state の恒常的なズレが構造上起きない
 - **host 決定ロジック** — `src/core/host.ts` (`deriveHostId`)
-    - 全端末が共有する peer pool から「最新接続の dedicated、いなければ最新接続の player」を host とする純粋関数 (observer は昇格しない)
+    - 全端末が共有する peer pool から「最新接続の dedicated、いなければ最新接続の player」を host とする純粋関数 (guest は昇格しない)。role は presence の mutable 属性で、`setRole` の変更配送により host は自動的に再導出される (ADR-0014)
     - 再接続時の presence 復元は初回の connected を維持するため、復帰だけで host 序列は変わらない (ADR-0006)
     - → 選挙プロトコルなしで全端末が同じ host に合意でき、host 離脱時も pool の変化だけで自動的に次の host が定まる (host migration)
 - **各端末の request 処理 fork** — `src/core/create-synqux.ts` (`requestListener`)

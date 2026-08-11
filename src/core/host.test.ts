@@ -26,10 +26,10 @@ describe('deriveHostId (移植元 isHostPlayer の導出部)', () => {
     expect(id).toBe('p2')
   })
 
-  it('observer は昇格しない', () => {
+  it('guest は昇格しない', () => {
     const id = deriveHostId([
       peer({ id: 'p1', connected: 1 }),
-      peer({ id: 'o1', connected: 2, role: 'observer' }),
+      peer({ id: 'o1', connected: 2, role: 'guest' }),
     ])
     expect(id).toBe('p1')
   })
@@ -37,7 +37,7 @@ describe('deriveHostId (移植元 isHostPlayer の導出部)', () => {
   it('昇格可能な端末がいなければ host 不在 (undefined)', () => {
     expect(deriveHostId([])).toBeUndefined()
     expect(
-      deriveHostId([peer({ id: 'o1', connected: 1, role: 'observer' })]),
+      deriveHostId([peer({ id: 'o1', connected: 1, role: 'guest' })]),
     ).toBeUndefined()
   })
 
