@@ -120,12 +120,38 @@ export type CreateSynquxConfig<
   /** readonly 端末などで request 送信自体を抑止する hook (移植元 scenes.readonly 相当)。既定 () => true */
   canRequest?: (root: TRoot) => boolean
   /**
+   * host だけが評価する自動 dispatch rule 表 (ADR-0015)。非ユーザー起点 dispatch
+   * (状態 watcher / タイマー / retry) の統一 API。標準 middleware 経路で request 化
+   * されるため canRequest に従う。setEnabled(false) 中も評価を止めない (tutorial 中の
+   * 制御は consumer が when の述語で行う)
+   */
+  automations?: SynquxAutomation<TSynced, TAction>[]
+  /**
    * standalone (enabled=false で生成した instance) の synced state 永続化先
    * 封筒・直列化は transport の snapshot と完全に同一 (canonical JSON)。保存タイミングは
    * 「適用 synced action ごと」で、host の snapshot 永続化と同じ policy 点を通る (Decision 11)
    * runtime の setEnabled(false) (tutorial 等) では保存しない — 移植元の tutorial 除外の一般化
    */
   localSnapshots?: SnapshotStore
+}
+
+/**
+ * 自動 dispatch rule (ADR-0015)。host である端末だけが評価・発行する。
+ * engine は exactly-once を保証しない (dual-host 窓で二重発行があり得る) ため、
+ * action は ADR-0007 の idempotent / rejects-repeat 契約を満たすこと
+ */
+export type SynquxAutomation<TSynced, TAction extends Action> = {
+  /** rule の識別子。重複は createSynqux が throw。retryMs は正の有限数のみ許容 */
+  id: string
+  /**
+   * 「今この action が必要か」。synced とサーバ時刻 (standalone は端末時計) のみ
+   * 読める — locals 遮断は host のローカル state が群の判定へ混入する事故の型レベル排除。
+   * 契約: action が適用されたら false に戻ること (自己終了)。true の間 retryMs おきに再発行
+   */
+  when: (synced: TSynced, ctx: { now: number }) => boolean
+  action: (synced: TSynced) => TAction
+  /** 再発行間隔 ms。既定 1000 */
+  retryMs?: number
 }
 
 export type Synqux<TRoot, TSynced, TAction> = {
@@ -156,6 +182,17 @@ export type Synqux<TRoot, TSynced, TAction> = {
 
   /** 自端末の role を presence 上で in-place 更新する。未 subscribe は throw、standalone は no-op */
   setRole(role: PeerRole): Promise<void>
+
+  /**
+   * dispatch し、自端末でその action (hash) の裁定結果の処理が完了した時点で
+   * Result を resolve する (ADR-0015、BACKLOG P1 の格上げ)。success / error (拒否) とも
+   * resolve で返し、reject は signal abort / unsubscribe のみ。契約は「自端末適用まで」—
+   * 全端末への適用完了は分散システム上保証できない。timeout は提供せず consumer が
+   * AbortSignal.timeout() 等で選ぶ (ADR-0012 と同じ政策)。未 subscribe は throw、
+   * 非 synced action / canRequest false (request 化されず解決不能) は即 reject。
+   * standalone / setEnabled(false) 中は local 即時適用の result で即 resolve
+   */
+  dispatchAndWait(action: TAction, options?: { signal?: AbortSignal }): Promise<Result<TAction>>
 
   actions: {
     /** tutorial 等で runtime に同期を on/off する (移植元 _prepareTutorial 相当) */
@@ -527,7 +564,7 @@ type SnapshotEnvelope<TSynced> = {
 
 | subpath | 主な export | 対象 |
 | --- | --- | --- |
-| `synqux` | `createSynqux` / `createSynquxRootReducer` / `synquxReducer` / `synquxRestored` (primitive 方式の restore 契約。dispatch 禁止・match 専用) / `stateWithDefaultResult` / `stateWithError` / `stateWithResult` / `stateWithTransaction` / `generateResult` / `createSyncedActionMatchers` / `selectIsHost` / `selectPeers` / `selectSelfId` / `selectSyncHealth` / `selectIsSyncStalled` / `selectIsSyncUnrecoverable` / `localStorageSnapshotStore` / 型 (`SynquxSynced` / `SynquxHealth` / `Result` / `ResultMessage` / `Peer` / `SynquxActionMeta` / `SynquxTransport` / `SnapshotStore` / `RequestEnvelope` / `SynquxState` / `PendingRequest`) | セットアップ層 + reducer ヘルパー |
+| `synqux` | `createSynqux` / `createSynquxRootReducer` / `synquxReducer` / `synquxRestored` (primitive 方式の restore 契約。dispatch 禁止・match 専用) / `stateWithDefaultResult` / `stateWithError` / `stateWithResult` / `stateWithTransaction` / `generateResult` / `createSyncedActionMatchers` / `selectIsHost` / `selectPeers` / `selectSelfId` / `selectSyncHealth` / `selectIsSyncStalled` / `selectIsSyncUnrecoverable` / `localStorageSnapshotStore` / 型 (`SynquxSynced` / `SynquxHealth` / `Result` / `ResultMessage` / `Peer` / `SynquxActionMeta` / `SynquxAutomation` / `SynquxTransport` / `SnapshotStore` / `RequestEnvelope` / `SynquxState` / `PendingRequest`) | セットアップ層 + reducer ヘルパー |
 | `synqux/react` | `SynquxProvider` / `useIsHost` / `usePeers` / `useSelfId` / `useSyncHealth` / `useIsSyncStalled` / `useIsSyncUnrecoverable` / `useLatestResult` | ゲーム開発者層 |
 | `synqux/testing` | `createMemoryHub` / `verifyActionIdempotency` / `assertActionIdempotency` | consumer CI / 本 repo の simulation test |
 | `synqux/firebase` | `firebaseTransport(db, options?: { archivePrunedRequests?: boolean })` | Phase 2 で実装 |

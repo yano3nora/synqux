@@ -197,6 +197,42 @@ store.dispatch({ type: 'game/reset' })          // tutorial 用の初期化も�
 - 復帰: `setEnabled(true)` に戻しても off 中の local 乖離は残るため、**tutorial 終了はリロード相当 (新しい store で `subscribe` し直す) で snapshot の正史へ戻す**のが正しい手順
 - 詳細な契約は [SPEC-0001](./docs/SPEC-0001-requests-sync.md) の「setEnabled の契約」を参照
 
+### タイマーや状態条件で自動 dispatch する (`automations`)
+
+「開始 10 分後に強制終了」「この状態になったら即 action」のような非ユーザー起点の発火を useEffect + setTimeout で書くと、全端末が同時に request を投げる (fan-out) 上に、push 失敗で 1 度きりの発火を取りこぼす。`automations` に rule を書くと **host だけ**が評価し、条件が消えるまで retry する (ADR-0015)。
+
+```ts
+const sync = createSynqux({
+  transport,
+  automations: [{
+    id: 'force-finish',
+    // 契約: action が適用されたら when が false に戻ること (自己終了)
+    when: (s, { now }) => s.phase === 'playing' && now - s.startedAt > 10 * 60_000,
+    action: () => ({ type: 'game/finishGame' }),
+  }],
+  // ...
+})
+```
+
+- `when` が読めるのは synced state とサーバ時刻だけ。端末ローカルな演出状態や locals をゲートにはできない (型で遮断)
+- engine は exactly-once を保証しない (dual-host 窓で二重発行があり得る)。action は reducer 側で 2 回目を拒否できる形にし (`assertActionIdempotency` の `'rejects-repeat'`)、retry の拒否は `stateWithError` の message なし (log 専用) にすると UI ノイズが出ない
+- host migration があっても新 host が state から同じ結論を導くため、引き継ぎ処理は不要。tutorial (`setEnabled(false)`) 中も評価は続くので、止めたい rule は `when` の述語 (synced 上の tutorial フラグ等) で制御する
+
+### 適用完了を待つ (`dispatchAndWait`)
+
+同期時の `store.dispatch` は request の transport 書き込みまでしか表さない。thunk で「reset が適用されてから次へ進む」のような待ち合わせは `dispatchAndWait` を使う。
+
+```ts
+const result = await sync.dispatchAndWait(
+  { type: 'game/resetGameState' },
+  { signal: AbortSignal.timeout(5000) },
+)
+if (result.type === 'error') { /* 拒否された */ }
+```
+
+- 契約は「**自端末**での裁定結果の処理完了まで」。全端末への適用完了は分散システム上保証できない
+- success / error (拒否) いずれも Result で resolve する。reject は signal abort / unsubscribe のみ。timeout は `AbortSignal.timeout()` 等で consumer が選ぶ
+
 ### useSelector / useDispatch の型補完
 
 synqux 固有の仕組みは不要で、Redux 公式の [`.withTypes<>()` パターン](https://redux.js.org/usage/usage-with-typescript#define-typed-hooks)がそのまま使える。RootState は `sync.rootReducer` から導出すると synqux 内部 slice (`state.synqux`) も含めて型が合う。
@@ -228,7 +264,7 @@ const count = useAppSelector((s) => s.counter.count)
 
 | export | 説明 |
 | --- | --- |
-| `createSynqux(config)` | 同期 instance を生成する。`middlewares` / `rootReducer` / `reducer` / `subscribe` / `setRole` / `actions.setEnabled` / `selectSynced` を返す |
+| `createSynqux(config)` | 同期 instance を生成する。`middlewares` / `rootReducer` / `reducer` / `subscribe` / `setRole` / `dispatchAndWait` / `actions.setEnabled` / `selectSynced` を返す |
 | `createSynquxRootReducer({ isSyncedAction, synced, locals })` | 「synced は純粋、locals は前段参照」の直列 rootReducer helper。synced action へ default success result を自動 stamp する (ADR-0013)。返り値 (`rootReducer` / `selectSynced` / `isSyncedAction`) をそのまま `createSynqux` config へ spread する |
 | `localStorageSnapshotStore()` | standalone (`enabled: false`) の synced 永続化に使う localStorage 実装。`localSnapshots` config へ渡す |
 | `synquxReducer` | 予約 key `state.synqux` に mount する内部 slice reducer (primitive 方式用) |
@@ -266,6 +302,7 @@ selector (instance 不要の静的関数。react なしでも使える):
 | `Peer` / `PeerRole` | 接続端末と役割 (`player` / `dedicated` / `guest`)。guest も request 発行は可能 |
 | `SynquxHealth` | `selectSyncHealth` の返り値 |
 | `Synqux` / `CreateSynquxConfig` / `SynquxSubscribeOptions` | `createSynqux` の返り値 / config / `subscribe` オプション |
+| `SynquxAutomation` | `automations` config の rule 型 (host 駆動の自動 dispatch、ADR-0015) |
 | `SynquxRootState` / `SynquxState` / `PendingRequest` | rootReducer の合成 state / 内部 slice の state と pending request |
 | `SynquxTransport` / `RequestEnvelope` | transport 抽象と request 封筒 (adapter 実装者向け契約) |
 | `SnapshotStore` / `SnapshotFence` / `SnapshotEnvelope` | snapshot 永続化の契約 (fence つき条件付き書き込み) |

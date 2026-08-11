@@ -1,7 +1,8 @@
 import { readFileSync } from 'node:fs'
-import { describe, expect, it } from 'vitest'
+import type { Action } from '@reduxjs/toolkit'
+import { describe, expect, expectTypeOf, it } from 'vitest'
 import * as synqux from './index.js'
-import { SYNQUX_VERSION } from './index.js'
+import { SYNQUX_VERSION, type SynquxAutomation } from './index.js'
 
 describe('package smoke test', () => {
   it('SYNQUX_VERSION は package.json の version と一致する (publish 時の更新漏れ検出)', () => {
@@ -38,5 +39,14 @@ describe('package smoke test', () => {
         'synquxRestored',
       ].sort(),
     )
+  })
+
+  it('SynquxAutomation 型を main entry から公開する', () => {
+    expectTypeOf<SynquxAutomation<{ count: number }, Action>>().toMatchTypeOf<{
+      id: string
+      when: (synced: { count: number }, ctx: { now: number }) => boolean
+      action: (synced: { count: number }) => Action
+      retryMs?: number
+    }>()
   })
 })

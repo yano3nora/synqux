@@ -14,6 +14,7 @@ import {
   type OrderingState,
 } from './ordering.js'
 import { findFirstDivergence } from './diff.js'
+import { deriveHostId } from './host.js'
 import { selectIsHost } from './selectors.js'
 import {
   buildSnapshotPayload,
@@ -51,6 +52,9 @@ const WAKE_FALLBACK_MS = 1000
 
 /** gap の継続時間を評価する heartbeat 間隔。correctness には使わない */
 const HEALTH_CHECK_INTERVAL_MS = 1000
+
+/** automation 評価で取得済みの serverNow を request 化へ引き渡す端末内 marker */
+const AUTOMATION_REQUESTED_AT = Symbol('synqux.automationRequestedAt')
 
 const OK_HEALTH: SynquxHealth = {
   phase: 'ok',
@@ -135,12 +139,29 @@ export type CreateSynquxConfig<
   /** standalone 時の synced state 永続化先。省略時は永続化しない */
   localSnapshots?: SnapshotStore
 
+  /** host が synced state とサーバ時刻から評価する自動 dispatch rule */
+  automations?: SynquxAutomation<TSynced, TAction>[]
+
   /**
    * 決定性検出網 (ADR-0001 Decision 8): host の試し実行結果と実適用後の synced を
    * 比較し、純粋性契約でも防げない非決定 reducer (Date.now / Math.random 等) を
    * dev モードで検出する。既定は NODE_ENV !== 'production'
    */
   devDeterminismCheck?: boolean
+}
+
+export type SynquxAutomation<TSynced, TAction extends Action> = {
+  /** rule の識別子。1 instance 内で一意であること */
+  id: string
+
+  /** action が必要かを synced state とサーバ基準時刻だけから判定する */
+  when: (synced: TSynced, ctx: { now: number }) => boolean
+
+  /** 通常の middleware 経路へ dispatch する synced action を構築する */
+  action: (synced: TSynced) => TAction
+
+  /** when が true のままの場合の再発行間隔。既定 1000ms */
+  retryMs?: number
 }
 
 export type SynquxSubscribeOptions<TRoot> = {
@@ -162,7 +183,10 @@ export type SynquxSubscribeOptions<TRoot> = {
   signal?: AbortSignal
 }
 
-export type Synqux<TRoot extends { synqux: SynquxState }> = {
+export type Synqux<
+  TRoot extends { synqux: SynquxState },
+  TAction extends Action = Action,
+> = {
   /**
    * store 構築時に prepend する middleware 群
    * `getDefaultMiddleware().prepend(...sync.middlewares)` の形で、
@@ -195,6 +219,15 @@ export type Synqux<TRoot extends { synqux: SynquxState }> = {
    */
   setRole: (role: PeerRole) => Promise<void>
 
+  /**
+   * synced action を dispatch し、その裁定結果を自端末で処理し終えるまで待つ。
+   * success / error はいずれも resolve し、全端末での適用完了は保証しない。
+   */
+  dispatchAndWait: (
+    action: TAction,
+    options?: { signal?: AbortSignal },
+  ) => Promise<Result<TAction>>
+
   actions: {
     /** tutorial 等で runtime に同期を on/off する */
     setEnabled: typeof synquxActions.setEnabled
@@ -214,11 +247,29 @@ export const createSynqux = <
   TAction extends Action,
 >(
   config: CreateSynquxConfig<TRoot, TSynced, TAction>,
-): Synqux<TRoot> => {
+): Synqux<TRoot, TAction> => {
   const { transport } = config
   const instanceEnabled = config.enabled ?? true
   const canRequest = config.canRequest ?? (() => true)
   const stallAfterMs = config.stallAfterMs ?? 30_000
+  const automations = config.automations ?? []
+  const automationIds = new Set<string>()
+
+  for (const automation of automations) {
+    if (automationIds.has(automation.id)) {
+      throw new Error(`Duplicate SynquxAutomation id: ${automation.id}`)
+    }
+    automationIds.add(automation.id)
+
+    if (
+      automation.retryMs !== undefined &&
+      (!Number.isFinite(automation.retryMs) || automation.retryMs <= 0)
+    ) {
+      throw new Error(
+        `SynquxAutomation retryMs must be a positive finite number: ${automation.id}`,
+      )
+    }
+  }
 
   // 処理済みリスト等の同期状態はすべてインスタンス内部に持つ (Decision 3)
   const ordering = createOrdering()
@@ -278,10 +329,65 @@ export const createSynqux = <
     }
   }
 
-  // subscribe 後に確定する購読セッション。二重購読ガードを兼ねる
-  let session: { groupId: string } | null = null
+  type PendingDispatch = {
+    resolve: (result: Result<TAction>) => void
+    reject: (reason: unknown) => void
+    removeAbortListener: () => void
+  }
+  type SubscriptionSession = {
+    groupId: string
+    store: SynquxSubscribeOptions<TRoot>['store']
+    pendingDispatches: Map<string, PendingDispatch>
+  }
+
+  // subscribe 後に確定する購読セッション。待機 resolver も session と共に破棄する。
+  let session: SubscriptionSession | null = null
   // session 確定前の await 中も、同一 instance の並行初期化を同期的に拒否する
   let subscribing = false
+
+  const resultHash = (result: Result): string | undefined =>
+    ((result.action as UnknownAction).meta as SynquxActionMeta | undefined)
+      ?.hash
+
+  const resolvePendingDispatch = (result: Result | null | undefined): void => {
+    if (!session || !result) {
+      return
+    }
+
+    const hash = resultHash(result)
+    if (!hash) {
+      return
+    }
+
+    const pending = session.pendingDispatches.get(hash)
+    if (!pending) {
+      return
+    }
+
+    session.pendingDispatches.delete(hash)
+    pending.removeAbortListener()
+    pending.resolve(result as Result<TAction>)
+  }
+
+  const endSubscriptionSession = (
+    subscriptionSession: SubscriptionSession,
+  ): void => {
+    if (session !== subscriptionSession) {
+      return
+    }
+
+    session = null
+    const error = new Error('synqux was unsubscribed before dispatch completed')
+    for (const pending of subscriptionSession.pendingDispatches.values()) {
+      pending.removeAbortListener()
+      pending.reject(error)
+    }
+    subscriptionSession.pendingDispatches.clear()
+  }
+
+  // action 適用 middleware から、現在の subscribe session に属する engine だけを
+  // 起こす。未 subscribe / unsubscribe 後は no-op に戻して session leak を防ぐ。
+  let evaluateAutomationsAfterApply: () => void = () => undefined
 
   type SubscribeCleanup = () => void | Promise<void>
 
@@ -501,7 +607,14 @@ export const createSynqux = <
           return
         }
 
-        const requested = await transport.serverNow()
+        // automation は evaluation path で取得した同一 serverNow を when と request
+        // 時刻に使う。通常 dispatch は従来どおりここでサーバ時刻を取得する。
+        const requested =
+          (
+            action as UnknownAction & {
+              [AUTOMATION_REQUESTED_AT]?: number
+            }
+          )[AUTOMATION_REQUESTED_AT] ?? (await transport.serverNow())
 
         await transport.pushRequest({
           v: SYNQUX_SCHEMA_VERSION,
@@ -531,6 +644,7 @@ export const createSynqux = <
       if (isSynced) {
         // 適用 (同期 dispatch・standalone 双方) が生んだ result.log を出力する
         emitAppliedResultLog(store.getState() as TRoot, action as UnknownAction)
+        evaluateAutomationsAfterApply()
       }
 
       // standalone (instance 設定で無効) のときだけ localSnapshots へ永続化する。
@@ -876,6 +990,7 @@ export const createSynqux = <
             emitLog(current, entity.result)
             ordering.markApplied(seq, id)
             waker.notify() // 適用完了: 次の seq を待つ fork を起こす
+            resolvePendingDispatch(entity.result)
             break
           }
 
@@ -903,6 +1018,9 @@ export const createSynqux = <
             // NOTE dispatch **前**への前倒しは不可 (失敗時に seq が永久欠番になる)
             ordering.markApplied(seq, id)
             waker.notify() // 適用完了: 次の seq を待つ fork を起こす
+            resolvePendingDispatch(
+              config.selectSynced(listener.getState() as TRoot).result,
+            )
 
             // 内部 entities からの破棄 (同 hash の action 通過) を確認してから
             // fork を終える。通常は dispatch 内で同期完了しており即座に通る
@@ -936,15 +1054,139 @@ export const createSynqux = <
       )
     }
 
-    // ---- standalone: transport に触れず local restore だけ行う ----
-    if (!instanceEnabled) {
-      const subscriptionSession = { groupId }
-      session = subscriptionSession
+    /**
+     * rule の retry 状態と interval は subscribe session に閉じ込める。
+     * 発行時刻は dispatch 前に記録し、同期的な再評価でも同じ rule を二重発行しない。
+     */
+    const startAutomationEngine = (
+      subscriptionSession: SubscriptionSession,
+    ): void => {
+      if (automations.length === 0) {
+        return
+      }
+
+      const lastIssuedAt = new Map<string, number>()
+      let active = true
+      const isAutomationHost = (root: TRoot): boolean => {
+        if (!instanceEnabled) {
+          return true
+        }
+
+        const { selfId, entities } = root.synqux.connections
+        return !!selfId && deriveHostId(Object.values(entities)) === selfId
+      }
+
+      const evaluate = async (): Promise<void> => {
+        if (!active || session !== subscriptionSession) {
+          return
+        }
+
+        const beforeTime = store.getState()
+        if (!isAutomationHost(beforeTime) || !canRequest(beforeTime)) {
+          return
+        }
+
+        // 1 evaluation path につき時刻取得は 1 回。standalone は transport に
+        // 接続しないため端末時刻を使い、全 rule で同じ now を共有する。
+        let now: number
+        try {
+          now = instanceEnabled ? await transport.serverNow() : Date.now()
+        } catch {
+          // 時刻を得られなければ安全に発行できない。次の path で再試行する。
+          return
+        }
+
+        if (!active || session !== subscriptionSession) {
+          return
+        }
+
+        const root = store.getState()
+        if (!isAutomationHost(root) || !canRequest(root)) {
+          return
+        }
+
+        const synced = config.selectSynced(root)
+
+        for (const automation of automations) {
+          const retryMs = automation.retryMs ?? 1000
+          const lastIssued = lastIssuedAt.get(automation.id)
+
+          if (lastIssued !== undefined && now - lastIssued < retryMs) {
+            continue
+          }
+
+          let shouldIssue: boolean
+          try {
+            shouldIssue = automation.when(synced, { now })
+          } catch (error) {
+            console.error(error)
+            continue
+          }
+
+          if (!shouldIssue) {
+            continue
+          }
+
+          let action: TAction
+          try {
+            action = automation.action(synced)
+          } catch (error) {
+            console.error(error)
+            continue
+          }
+
+          if (!config.isSyncedAction(action)) {
+            console.error(
+              `[synqux] Automation "${automation.id}" returned a non-synced action; skipped.`,
+            )
+            continue
+          }
+
+          lastIssuedAt.set(automation.id, now)
+          try {
+            // pushRequest の reject を含む非同期失敗は次回 retry に委ねる。
+            void Promise.resolve(
+              store.dispatch({
+                ...action,
+                [AUTOMATION_REQUESTED_AT]: now,
+              }),
+            ).catch(() => undefined)
+          } catch {
+            // middleware が同期 throw した場合も engine 自体は止めない。
+          }
+        }
+      }
+
+      const evaluateAfterApply = (): void => {
+        void evaluate()
+      }
+      evaluateAutomationsAfterApply = evaluateAfterApply
+
+      const tickMs = Math.min(
+        ...automations.map((automation) => automation.retryMs ?? 1000),
+      )
+      const timer = setInterval(() => void evaluate(), tickMs)
+
       cleanups.push(() => {
-        if (session === subscriptionSession) {
-          session = null
+        // serverNow await 中の evaluation も、再開時の active 検査で発行を止める。
+        active = false
+        clearInterval(timer)
+        lastIssuedAt.clear()
+        if (evaluateAutomationsAfterApply === evaluateAfterApply) {
+          evaluateAutomationsAfterApply = () => undefined
         }
       })
+    }
+
+    // ---- standalone: transport に触れず local restore だけ行う ----
+    if (!instanceEnabled) {
+      const subscriptionSession: SubscriptionSession = {
+        groupId,
+        store,
+        pendingDispatches: new Map(),
+      }
+      session = subscriptionSession
+      cleanups.push(() => endSubscriptionSession(subscriptionSession))
       store.dispatch(
         synquxActions.sessionStarted({ selfId: null, enabled: false }),
       )
@@ -964,6 +1206,8 @@ export const createSynqux = <
           synquxRestored({ synced: clearRestoredResult(envelope.synced) }),
         )
       }
+
+      startAutomationEngine(subscriptionSession)
 
       return async () => {
         await runSubscribeCleanups(cleanups, true)
@@ -1135,13 +1379,13 @@ export const createSynqux = <
       gapSince: gapStartedAt,
     })
 
-    const subscriptionSession = { groupId }
+    const subscriptionSession: SubscriptionSession = {
+      groupId,
+      store,
+      pendingDispatches: new Map(),
+    }
     session = subscriptionSession
-    cleanups.push(() => {
-      if (session === subscriptionSession) {
-        session = null
-      }
-    })
+    cleanups.push(() => endSubscriptionSession(subscriptionSession))
 
     const restoreFromLatestSnapshot = async (): Promise<void> => {
       recoveryInFlight = true
@@ -1317,6 +1561,8 @@ export const createSynqux = <
       torndown = true
     })
 
+    startAutomationEngine(subscriptionSession)
+
     return async () => {
       await runSubscribeCleanups(cleanups, true)
     }
@@ -1347,6 +1593,91 @@ export const createSynqux = <
     }
   }
 
+  const dispatchAndWait = (
+    action: TAction,
+    options?: { signal?: AbortSignal },
+  ): Promise<Result<TAction>> => {
+    const subscriptionSession = session
+    if (!subscriptionSession) {
+      throw new Error(
+        'synqux is not subscribed. Call subscribe() before dispatchAndWait().',
+      )
+    }
+    if (!config.isSyncedAction(action)) {
+      return Promise.reject(
+        new Error('dispatchAndWait requires a synced action'),
+      )
+    }
+
+    const root = subscriptionSession.store.getState()
+    const shouldRequest =
+      instanceEnabled && root.synqux.enabled && !!root.synqux.connections.selfId
+    if (shouldRequest && !canRequest(root)) {
+      return Promise.reject(
+        new Error('dispatchAndWait cannot dispatch while canRequest is false'),
+      )
+    }
+
+    const signal = options?.signal
+    if (signal?.aborted) {
+      return Promise.reject(signal.reason)
+    }
+
+    const hash = generateHash()
+    const source = action as UnknownAction
+    const meta = source.meta as SynquxActionMeta | undefined
+    const dispatchedAction = {
+      ...source,
+      meta: {
+        ...meta,
+        hash,
+        // meta setter は既存 hash を尊重して素通しするため、standalone でも通常の
+        // dispatch と同じ形になるよう dispatched もここで補う。
+        dispatched: meta?.dispatched ?? Date.now(),
+      },
+    } as unknown as TAction
+
+    return new Promise<Result<TAction>>((resolve, reject) => {
+      const onAbort = (): void => {
+        const pending = subscriptionSession.pendingDispatches.get(hash)
+        if (!pending) {
+          return
+        }
+        subscriptionSession.pendingDispatches.delete(hash)
+        pending.removeAbortListener()
+        reject(signal?.reason)
+      }
+      const removeAbortListener = (): void =>
+        signal?.removeEventListener('abort', onAbort)
+
+      subscriptionSession.pendingDispatches.set(hash, {
+        resolve,
+        reject,
+        removeAbortListener,
+      })
+      signal?.addEventListener('abort', onAbort, { once: true })
+
+      try {
+        // request 経路の push failure は次の transport 回復を待つ契約であり、
+        // dispatchAndWait 自体の reject 理由にはしない。consumer は AbortSignal で
+        // 待機期限を選べる。
+        void Promise.resolve(
+          subscriptionSession.store.dispatch(dispatchedAction),
+        ).catch(() => undefined)
+      } catch {
+        // middleware の同期 throw も同様に resolver を維持し、abort/unsubscribe
+        // だけを reject 理由とする。
+      }
+
+      // standalone / runtime disabled は middleware 内で同期的に local 適用済み。
+      if (!shouldRequest) {
+        resolvePendingDispatch(
+          config.selectSynced(subscriptionSession.store.getState()).result,
+        )
+      }
+    })
+  }
+
   const setRole = async (role: PeerRole): Promise<void> => {
     if (!session) {
       throw new Error(
@@ -1372,6 +1703,7 @@ export const createSynqux = <
     reducer: synquxReducer,
     rootReducer: config.rootReducer,
     subscribe,
+    dispatchAndWait,
     setRole,
     actions: {
       setEnabled: synquxActions.setEnabled,

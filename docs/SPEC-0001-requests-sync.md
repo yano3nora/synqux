@@ -124,10 +124,11 @@ NOTE: `markApplied` を dispatch **前**へ前倒しする案は不可 (dispatch
 同期基盤の性質から導かれる、game action / reducer 設計のルール。
 
 1. **action の repeat contract を自覚的に選ぶ** (ADR-0007): デフォルトは現在値に依存しない **set 型** (`toggle` ではなく `set({ key, value })`) とする。1 回しか実行できない操作は、2 回目を reducer の validation で拒否する **execute-once 型** にする。チャット投稿などの **無限実行型** も正当だが、同一 request の二重適用は機構が防ぐ一方、再クリック・retry による「同じ意図の別 request」は識別できない。実害があれば payload の一意 key で execute-once 化し、なければ UI debounce または繰り返しを許容する。CI では `synqux/testing` の mode 宣言つき table に全 action を載せ、set 型は `'idempotent'`、execute-once 型は `'rejects-repeat'`、無限実行型は `'repeatable'` の契約を検査する
-2. **1 度しか発火しない自動 dispatch を作らない**: 取りこぼし前提の基盤のため、state 監視 + retry かユーザ操作起点にする
+2. **1 度しか発火しない自動 dispatch を作らない**: 取りこぼし前提の基盤のため、state 監視 + retry かユーザ操作起点にする。非ユーザー起点の発火 (状態 watcher / タイマー) は consumer の useEffect 手書きではなく **automations (ADR-0015) で書く** — host だけが synced state + サーバ時刻の述語を評価し、「適用されたら述語が false に戻る」自己終了契約のもとで retry まで engine が引き受ける
 3. **判定系 action は入力のスナップショットを result / log に残す**: 「現在 state を見て判定する」action は、判定時点の入力を記録しておくと replay 再現なしで調査が終わる
 4. **validation は reducer に集約し、`stateWithError` で表現する**: middleware や UI 側に成否判定を分散させない。reducer が唯一の判定器であることが同期の前提
 5. **result は synced action ごとに再生成する** (ADR-0013): `createSynquxRootReducer` なら自動。primitive 方式では synced reducer の前段で `stateWithDefaultResult` を必ず呼ぶ。これを省くと過去の error が次の request を誤って拒否する
+6. **UI からの自動 dispatch を作らない** (ADR-0015): ユーザー起点操作は即時 dispatch し、付随効果は reducer 内で同一 request として原子的に適用する (content へ action オブジェクトを埋め込んで UI の setTimeout で dispatch する形は、cleanup 漏れ・全端末 fan-out・複数 request 化の温床)。演出は state を読む render 制御のみで表現し、端末ローカルな演出タイマーをロジックのゲートにしない。表示と同時の自動実行が必要なら automations の汎用ルールで行う
 
 ## 改善ロードマップ
 

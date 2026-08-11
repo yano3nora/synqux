@@ -16,10 +16,7 @@
 - xxx
 
 ### P1 — 本番境界と公開契約
-- **synced action の「適用完了」を待てる公式 API を検討する**
-  - 同期時の dispatch が返す Promise は request の transport 書き込みまでしか表さず、「host 裁定 → 自端末への適用」まで待つ手段が state 監視の自作しかない (初導入 repo の review で、reset 完了を待たない thunk の即時 fulfilled が問題として指摘された)
-  - 候補: hash / result を鍵に自端末適用を await できる helper (timeout 付き)。全端末への適用完了は分散システム上保証できないため、契約は「自端末適用まで」に限定する
-  - トリガー: 複数 consumer で待ち合わせコードが重複したら。見送りのデメリット: consumer ごとに timeout・エラー処理の品質がばらつく
+- xxx
 
 ### P2 — 文書・consumer 導入・コスト最適化
 - **Firebase の本番 rules / data lifecycle checklist を用意する**

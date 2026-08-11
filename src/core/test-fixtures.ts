@@ -53,6 +53,25 @@ export const gameReducer: Reducer<GameState> = (
         log: state.log.concat(`increment:${action.payload ?? 1}`),
       }
 
+    // automation の dual-host/retry 検証用 rejects-repeat action。
+    // 受理条件は reducer に残し、rule の when は発行トリガーにだけ使う。
+    case 'game/increment-once':
+      if (state.count > 0) {
+        return {
+          ...state,
+          result: {
+            action,
+            type: 'error',
+            targets: action.meta?.requestedBy ? [action.meta.requestedBy] : [],
+          },
+        }
+      }
+      return {
+        ...state,
+        count: 1,
+        log: state.log.concat('increment-once'),
+      }
+
     // toggle 系 action: 二重適用で「クリックが無かったこと」になる非冪等 action の代表
     case 'game/toggle':
       return {
@@ -136,6 +155,7 @@ type ClientOptions = Partial<
     | 'canRequest'
     | 'localSnapshots'
     | 'devDeterminismCheck'
+    | 'automations'
   >
 >
 
