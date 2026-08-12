@@ -156,6 +156,7 @@ type ClientOptions = Partial<
     | 'localSnapshots'
     | 'devDeterminismCheck'
     | 'automations'
+    | 'hostLiveness'
   >
 >
 

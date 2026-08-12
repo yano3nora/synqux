@@ -26,6 +26,7 @@ import {
   type LedgerAction,
   type LedgerState,
 } from './ledger'
+import { createRig } from './rig'
 
 /**
  * synqux demo: firebase emulator 上で counter を端末間同期する
@@ -102,12 +103,16 @@ const sync = createSynqux({
   }),
 })
 
+// TASK-260812 Phase A-2 の計測 rig (`?rig=1` で有効)。middleware は synqux より
+// 前段に置き、transport 由来の内部 action 到着をタブ視点で記録する
+const rig = createRig(params)
+
 const store = configureStore({
   reducer: sync.rootReducer,
   middleware: (getDefaultMiddleware) =>
     getDefaultMiddleware({
       serializableCheck: { ignoredActionPaths: ['meta.root'] },
-    }).prepend(...sync.middlewares),
+    }).prepend(...(rig ? [rig.middleware] : []), ...sync.middlewares),
 })
 
 // ---- UI (依存を増やさないため plain DOM。react を使う場合は synqux/react 参照) ----
@@ -230,6 +235,20 @@ void sync
   .subscribe({ store, groupId, role })
   .then(() => {
     el('status').textContent = 'connected'
+
+    // rig の計測開始も probe の request 生成を含むため subscribe 後に置く
+    rig?.start({
+      db,
+      groupId,
+      getSelfId: () => selectSelfId(store.getState()),
+      getIsHost: () => selectIsHost(store.getState()),
+      getPeersDigest: () =>
+        selectPeers(store.getState())
+          .map((peer) => `${peer.id}:${peer.role ?? 'player'}`)
+          .join(','),
+      dispatchAndWait: (action, options) =>
+        sync.dispatchAndWait(action as DemoAction, options),
+    })
 
     // URL 指定は subscribe 後に開始し、未接続時の request 生成を避ける。
     if (Number.isInteger(stormTotal) && stormTotal > 0) {

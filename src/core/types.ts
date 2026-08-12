@@ -36,6 +36,13 @@ export type Peer = {
 
   /** 端末の識別ラベル (dedicated の process id 等)。host 導出には使わない */
   label?: string
+
+  /**
+   * host 生存確認の最終 heartbeat 時刻 (サーバ基準時刻)。host の間だけ
+   * 定期更新される。未記録 (一度も host になっていない) の stale 判定は
+   * connected を起点にする (TASK-260812 / ADR-0016)
+   */
+  lastSeenAt?: number
 }
 
 /**
@@ -252,6 +259,13 @@ export type SnapshotStore = {
  * 9. 【updateSelf】自 peer の presence を in-place 更新すること。id / connected は
  *    不変であること。更新は全端末の subscribePeers へ onChanged として配送し、
  *    切断復帰時の presence 再登録 (契約 5 / ADR-0006) は更新後の値で行うこと
+ * 10.【heartbeat】自 peer の lastSeenAt をサーバ基準時刻で更新し、onChanged として
+ *    全端末へ配送すること。他の presence 属性は変更しない
+ * 11.【demotePeer】対象 peer の role を 'guest' へ書き換え、onChanged として全端末へ
+ *    配送すること。自 peer 以外へ書き込む唯一のメソッドであり、非敵対クライアント
+ *    前提 (ADR-0009) の範囲で stale host の降格 (ADR-0016) にのみ使う。
+ *    対象 peer が既に存在しない場合は throw せず no-op で resolve すること
+ *    (複数 observer の同時 demote / 切断との競合を冪等に収束させる)
  */
 export type SynquxTransport = SnapshotStore & {
   /** presence 登録。selfId は transport が採番する */
@@ -268,6 +282,12 @@ export type SynquxTransport = SnapshotStore & {
 
   /** 自 peer の presence 属性を in-place 更新する (契約 9) */
   updateSelf(patch: { role?: PeerRole }): Promise<void>
+
+  /** 自 peer の lastSeenAt をサーバ基準時刻で touch する (契約 10、ADR-0016) */
+  heartbeat(): Promise<void>
+
+  /** 対象 peer の role を 'guest' へ書き換える (契約 11、ADR-0016) */
+  demotePeer(id: Peer['id']): Promise<void>
 
   /** サーバ基準時刻 (firebase: .info/serverTimeOffset 補正相当) */
   serverNow(): Promise<number>

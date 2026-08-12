@@ -30,6 +30,10 @@ synqux は、consumer が認証・認可した**協調的な非敵対クライ�
     - 全端末が共有する peer pool から「最新接続の dedicated、いなければ最新接続の player」を host とする純粋関数 (guest は昇格しない)。role は presence の mutable 属性で、`setRole` の変更配送により host は自動的に再導出される (ADR-0014)
     - 再接続時の presence 復元は初回の connected を維持するため、復帰だけで host 序列は変わらない (ADR-0006)
     - → 選挙プロトコルなしで全端末が同じ host に合意でき、host 離脱時も pool の変化だけで自動的に次の host が定まる (host migration)
+- **host 生存監視 (liveness)** — `src/core/create-synqux.ts` (`startHostLivenessEngine`)、ADR-0016
+    - host は `heartbeatIntervalMs` (既定 30s) ごとに presence の `lastSeenAt` をサーバ時刻で touch する。他端末は `staleThresholdMs` (既定 180s) を超えて沈黙した host を `demotePeer` で guest へ降格し、pool の変化として既存の host migration に合流させる (`deriveHostId` は純粋関数のまま)
+    - 誤検知防御: observer は現在の host の観測開始から閾値経過まで判定しない (再昇格直後・途中参加直後の猶予)。demote 後に host 候補が残らない場合は降格しない (最悪でも現状維持)。降格された端末の復帰は consumer の `setRole` 判断
+    - → tab freeze 等で「presence は生きているが host が沈黙する」停止 (TASK-260812 で実測再現) が、閾値経過で自動的に migration へ倒れる。`hostLiveness: false` で無効化できる
 - **各端末の request 処理 fork** — `src/core/create-synqux.ts` (`requestListener`)
     - 全端末が request ごとに fork を持ち、「自分が host か」を監視し続ける。fork は request が適用されるまで生存し、dual-host 窓の敗者の再裁定も引き受ける (ADR-0002)。待機はイベント駆動 (state 変化の notify) で、ポーリングは安全網のみ
     - → host 不在・migration 中に届いた request も、誰かが host に昇格した時点で処理される。キュー処理のような排他制御を分散環境で実現している
@@ -110,6 +114,7 @@ client                      firebase                     host
 | requests の無限成長 | snapshot ack 後、既存仕様ですでに破棄対象となる適用窓の外だけを host が prune (ADR-0005) | `src/core/create-synqux.ts` / transport adapter、再現テスト: `src/core/retention.test.ts` |
 | 購読の黙殺死 (permission denied 等で transport 購読が打ち切られても core が正常と誤認する) | transport 契約 8 の `onError` で検知し `unrecoverable` を提示。自動リトライせず unsubscribe → 再 subscribe の判断を consumer に委ねる (ADR-0012) | `src/core/create-synqux.ts` / transport adapter、再現テスト: `src/core/transport-failure.test.ts` |
 | offline 起動で `subscribe()` が無期限ハングする | `subscribe` / transport `connect` の `signal?: AbortSignal` で consumer が中断できる (省略時は無期限待機 = 復帰時に無操作で接続)。abort は presence を残さず rollback (ADR-0012) | `src/core/create-synqux.ts` / `src/firebase/index.ts`、再現テスト: `src/core/transport-failure.test.ts` |
+| host の tab freeze 等で「presence は生きているが裁定が止まる」(room 全体の停止) | host liveness heartbeat + observer demote (ADR-0016)。閾値超で沈黙した host を他端末が guest へ降格し、既存 migration で自動回復する | `src/core/create-synqux.ts` (`startHostLivenessEngine`) / transport adapter、再現テスト: `src/core/host-liveness.test.ts` |
 
 ### 既知トレードオフ (仕様として明文化)
 

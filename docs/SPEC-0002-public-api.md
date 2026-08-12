@@ -127,12 +127,28 @@ export type CreateSynquxConfig<
    */
   automations?: SynquxAutomation<TSynced, TAction>[]
   /**
+   * host 生存監視 (ADR-0016)。host は heartbeatIntervalMs (既定 30,000) ごとに
+   * presence の lastSeenAt をサーバ時刻で更新し、他端末は staleThresholdMs
+   * (既定 180,000) を超えて沈黙した host を guest へ降格して migration を促す。
+   * false で無効化。既定値は TASK-260812 の実測に基づき、staleThresholdMs は
+   * heartbeatIntervalMs の 2 倍未満を生成時に拒否する (誤降格防止)
+   */
+  hostLiveness?: SynquxHostLiveness | false
+  /**
    * standalone (enabled=false で生成した instance) の synced state 永続化先
    * 封筒・直列化は transport の snapshot と完全に同一 (canonical JSON)。保存タイミングは
    * 「適用 synced action ごと」で、host の snapshot 永続化と同じ policy 点を通る (Decision 11)
    * runtime の setEnabled(false) (tutorial 等) では保存しない — 移植元の tutorial 除外の一般化
    */
   localSnapshots?: SnapshotStore
+}
+
+/** host 生存監視の設定 (ADR-0016)。既定 30,000 / 180,000 */
+export type SynquxHostLiveness = {
+  /** host が lastSeenAt を touch する間隔 ms */
+  heartbeatIntervalMs?: number
+  /** これを超えて heartbeat の無い host を降格する ms */
+  staleThresholdMs?: number
 }
 
 /**
@@ -465,6 +481,10 @@ export type SynquxTransport = SnapshotStore & {
   disconnect(): Promise<void>
   /** id / connected を維持して presence を更新し、全 peer 購読へ onChanged を配送する (契約 9, ADR-0014) */
   updateSelf(patch: { role?: PeerRole }): Promise<void>
+  /** 自 peer の lastSeenAt をサーバ時刻で touch する (契約 10, ADR-0016) */
+  heartbeat(): Promise<void>
+  /** 対象 peer の role を 'guest' へ書き換える。対象不在は no-op (契約 11, ADR-0016) */
+  demotePeer(id: Peer['id']): Promise<void>
 
   /** サーバ基準時刻 (firebase: .info/serverTimeOffset 補正)。meta.dispatched / requested 用 */
   serverNow(): Promise<number>
@@ -507,6 +527,8 @@ export type SynquxTransport = SnapshotStore & {
 | --- | --- | --- |
 | `connect` / presence | 匿名 auth + `.info/connected` 常駐監視 + `onDisconnect().remove()`。切断後の復帰では同じ id / 初回 `connected` で自動再登録 | `subscribe-connections.ts` / `register-connection.ts` |
 | `updateSelf` | 自 presence ref への `update()`。session に更新値を保持し、切断復帰時も同じ role で再登録 | `toggleGuestConnection` 相当 |
+| `heartbeat` | 自 presence ref へ `update({ lastSeenAt: serverTimestamp() })`。再登録時も serverTimestamp で焼き直す | なし (ADR-0016 で新設) |
+| `demotePeer` | 対象 presence ref の存在確認後に `update({ role: 'guest' })` (update は消えた path を再生成するため。競合で生まれる {role} だけの孤児は guest role のため host 候補にならず不活性) | なし (ADR-0016 で新設) |
 | `serverNow` | `.info/serverTimeOffset` 補正 | `currentServerTimestamp()` |
 | `pushRequest` | `push()` (push id = 挿入順辞書順単調・端末時計依存) | `create-request.ts` |
 | `respondRequest` | `update()` (ack で resolve — local echo が先に発火する点が既知の問題①の再現条件) | `response-to-request.ts` |
@@ -564,7 +586,7 @@ type SnapshotEnvelope<TSynced> = {
 
 | subpath | 主な export | 対象 |
 | --- | --- | --- |
-| `synqux` | `createSynqux` / `createSynquxRootReducer` / `synquxReducer` / `synquxRestored` (primitive 方式の restore 契約。dispatch 禁止・match 専用) / `stateWithDefaultResult` / `stateWithError` / `stateWithResult` / `stateWithTransaction` / `generateResult` / `createSyncedActionMatchers` / `selectIsHost` / `selectPeers` / `selectSelfId` / `selectSyncHealth` / `selectIsSyncStalled` / `selectIsSyncUnrecoverable` / `localStorageSnapshotStore` / 型 (`SynquxSynced` / `SynquxHealth` / `Result` / `ResultMessage` / `Peer` / `SynquxActionMeta` / `SynquxAutomation` / `SynquxTransport` / `SnapshotStore` / `RequestEnvelope` / `SynquxState` / `PendingRequest`) | セットアップ層 + reducer ヘルパー |
+| `synqux` | `createSynqux` / `createSynquxRootReducer` / `synquxReducer` / `synquxRestored` (primitive 方式の restore 契約。dispatch 禁止・match 専用) / `stateWithDefaultResult` / `stateWithError` / `stateWithResult` / `stateWithTransaction` / `generateResult` / `createSyncedActionMatchers` / `selectIsHost` / `selectPeers` / `selectSelfId` / `selectSyncHealth` / `selectIsSyncStalled` / `selectIsSyncUnrecoverable` / `localStorageSnapshotStore` / 型 (`SynquxSynced` / `SynquxHealth` / `Result` / `ResultMessage` / `Peer` / `SynquxActionMeta` / `SynquxAutomation` / `SynquxHostLiveness` / `SynquxTransport` / `SnapshotStore` / `RequestEnvelope` / `SynquxState` / `PendingRequest`) | セットアップ層 + reducer ヘルパー |
 | `synqux/react` | `SynquxProvider` / `useIsHost` / `usePeers` / `useSelfId` / `useSyncHealth` / `useIsSyncStalled` / `useIsSyncUnrecoverable` / `useLatestResult` | ゲーム開発者層 |
 | `synqux/testing` | `createMemoryHub` / `verifyActionIdempotency` / `assertActionIdempotency` | consumer CI / 本 repo の simulation test |
 | `synqux/firebase` | `firebaseTransport(db, options?: { archivePrunedRequests?: boolean })` | Phase 2 で実装 |

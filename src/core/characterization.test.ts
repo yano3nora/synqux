@@ -55,6 +55,8 @@ const createStubTransport = () => {
     connect: async () => ({ selfId: SELF }),
     disconnect: async () => undefined,
     updateSelf: async () => undefined,
+    heartbeat: async () => undefined,
+    demotePeer: async () => undefined,
     serverNow: async () => Date.now(),
     subscribePeers: () => () => undefined,
     pushRequest,

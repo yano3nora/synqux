@@ -382,6 +382,42 @@ export function createMemoryHub(): MemoryHub {
         }
       },
 
+      async heartbeat() {
+        const { group, peerId } = assertConnected()
+        const index = group.peers.findIndex((peer) => peer.id === peerId)
+        const current = group.peers[index]
+        if (current === undefined) {
+          throw new Error(`Unknown peer: ${peerId}`)
+        }
+
+        // serverNow 相当は Date.now (fake timers 下ではテストが時計を制御する)
+        const updated: Peer = { ...current, lastSeenAt: Date.now() }
+        group.peers[index] = updated
+        for (const subscriber of group.peerSubscribers) {
+          enqueue(subscriber, () =>
+            subscriber.handlers.onChanged(clone(updated)),
+          )
+        }
+      },
+
+      async demotePeer(id) {
+        const { group } = assertConnected()
+        const index = group.peers.findIndex((peer) => peer.id === id)
+        const current = group.peers[index]
+        // 対象不在は no-op (契約 11: 同時 demote / 切断との競合を冪等に収束させる)
+        if (current === undefined) {
+          return
+        }
+
+        const updated: Peer = { ...current, role: 'guest' }
+        group.peers[index] = updated
+        for (const subscriber of group.peerSubscribers) {
+          enqueue(subscriber, () =>
+            subscriber.handlers.onChanged(clone(updated)),
+          )
+        }
+      },
+
       async serverNow() {
         return Date.now()
       },

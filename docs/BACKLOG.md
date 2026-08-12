@@ -13,10 +13,10 @@
 ## 次イテレーション候補
 
 ### P0 — 実践投入ブロッカー
-- [host 非アクティブ放置による room 停止の恒久対策 (liveness heartbeat + observer demote)](TASK-260812-host-liveness-heartbeat.md) — pick 済み・着手中
+- xxx
 
 ### P1 — 本番境界と公開契約
-- xxx
+- [consumer boilerplate の library 吸収 (subscription lifecycle / replay可視化 / self・result selector / matcher)](TASK-260812-consumer-boilerplate-absorption.md) — 起票済み・未着手
 
 ### P2 — 文書・consumer 導入・コスト最適化
 - xxx

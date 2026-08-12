@@ -22,6 +22,7 @@ import {
 } from 'firebase/database'
 import type {
   Peer,
+  PeerRole,
   RequestEnvelope,
   SnapshotFence,
   SynquxTransport,
@@ -256,6 +257,10 @@ export const firebaseTransport = (
                   (serverTimestamp() as unknown as number),
                 role: currentSession.role,
                 label: currentSession.label,
+                // 再登録の瞬間は生存確実なのでサーバ時刻で焼き直す (ADR-0016)。
+                // set は object 全置換のため、省略すると demote 前の古い値が
+                // 消えるだけだが、明示した方が stale 判定の起点が新しくなる
+                lastSeenAt: serverTimestamp() as unknown as number,
               }),
             )
             currentSession.sawDisconnect = false
@@ -310,6 +315,40 @@ export const firebaseTransport = (
         }
         throw error
       }
+    },
+
+    async heartbeat() {
+      const currentSession = requireSession()
+      const selfRef = ref(
+        db,
+        `${connectionsPath(currentSession.groupId)}/${currentSession.selfId}`,
+      )
+
+      // サーバ採番 (契約 10: 端末時計を使わない)。他の presence 属性は触らない
+      await update(selfRef, {
+        lastSeenAt: serverTimestamp() as unknown as number,
+      })
+    },
+
+    async demotePeer(id) {
+      const currentSession = requireSession()
+
+      // RTDB の update は消えた path に {role} だけの孤児 object を再生成して
+      // しまうため、存在確認してから書く (契約 11 の no-op 要件)。確認と書き込みの
+      // 間の切断 (onDisconnect 削除) と競合すると孤児が残り得るが、孤児は
+      // role: 'guest' のみで host 候補になり得ず (deriveHostId は dedicated /
+      // player だけを pool にする)、correctness には影響しない。物理的な掃除は
+      // group 終了時の data lifecycle (consumer 責務) に含まれる
+      const peerRef = ref(
+        db,
+        `${connectionsPath(currentSession.groupId)}/${id}`,
+      )
+      const existing = await get(peerRef)
+      if (!existing.exists()) {
+        return
+      }
+
+      await update(peerRef, { role: 'guest' satisfies PeerRole })
     },
 
     async serverNow() {

@@ -210,8 +210,11 @@ describe('firebaseTransport', () => {
       connected: 123_456,
       role: 'player',
       label: null,
+      // 再登録の瞬間は生存確実なので lastSeenAt はサーバ採番で焼き直す (ADR-0016)
+      lastSeenAt: { '.sv': 'timestamp' },
     })
-    expect(h.serverTimestampMock).toHaveBeenCalledTimes(1)
+    // 初回 connect の connected 用 1 回 + 再登録の lastSeenAt 用 1 回
+    expect(h.serverTimestampMock).toHaveBeenCalledTimes(2)
   })
 
   it('updateSelf 後の切断復帰では更新後の role で presence を再登録する', async () => {

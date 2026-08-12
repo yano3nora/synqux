@@ -15,6 +15,7 @@ export {
   type CreateSynquxConfig,
   type Synqux,
   type SynquxAutomation,
+  type SynquxHostLiveness,
   type SynquxSubscribeOptions,
 } from './core/create-synqux.js'
 export {

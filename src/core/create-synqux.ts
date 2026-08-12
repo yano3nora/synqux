@@ -143,11 +143,30 @@ export type CreateSynquxConfig<
   automations?: SynquxAutomation<TSynced, TAction>[]
 
   /**
+   * host 生存監視 (ADR-0016)。host は heartbeatIntervalMs ごとに presence の
+   * lastSeenAt をサーバ時刻で更新し、他端末は staleThresholdMs を超えて沈黙した
+   * host を guest へ降格して host migration を促す (background tab の freeze 等で
+   * 「presence は生きているが host が沈黙する」停止の恒久対策)。false で無効化。
+   * 既定値 (30s / 180s) は TASK-260812 の実測に基づく。上書きする場合、
+   * staleThresholdMs は「timer throttling 下の heartbeat 最悪間隔 (実測約 60s)」を
+   * 十分上回る値にすること (throttle されているだけの機能する host を誤降格させない)
+   */
+  hostLiveness?: SynquxHostLiveness | false
+
+  /**
    * 決定性検出網 (ADR-0001 Decision 8): host の試し実行結果と実適用後の synced を
    * 比較し、純粋性契約でも防げない非決定 reducer (Date.now / Math.random 等) を
    * dev モードで検出する。既定は NODE_ENV !== 'production'
    */
   devDeterminismCheck?: boolean
+}
+
+export type SynquxHostLiveness = {
+  /** host が lastSeenAt を touch する間隔 ms。既定 30_000 */
+  heartbeatIntervalMs?: number
+
+  /** これを超えて heartbeat の無い host を降格する ms。既定 180_000 */
+  staleThresholdMs?: number
 }
 
 export type SynquxAutomation<TSynced, TAction extends Action> = {
@@ -267,6 +286,30 @@ export const createSynqux = <
     ) {
       throw new Error(
         `SynquxAutomation retryMs must be a positive finite number: ${automation.id}`,
+      )
+    }
+  }
+
+  const hostLiveness =
+    config.hostLiveness === false
+      ? (false as const)
+      : {
+          heartbeatIntervalMs:
+            config.hostLiveness?.heartbeatIntervalMs ?? 30_000,
+          staleThresholdMs: config.hostLiveness?.staleThresholdMs ?? 180_000,
+        }
+
+  if (hostLiveness !== false) {
+    for (const [key, value] of Object.entries(hostLiveness)) {
+      if (!Number.isFinite(value) || value <= 0) {
+        throw new Error(`hostLiveness.${key} must be a positive finite number`)
+      }
+    }
+    // 1 回の heartbeat 欠落 (書き込み失敗等) で即 demote になる設定は dual-host 窓を
+    // 無用に開くだけなので、生成時に拒否する
+    if (hostLiveness.staleThresholdMs < hostLiveness.heartbeatIntervalMs * 2) {
+      throw new Error(
+        'hostLiveness.staleThresholdMs must be at least twice heartbeatIntervalMs',
       )
     }
   }
@@ -1178,6 +1221,123 @@ export const createSynqux = <
       })
     }
 
+    /**
+     * host liveness (ADR-0016): 自分が host の間は heartbeat で生存を可視化し、
+     * そうでない間は導出 host の staleness を監視して guest へ demote する。
+     * demote は presence の変化として全端末へ配送され、既存の host migration に
+     * 合流する — deriveHostId は pool の純粋関数のまま変えない。
+     * 評価は heartbeatIntervalMs の周期 tick のみ: staleness は時間経過でしか
+     * 進行しないため、イベント駆動の再評価を足しても検知は早まらない
+     */
+    const startHostLivenessEngine = (
+      subscriptionSession: SubscriptionSession,
+    ): void => {
+      if (hostLiveness === false) {
+        return
+      }
+
+      let active = true
+      // serverNow / demote の await 中に次 tick が重ならないよう同期ガードを立てる
+      // (check-then-act の間に await を挟まない、の AGENTS 原則の適用)
+      let inFlight = false
+
+      /**
+       * 「現在の host をいつから host として観測しているか」の端末ローカル時刻。
+       * 一度 host を降りた端末が古い lastSeenAt を持ったまま再昇格した直後に、
+       * observer が即 demote する誤検知を防ぐヒステリシス。health timer の
+       * Date.now と同様、correctness には使わず判定の猶予にだけ使う
+       */
+      let observedHostId: string | null = null
+      let observedHostSince = 0
+
+      const tick = async (): Promise<void> => {
+        if (!active || session !== subscriptionSession || inFlight) {
+          return
+        }
+
+        const { selfId, entities } = store.getState().synqux.connections
+        if (!selfId) {
+          return
+        }
+
+        const hostId = deriveHostId(Object.values(entities)) ?? null
+        if (hostId !== observedHostId) {
+          observedHostId = hostId
+          observedHostSince = Date.now()
+        }
+        if (hostId === null) {
+          return
+        }
+
+        inFlight = true
+        try {
+          if (hostId === selfId) {
+            // 自分が host: 生存を書く。失敗は次 tick の retry に委ねる (automations
+            // と同じ政策 — heartbeat が書けない状態が続けば demote されるのが正しい)
+            await transport.heartbeat().catch(() => undefined)
+            return
+          }
+
+          // observer: host の観測開始から閾値経過するまでは判定しない (上記の再昇格
+          // 直後ケースと、途中参加直後に古い pool 観で demote するケースの両方を防ぐ)
+          if (Date.now() - observedHostSince < hostLiveness.staleThresholdMs) {
+            return
+          }
+
+          let now: number
+          try {
+            now = await transport.serverNow()
+          } catch {
+            return
+          }
+          if (!active || session !== subscriptionSession) {
+            return
+          }
+
+          // await 中の pool 変化を拾い直し、host が替わっていたら判定しない
+          const currentEntities = store.getState().synqux.connections.entities
+          const peers = Object.values(currentEntities)
+          if (deriveHostId(peers) !== hostId) {
+            return
+          }
+          const host = currentEntities[hostId]
+          if (host === undefined) {
+            return
+          }
+
+          // lastSeenAt 未記録 (一度も heartbeat していない新 host) は connected 起点
+          const lastSeen = Math.max(host.lastSeenAt ?? 0, host.connected)
+          if (now - lastSeen <= hostLiveness.staleThresholdMs) {
+            return
+          }
+
+          // 候補不在ガード: demote しても host 不在の完全停止になるだけなら悪化を
+          // 避けて何もしない (次 tick で pool が変わっていれば再評価される)
+          const demotedPool = peers.map((peer) =>
+            peer.id === hostId ? { ...peer, role: 'guest' as const } : peer,
+          )
+          if (deriveHostId(demotedPool) === undefined) {
+            return
+          }
+
+          // 複数 observer の同時 demote は同値書き込みで冪等 (transport 契約 11)。
+          // 失敗は握りつぶし、stale が続いていれば次 tick で再評価する
+          await transport.demotePeer(hostId).catch(() => undefined)
+        } finally {
+          inFlight = false
+        }
+      }
+
+      const timer = setInterval(
+        () => void tick(),
+        hostLiveness.heartbeatIntervalMs,
+      )
+      cleanups.push(() => {
+        active = false
+        clearInterval(timer)
+      })
+    }
+
     // ---- standalone: transport に触れず local restore だけ行う ----
     if (!instanceEnabled) {
       const subscriptionSession: SubscriptionSession = {
@@ -1562,6 +1722,7 @@ export const createSynqux = <
     })
 
     startAutomationEngine(subscriptionSession)
+    startHostLivenessEngine(subscriptionSession)
 
     return async () => {
       await runSubscribeCleanups(cleanups, true)
