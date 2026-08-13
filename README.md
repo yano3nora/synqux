@@ -283,6 +283,12 @@ const synqux = createSynqux({
     mode: 'everyone', // presentation / logging fires on each applying device
     match: (action) => action.type === 'game/drawCard',
     effect: (action) => playSound(action.payload.card),
+  }, {
+    id: 'track-local-panel',
+    mode: 'everyone',
+    scope: 'all', // opt in to local actions as well as synced actions
+    match: (action) => action.type === 'ui/panelOpened',
+    effect: () => analytics.track('panel-opened'),
   }],
   // ...
 })
@@ -290,7 +296,9 @@ const synqux = createSynqux({
 
 **Behavior.**
 
-- Fires right after this device **actually applies** a synced action — but only while `phase === 'live'`. Past actions re-applied during restore replay do not fire. Effects are fire-and-forget and never block application.
+- Fires right after this device **actually applies** an action in the rule's scope — but only while `phase === 'live'`. Past actions re-applied during restore replay do not fire. Effects are fire-and-forget and never block application.
+- `scope` defaults to `'synced'`. Set `scope: 'all'` to also observe local actions on the device that dispatched them; synqux-internal actions are always excluded. Live and host-only gates still apply.
+- Effects receive `ctx: { synced, self }` — the post-apply synced state and this device's presence peer (`null` before the presence echo arrives). For role-gated effects note `self.role` may be omitted, which synqux treats as the default `'player'` — normalize with `self.role ?? 'player'` (same convention as `selectSelfRole`). No `dispatch` and no locals are provided.
 - Contrast with automations: automations act **before** application (host derives the next action from a state predicate); listeners act **after** (reacting to an applied action). Effects receive no `dispatch` — if you want the next synced action, use automations; if you want local state to follow synced state, use `extraReducers` in a locals reducer.
 - Not exactly-once (host handover can double-fire or drop). Write effects idempotently. Rejected requests never apply, so they never fire.
 
@@ -406,7 +414,7 @@ Types (all contract types are exported from the main entry):
 | `SynquxHealth` / `SynquxPhase` | Sync health / subscription phase |
 | `Synqux` / `CreateSynquxConfig` / `SynquxSubscribeOptions` | `createSynqux` return value / config / `subscribe` options |
 | `SynquxAutomation` | Rule type for the `automations` config (host-driven auto dispatch, ADR-0015) |
-| `SynquxListener` | Rule type for the `listeners` config (live-only reactions to applied synced actions, ADR-0017) |
+| `SynquxListener` | Rule type for `listeners`; `scope: 'all'` opts into local actions (live-only, ADR-0017 / ADR-0020) |
 | `SynquxRootState` / `SynquxState` / `PendingRequest` | Composed rootReducer state / internal slice state and pending request |
 | `SynquxTransport` / `RequestEnvelope` | Transport abstraction and request envelope (contract for adapter authors) |
 | `SnapshotStore` / `SnapshotFence` / `SnapshotEnvelope` | Snapshot persistence contract (fenced conditional writes) |

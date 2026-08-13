@@ -69,3 +69,9 @@ runtime の `setEnabled(false)` は ADR-0018 で廃止され、tutorial は stan
 「`selectIsHost` は `setEnabled(false)` 中に常時 true」および Decision 2 / 8 の
 setEnabled 言及は standalone session に読み替える (standalone は host 常時 true のまま)。
 本文は当時の記録のまま残す。
+
+## Amendment (2026-08-13): local action の監視 (ADR-0020)
+
+Decision 6 の「local action の反応は consumer の RTK listener に残す」という境界は、
+ADR-0020 により「local action の **dispatch を伴う**反応だけが残る」へ縮小された。
+fire-and-forget な反応は `scope: 'all'` で synqux listeners に集約できる。

@@ -4,8 +4,10 @@ import { describe, expect, expectTypeOf, it } from 'vitest'
 import * as synqux from './index.js'
 import {
   SYNQUX_VERSION,
+  type Peer,
   type SynquxAutomation,
   type SynquxListener,
+  type SynquxListenerContext,
 } from './index.js'
 
 describe('package smoke test', () => {
@@ -60,20 +62,45 @@ describe('package smoke test', () => {
     }>()
   })
 
-  it('SynquxListener 型を main entry から公開し、effect ctx は synced だけを持つ', () => {
+  it('SynquxListener 型を main entry から公開し、effect ctx は synced と self を持つ', () => {
     type Listener = SynquxListener<{ count: number }, Action>
 
     expectTypeOf<Listener>().toMatchTypeOf<{
       id: string
       match: (action: Action) => boolean
       mode: 'host-only' | 'everyone'
+      scope?: 'synced' | 'all'
       effect: (
         action: Action,
-        ctx: { synced: { count: number } },
+        ctx: SynquxListenerContext<{ count: number }>,
       ) => void | Promise<void>
     }>()
     expectTypeOf<Parameters<Listener['effect']>[1]>().toEqualTypeOf<{
       synced: { count: number }
+      self: Peer | null
     }>()
+  })
+
+  it("SynquxListener は scope 'all' の variant でだけ action 型を Action へ広げる", () => {
+    type DomainAction = Action<'game/increment'> & { payload: number }
+    type Listener = SynquxListener<{ count: number }, DomainAction>
+    type AllRule = Extract<Listener, { scope: 'all' }>
+    type SyncedRule = Exclude<Listener, { scope: 'all' }>
+
+    // 既定 scope は domain action のまま narrowing 済みで受け取れる
+    expectTypeOf<
+      Parameters<SyncedRule['match']>[0]
+    >().toEqualTypeOf<DomainAction>()
+    expectTypeOf<
+      Parameters<SyncedRule['effect']>[0]
+    >().toEqualTypeOf<DomainAction>()
+
+    // 'all' は local action を含むため Action へ widen され、
+    // domain 固有の payload は narrowing なしには読めない
+    expectTypeOf<Parameters<AllRule['match']>[0]>().toEqualTypeOf<Action>()
+    expectTypeOf<Parameters<AllRule['effect']>[0]>().toEqualTypeOf<Action>()
+    expectTypeOf<Parameters<AllRule['effect']>[0]>().not.toHaveProperty(
+      'payload',
+    )
   })
 })

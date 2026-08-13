@@ -16,6 +16,7 @@ import {
 import { findFirstDivergence } from './diff.js'
 import { deriveHostId } from './host.js'
 import { localStorageSnapshotStore } from './local-storage.js'
+import { isSynquxAction } from './matchers.js'
 import { selectIsHost, selectSelf } from './selectors.js'
 import {
   buildSnapshotPayload,
@@ -167,7 +168,7 @@ export type CreateSynquxConfig<
   /** host が synced state とサーバ時刻から評価する自動 dispatch rule */
   automations?: SynquxAutomation<TSynced, TAction>[]
 
-  /** 適用済み synced action に反応する live 配信専用 listener */
+  /** 適用済み action に反応する live 配信専用 listener */
   listeners?: SynquxListener<TSynced, TAction>[]
 
   /**
@@ -211,24 +212,62 @@ export type SynquxAutomation<TSynced, TAction extends Action> = {
   retryMs?: number
 }
 
-/**
- * 適用済み synced action に反応する live 配信専用 listener。
- * exactly-once は保証しないため effect は冪等にし、effect から dispatch しないこと。
- * throw / rejection は engine が記録して握りつぶし、restore replay では発火しない。
- */
-export type SynquxListener<TSynced, TAction extends Action> = {
+type SynquxListenerBase = {
   /** rule の識別子。1 instance 内で一意であること */
   id: string
 
-  /** 適用された synced action に対する発火トリガー */
-  match: (action: TAction) => boolean
-
   /** host 端末だけで発火するか、適用した全端末で発火するか */
   mode: 'host-only' | 'everyone'
-
-  /** 副作用本体。dispatch は渡さず、適用後の synced state だけを渡す */
-  effect: (action: TAction, ctx: { synced: TSynced }) => void | Promise<void>
 }
+
+/**
+ * listener effect が読める適用後 context。dispatch と locals は渡さない
+ * (ADR-0017 Decision 6 / ADR-0020)。
+ */
+export type SynquxListenerContext<TSynced> = {
+  /** 適用後の synced state */
+  synced: TSynced
+
+  /**
+   * 自端末の presence peer (role ゲート等の判定用)。presence echo 未着の窓や
+   * 未接続では null — null 時にどう倒すかは effect 側の判断とする。
+   * role 省略の peer は host 導出と同じ既定 'player' として扱うこと
+   * (selectSelfRole と同じ正規化: `self.role ?? 'player'`)
+   */
+  self: Peer | null
+}
+
+/**
+ * 適用済み action に反応する live 配信専用 listener。
+ * `scope: 'all'` は local action でも発火するが、synqux 内部 action では発火しない。
+ * live ゲートと host ゲートは scope によらず適用される。exactly-once は保証しない
+ * ため effect は冪等にし、effect から dispatch しないこと。throw / rejection は
+ * engine が記録して握りつぶし、restore replay では発火しない。
+ */
+export type SynquxListener<
+  TSynced,
+  TAction extends Action,
+> = SynquxListenerBase &
+  (
+    | {
+        /** 既定 scope。適用された synced action だけを評価する */
+        scope?: 'synced'
+        match: (action: TAction) => boolean
+        effect: (
+          action: TAction,
+          ctx: SynquxListenerContext<TSynced>,
+        ) => void | Promise<void>
+      }
+    | {
+        /** synced action と local action の両方を評価する */
+        scope: 'all'
+        match: (action: Action) => boolean
+        effect: (
+          action: Action,
+          ctx: SynquxListenerContext<TSynced>,
+        ) => void | Promise<void>
+      }
+  )
 
 export type SynquxSubscribeOptions<TRoot> = {
   store: {
@@ -330,6 +369,9 @@ export const createSynqux = <
   const stallAfterMs = config.stallAfterMs ?? 30_000
   const automations = config.automations ?? []
   const listeners = config.listeners ?? []
+  const hasAllScopeListeners = listeners.some(
+    (listener) => listener.scope === 'all',
+  )
   const instanceLocalSnapshots = (() => {
     if (config.localSnapshots === false) {
       return undefined
@@ -385,6 +427,14 @@ export const createSynqux = <
 
     if (listener.mode !== 'host-only' && listener.mode !== 'everyone') {
       throw new Error(`Invalid SynquxListener mode: ${String(listener.mode)}`)
+    }
+
+    if (
+      listener.scope !== undefined &&
+      listener.scope !== 'synced' &&
+      listener.scope !== 'all'
+    ) {
+      throw new Error(`Invalid SynquxListener scope: ${String(listener.scope)}`)
     }
   }
 
@@ -568,41 +618,77 @@ export const createSynqux = <
     return !!selfId && deriveHostId(Object.values(entities)) === selfId
   }
 
-  /**
-   * 実適用後かつ live の action だけを配列順に評価する。effect は同期適用を
-   * block せず、個別の失敗を次の rule や後続 action へ伝播させない。
-   */
-  const fireListenersAfterApply = (root: TRoot, action: TAction): void => {
-    if (listeners.length === 0 || root.synqux.phase !== 'live') {
+  /** 実適用後の rule を失敗隔離して fire-and-forget で起動する。 */
+  const fireListener = <TListenerAction extends Action>(
+    listener: {
+      match: (action: TListenerAction) => boolean
+      effect: (
+        action: TListenerAction,
+        ctx: SynquxListenerContext<TSynced>,
+      ) => void | Promise<void>
+    },
+    action: TListenerAction,
+    ctx: SynquxListenerContext<TSynced>,
+  ): void => {
+    let matched: boolean
+    try {
+      matched = listener.match(action)
+    } catch (error) {
+      console.error(error)
       return
     }
 
-    // 1 発火点につき synced の導出は 1 回だけ行い、全 rule で適用後 state を共有する。
-    const synced = config.selectSynced(root)
+    if (!matched) {
+      return
+    }
+
+    try {
+      void Promise.resolve(listener.effect(action, ctx)).catch(
+        (error: unknown) => console.error(error),
+      )
+    } catch (error) {
+      console.error(error)
+    }
+  }
+
+  /**
+   * 実適用後かつ live の action だけを配列順に評価する。local action は opt-in
+   * rule だけへ渡し、内部 action は consumer の matcher へ公開しない。
+   */
+  const fireListenersAfterApply = (
+    root: TRoot,
+    action: Action,
+    isSynced: boolean,
+  ): void => {
+    if (
+      listeners.length === 0 ||
+      root.synqux.phase !== 'live' ||
+      (!isSynced && !hasAllScopeListeners) ||
+      (!isSynced && isSynquxAction(action))
+    ) {
+      return
+    }
+
+    // 1 発火点につき ctx の導出は 1 回だけ行い、全 rule で適用後 state を共有する。
+    const ctx: SynquxListenerContext<TSynced> = {
+      synced: config.selectSynced(root),
+      self: selectSelf(root),
+    }
 
     for (const listener of listeners) {
+      if (!isSynced && listener.scope !== 'all') {
+        continue
+      }
+
       if (listener.mode === 'host-only' && !isSelfHost(root)) {
         continue
       }
 
-      let matched: boolean
-      try {
-        matched = listener.match(action)
-      } catch (error) {
-        console.error(error)
-        continue
-      }
-
-      if (!matched) {
-        continue
-      }
-
-      try {
-        void Promise.resolve(listener.effect(action, { synced })).catch(
-          (error: unknown) => console.error(error),
-        )
-      } catch (error) {
-        console.error(error)
+      if (listener.scope === 'all') {
+        fireListener(listener, action, ctx)
+      } else {
+        // isSyncedAction が保証した境界でだけ domain action へ戻す。
+        fireListener(listener, action as TAction, ctx)
       }
     }
   }
@@ -897,8 +983,10 @@ export const createSynqux = <
         // 適用 (同期 dispatch・standalone 双方) が生んだ result.log を出力する
         const root = store.getState() as TRoot
         emitAppliedResultLog(root, action as UnknownAction)
-        fireListenersAfterApply(root, action as TAction)
+        fireListenersAfterApply(root, action, true)
         evaluateAutomationsAfterApply()
+      } else {
+        fireListenersAfterApply(store.getState() as TRoot, action, false)
       }
 
       // standalone session だけが session 固有の localSnapshots 設定へ永続化する。

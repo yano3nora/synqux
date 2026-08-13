@@ -128,9 +128,10 @@ export type CreateSynquxConfig<
    */
   automations?: SynquxAutomation<TSynced, TAction>[]
   /**
-   * 適用済み synced action に反応する live 配信専用 rule 表 (ADR-0017)。
-   * host-only / everyone の発火主体、restore replay の除外、effect 失敗の隔離を
-   * engine が担う。effect は best-effort のため冪等にし、dispatch しないこと
+   * 適用済み action に反応する live 配信専用 rule 表 (ADR-0017 / ADR-0020)。
+   * scope 省略時は synced action のみ、'all' は local action も評価する (synqux
+   * 内部 action は除外)。host-only / everyone の発火主体、restore replay の除外、
+   * effect 失敗の隔離を engine が担う。effect は冪等にし、dispatch しないこと
    */
   listeners?: SynquxListener<TSynced, TAction>[]
   /**
@@ -183,20 +184,40 @@ export type SynquxAutomation<TSynced, TAction extends Action> = {
 }
 
 /**
- * 適用済み synced action に反応する live 配信専用 listener (ADR-0017)。
- * restore replay では発火せず、throw / rejection は engine が握りつぶす。
+ * 適用済み action に反応する live 配信専用 listener (ADR-0017 / ADR-0020)。
+ * scope 'all' は local action でも発火するが synqux 内部 action では発火しない。
+ * scope によらず live / host gate を適用し、throw / rejection は握りつぶす。
  * exactly-once は保証しないため effect は冪等にし、effect から dispatch しないこと
  */
-export type SynquxListener<TSynced, TAction extends Action> = {
+type SynquxListenerBase = {
   /** rule の識別子。重複は createSynqux が throw */
   id: string
-  /** 適用された synced action に対する発火トリガー */
-  match: (action: TAction) => boolean
   /** host 端末だけで発火するか、適用した全端末で発火するか */
   mode: 'host-only' | 'everyone'
-  /** dispatch を持たない副作用本体。ctx は適用後の synced state のみ */
-  effect: (action: TAction, ctx: { synced: TSynced }) => void | Promise<void>
 }
+
+/** effect が読める適用後 context。dispatch と locals は渡さない */
+export type SynquxListenerContext<TSynced> = {
+  /** 適用後の synced state */
+  synced: TSynced
+  /** 自端末の presence peer (role ゲート用)。echo 未着・未接続は null。role 省略は既定 'player' として扱う */
+  self: Peer | null
+}
+
+export type SynquxListener<TSynced, TAction extends Action> =
+  SynquxListenerBase &
+    (
+      | {
+          scope?: 'synced'
+          match: (action: TAction) => boolean
+          effect: (action: TAction, ctx: SynquxListenerContext<TSynced>) => void | Promise<void>
+        }
+      | {
+          scope: 'all'
+          match: (action: Action) => boolean
+          effect: (action: Action, ctx: SynquxListenerContext<TSynced>) => void | Promise<void>
+        }
+    )
 
 export type SynquxSubscribeOptions<TRoot> = {
   store: { dispatch: Dispatch; getState: () => TRoot }
