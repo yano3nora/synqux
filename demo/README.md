@@ -1,47 +1,47 @@
 # synqux demo
 
-firebase emulator 上で counter と ledger を端末間同期する手動確認用 demo。npm には含まれない (`files: ["dist"]`)。CI もこれに依存しない。
+A manual demo for syncing a counter and ledger across devices with the Firebase emulator. It is not included in the npm package (`files: ["dist"]`), and CI does not depend on it.
 
 ## Getting Started
 
 ```sh
-# 1. RTDB emulator を起動 (Java が必要。firebase-tools は npx で取得)
+# 1. Start the RTDB emulator (requires Java; npx downloads firebase-tools)
 npm run demo:emulator
 
-# 2. 別ターミナルで dev server を起動
+# 2. Start the dev server in another terminal
 npm run demo
-# → http://localhost:5173 を複数タブで開く
+# Open http://localhost:5173 in multiple tabs
 ```
 
-- `?group=xxx` で部屋を分ける / `?role=dedicated` `?role=guest` で役割を変える
-- src を alias で直接読むため、ビルド不要で API 変更が即反映される
+- Use `?group=xxx` to choose a room. Use `?role=dedicated` or `?role=guest` to change roles.
+- The alias reads src directly, so API changes appear without a build.
 
 ## Testcases
 
-1. 2 タブで +1 が相互反映される (適用順の一致)
-2. 最新接続タブが HOST 👑 になり、そのタブを閉じると残りが昇格する (onDisconnect → migration)
-3. リロードで count が復元される (snapshot restore)
-4. +10 連打で 100 を超えると拒否され、押した本人にだけ message が出る (reducer validation)
-5. `?role=dedicated` のタブが常に host に固定される
-6. `?role=guest` のタブは host にならない (request 発行は可能)
-7. role の guest / player ボタンで `setRole` しても self id は変わらず、host が移譲・昇格する
+1. Click +1 in either of two tabs and see the update in both (matching application order).
+2. The latest connected tab becomes HOST 👑. Close it and a remaining tab takes over (onDisconnect -> migration).
+3. Reload the page and see the count restored (snapshot restore).
+4. Keep clicking +10 past 100. The request is rejected and only that tab shows the message (reducer validation).
+5. A tab with `?role=dedicated` always stays the host.
+6. A tab with `?role=guest` never becomes the host (but can send requests).
+7. Click the guest/player role buttons to call `setRole`. The self ID stays the same while the host role moves or another tab takes over.
 
 ## Stress mode
 
-counter の加算は適用順が入れ替わっても同じ値になるため、ledger の running hash で
-同時多発 request の順序保証と適用一意性を確認する。
+Counter additions produce the same value in any order, so use the ledger's running
+hash to check the ordering guarantee and exactly-once application of concurrent requests.
 
-1. RTDB emulator と demo を Getting Started の手順で起動する
-2. 同じ `group` のタブを 3 つ以上開く
-3. 各タブで `Storm x50` または `Storm x200` を実行する。全タブを
-   `?storm=200` 付きの同じ URL で開いて自動開始してもよい
-4. storm 終了後、すべての request が静穏化するまで待つ
+1. Start the RTDB emulator and demo by following Getting Started.
+2. Open at least three tabs in the same `group`.
+3. Run `Storm x50` or `Storm x200` in each tab. You can also open every tab at
+   the same URL with `?storm=200` to start automatically.
+4. After the storms finish, wait until all requests settle.
 
-200 件を超えて prune された request は `logs/{groupId}` へ退避され、emulator UI で確認できる。
+Pruned requests beyond the 200-request limit are archived under `logs/{groupId}` and can be checked in the emulator UI.
 
-**全タブの ledger count と hash が完全一致すれば正常**。1 つでも違えば、順序保証か
-適用一意性のバグとして扱う。
+The test passes when **the ledger count and hash match exactly in every tab**. Any
+difference means there is a bug in ordering or exactly-once application.
 
-storm 中にタブを閉じて host migration を混ぜると、dual-host 窓の既知トレードオフ
-(SPEC-0001「設計上の割り切り」) により一時分岐があり得る。バグと判定するのは、
-**host 交代を伴わない安定運用で不一致になった場合だけ**とする。
+Closing a tab during a storm adds host migration. A known tradeoff in the dual-host
+window (SPEC-0001, "Design Tradeoffs") can cause a temporary divergence. Treat a
+mismatch as a bug **only during stable operation without a host change**.

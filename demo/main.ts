@@ -29,26 +29,26 @@ import {
 import { createRig } from './rig'
 
 /**
- * synqux demo: firebase emulator 上で counter を端末間同期する
+ * synqux demo: sync a counter across devices with the Firebase emulator
  *
- * 使い方は demo/README.md 参照。複数タブ (URL の ?role= で役割を変えられる) で
- * 開いて、+/- の反映・host 表示・タブを閉じたときの host migration を確認する
+ * See demo/README.md for instructions. Open it in multiple tabs (use ?role= to
+ * change roles) and check +/- updates, the host display, and migration on tab close.
  */
 
-// ---- firebase (emulator 固定。本物のプロジェクトには接続しない) ----
+// ---- Firebase (always uses the emulator; never connects to a real project) ----
 const app = initializeApp({
   projectId: 'synqux-demo',
-  // SDK の初期化に URL 形式が必要なだけで、実接続は下の emulator へ向く
+  // The SDK needs a URL to initialize, but the connection goes to the emulator below.
   databaseURL: 'https://synqux-demo-default-rtdb.firebaseio.com',
 })
 const db = getDatabase(app)
 connectDatabaseEmulator(db, '127.0.0.1', 9000)
 
-// ---- store 構築 (README の Getting Started と同じ形) ----
+// ---- Store setup (same structure as Getting Started in the README) ----
 const params = new URLSearchParams(window.location.search)
 const groupId = params.get('group') ?? 'demo-room'
 const roleParam = params.get('role')
-// query は型境界の外なので、旧値や typo を PeerRole へ cast せず既定値へ戻す。
+// Query values are untyped, so use the default instead of casting old values or typos.
 const role: PeerRole | undefined =
   roleParam === 'player' || roleParam === 'dedicated' || roleParam === 'guest'
     ? roleParam
@@ -68,8 +68,8 @@ const demoInitialState: DemoState = {
 }
 
 /**
- * createSynquxRootReducer v1 の「synced slice は1個」制約に合わせた合成 reducer。
- * 対象 reducer の result を top-level に写し、host の成否判定を一箇所に保つ。
+ * Combined reducer for createSynquxRootReducer v1's one-synced-slice limit.
+ * Copies the target result to the top level, keeping the host decision in one place.
  */
 const demoReducer: Reducer<DemoState> = (state = demoInitialState, action) => {
   if (isCounterAction(action)) {
@@ -103,8 +103,8 @@ const synqux = createSynqux({
   }),
 })
 
-// TASK-260812 Phase A-2 の計測 rig (`?rig=1` で有効)。middleware は synqux より
-// 前段に置き、transport 由来の内部 action 到着をタブ視点で記録する
+// Measurement rig for TASK-260812 Phase A-2 (enable with `?rig=1`). Place the
+// middleware before synqux to record transport-driven internal actions per tab.
 const rig = createRig(params)
 
 const store = configureStore({
@@ -115,7 +115,7 @@ const store = configureStore({
     }).prepend(...(rig ? [rig.middleware] : []), ...synqux.middlewares),
 })
 
-// ---- UI (依存を増やさないため plain DOM。react を使う場合は synqux/react 参照) ----
+// ---- UI (plain DOM to avoid dependencies; see synqux/react when using React) ----
 const el = (id: string): HTMLElement => document.getElementById(id)!
 
 let stormRunning = false
@@ -127,8 +127,8 @@ const sleep = (milliseconds: number): Promise<void> =>
   new Promise((resolve) => window.setTimeout(resolve, milliseconds))
 
 /**
- * 複数タブから request をばらけさせて送る。再入を防ぎ、1 storm 内の送信数を
- * total に固定することで、画面の sent から各タブの完走も確認できるようにする。
+ * Spread requests from multiple tabs over time. Prevent re-entry and send exactly
+ * `total` per storm, so the on-screen sent count shows whether each tab finished.
  */
 const startStorm = (total: number): void => {
   if (stormRunning || !Number.isInteger(total) || total <= 0) {
@@ -179,7 +179,7 @@ const render = (): void => {
   el('ledger-hash').textContent = state.demo.ledger.hash.slice(0, 8)
   el('ledger-locked').textContent = String(state.demo.ledger.locked)
   el('ledger-sent').textContent = String(stormSent)
-  el('self').textContent = selectSelfId(state) ?? '(接続中...)'
+  el('self').textContent = selectSelfId(state) ?? '(connecting...)'
   el('host').textContent = selectIsHost(state) ? 'HOST 👑' : 'client'
   const peers = selectPeers(state)
   const self = peers.find((peer) => peer.id === selectSelfId(state))
@@ -191,8 +191,8 @@ const render = (): void => {
     )
     .join('')
 
-  // 判定結果は synced state を直読みする (SPEC-public-api の作法)。
-  // message は UI 表示想定データ (ADR-0008)。log 専用の result はここに出さない
+  // Read the decision result directly from synced state (the SPEC-public-api pattern).
+  // Messages are for UI display (ADR-0008). Do not show log-only results here.
   const result = state.demo.result
   el('result').textContent = result?.message
     ? `${result.type}: ${result.message.text}`
@@ -224,14 +224,14 @@ const setRole = async (nextRole: PeerRole): Promise<void> => {
     await synqux.setRole(nextRole)
   } catch (error) {
     console.error(error)
-    el('status').textContent = 'role の変更に失敗しました'
+    el('status').textContent = 'failed to change role'
   }
 }
 el('role-guest').onclick = () => void setRole('guest')
 el('role-player').onclick = () => void setRole('player')
 
-// ---- 同期開始 (presence 登録 → snapshot restore → requests 購読) ----
-// 非 React consumer は instance を手続きで直接購読し、失敗 UX もここで扱う。
+// ---- Start syncing (register presence -> restore snapshot -> subscribe to requests) ----
+// Non-React consumers subscribe to the instance directly and handle failure UX here.
 void synqux
   .subscribe({
     store,
@@ -242,7 +242,7 @@ void synqux
   .then(() => {
     el('status').textContent = 'connected'
 
-    // rig の計測開始も probe の request 生成を含むため subscribe 後に置く
+    // Start the rig after subscribing because its measurements create probe requests.
     rig?.start({
       db,
       groupId,
@@ -256,7 +256,7 @@ void synqux
         synqux.dispatchAndWait(action as DemoAction, options),
     })
 
-    // URL 指定は subscribe 後に開始し、未接続時の request 生成を避ける。
+    // Start URL-configured storms after subscribing to avoid requests while disconnected.
     if (Number.isInteger(stormTotal) && stormTotal > 0) {
       startStorm(stormTotal)
     }
@@ -264,5 +264,5 @@ void synqux
   .catch((error: unknown) => {
     console.error(error)
     el('status').textContent =
-      'emulator に接続できません。demo/README.md の手順で起動してください'
+      'cannot connect to the emulator. Start it by following demo/README.md'
   })

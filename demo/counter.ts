@@ -2,12 +2,12 @@ import type { Action, Reducer } from '@reduxjs/toolkit'
 import { stateWithError, type SynquxSynced } from 'synqux'
 
 /**
- * demo 用の同期対象 slice (counter)
+ * Synced slice for the demo (counter)
  *
- * synqux の作法どおりの普通の reducer:
- * - SynquxSynced を満たす (result を持つ)
- * - validation 失敗は state を変えず stateWithError で result に積む
- * - 現在値に依存しない set 型 action を基本にする (設計ガイドライン 1)
+ * A regular reducer that follows the synqux conventions:
+ * - Implements SynquxSynced (has a result)
+ * - On validation failure, uses stateWithError to set the result without changing state
+ * - Prefer set-style actions that do not depend on the current value (Design Guideline 1)
  */
 export type CounterAction = Action<`counter/${string}`> & {
   payload?: number
@@ -35,17 +35,17 @@ export const counterReducer: Reducer<CounterState> = (
   }
 
   switch (action.type) {
-    // 増分型 = 無限実行型の自覚的な例 (設計ガイドライン 1 の 3 分類)。
-    // demo は同時操作の見た目確認が目的なので、操作回数ぶんの加算を許容する。
+    // Increment-style = an intentional infinitely repeatable action (one of the three
+    // categories in Design Guideline 1). Each operation is added for easy visual checks.
     case 'counter/add': {
       const next = state.count + (action.payload ?? 1)
 
-      // validation は reducer に集約する。範囲外は state を変えず error result を
-      // 積む → host が拒否し、依頼元にだけ通知される (message ありなので画面通知)
+      // Validation lives in the reducer. The host reads this result to reject the
+      // request; only the requester gets notified.
       if (next > MAX || next < MIN) {
         return stateWithError({ ...state }, action, {
           message: {
-            text: `count は ${String(MIN)}〜${String(MAX)} の範囲です`,
+            text: `count must stay between ${String(MIN)} and ${String(MAX)}`,
           },
         })
       }

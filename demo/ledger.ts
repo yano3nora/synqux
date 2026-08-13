@@ -2,10 +2,10 @@ import type { Action, Reducer } from '@reduxjs/toolkit'
 import { stateWithError, type SynquxSynced } from 'synqux'
 
 /**
- * 順序保証を目視検証する同期対象 slice (ledger)
+ * Synced slice for visually checking ordering guarantees (ledger)
  *
- * append の適用列を running hash に畳み込み、同じ action 群でも順序が違えば
- * hash が変わるようにする。lock 中の append は reducer で拒否し、hash に含めない。
+ * Folds the append sequence into a running hash, so a different order changes the
+ * hash. The reducer rejects appends while locked and leaves them out of the hash.
  */
 export type LedgerAction = (
   | (Action<'ledger/append'> & { payload: { by: string; n: number } })
@@ -30,7 +30,7 @@ export const ledgerInitialState: LedgerState = {
 export const isLedgerAction = (action: Action): action is LedgerAction =>
   action.type.startsWith('ledger/')
 
-/** FNV-1a 32bit。符号なし 8 桁 hex に固定し、端末差のない文字列表現にする。 */
+/** FNV-1a 32-bit. Uses a fixed unsigned 8-digit hex string on every device. */
 export const fnv1a = (input: string): string => {
   let hash = 0x811c9dc5
 

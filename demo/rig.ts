@@ -13,49 +13,49 @@ import {
 } from 'firebase/database'
 
 /**
- * TASK-260812 Phase A-2: host 停止の真因計測 rig (demo 専用・build / npm 配布対象外)
+ * TASK-260812 Phase A-2: host stall diagnostic rig (demo only; not built or published)
  *
- * 「非アクティブ放置された host タブで何が止まるのか」を切り分けるための
- * in-memory イベントログ。判定表 (TASK-260812 A-3) に対応する観測点:
+ * An in-memory event log for finding what stops in an inactive host tab.
+ * Observation points correspond to the decision table (TASK-260812 A-3):
  *
- * - tick        : chained timer の実発火間隔 → timer throttling の粒度
+ * - tick        : actual chained timer interval -> timer throttling level
  * - lifecycle   : visibilitychange / freeze / resume / pagehide / pageshow
- * - connected   : Firebase `.info/connected` の遷移 → 接続の生死 (ゾンビ判定)
- * - action      : synqux 内部 action (synqux/requestAdded 等) の到着
- *                 → transport イベント受信が続いているか (freeze との切り分け)
- * - hb-*        : serverTimestamp の定期書き込み probe
- *                 → throttle 下で heartbeat が実際に書ける最悪間隔 (閾値の根拠)
- * - probe-*     : guest 側からの dispatchAndWait 裁定 latency (?probe=<sec>)
- * - host        : 自端末の host 状態の遷移
+ * - connected   : Firebase `.info/connected` changes -> connection health (zombie check)
+ * - action      : arrival of internal synqux actions (such as synqux/requestAdded)
+ *                 -> whether transport events still arrive (to distinguish freezes)
+ * - hb-*        : periodic serverTimestamp write probe
+ *                 -> worst heartbeat write interval under throttling (threshold basis)
+ * - probe-*     : dispatchAndWait decision latency from a guest (?probe=<sec>)
+ * - host        : changes to this device's host state
  *
- * 有効化: `?rig=1` (計測のみ) / `?rig=1&probe=30` (guest の定期 probe つき)。
- * ログは in-memory ring buffer に貯め、dump ボタンで JSON ダウンロードする。
- * tab freeze (chrome://discards) はメモリを保持したまま JS を止めるだけなので、
- * 復帰後の dump に freeze 中の空白がそのまま残る
+ * Enable with `?rig=1` (measurement only) or `?rig=1&probe=30` (periodic guest probe).
+ * Logs are stored in an in-memory ring buffer. Use the dump button to download JSON.
+ * A tab freeze (chrome://discards) stops JS but keeps memory, so the dump after
+ * resuming shows the gap during the freeze.
  */
 
 type RigEntry = {
-  /** 端末時計 (epoch ms)。freeze 中の空白をサーバ時刻に頼らず観測するため */
+  /** Device clock (epoch ms), used to observe freeze gaps without server time. */
   t: number
   kind: string
   detail?: string | number
 }
 
 type RigHandle = {
-  /** synqux middleware より前段に prepend し、内部 action の到着を記録する */
+  /** Prepend before synqux middleware to record incoming internal actions. */
   middleware: Middleware<
     Record<string, never>,
     unknown,
     Dispatch<UnknownAction>
   >
-  /** subscribe 完了後に呼ぶ。timer / lifecycle / connected / probe の計測を開始する */
+  /** Call after subscribe completes to start timer/lifecycle/connection/probe measurements. */
   start: (context: {
     db: Database
     groupId: string
     getSelfId: () => string | null | undefined
     getIsHost: () => boolean
     getPeersDigest: () => string
-    /** guest probe 用。synqux instance の dispatchAndWait をそのまま渡す */
+    /** For the guest probe. Pass the synqux instance's dispatchAndWait directly. */
     dispatchAndWait: (
       action: Action,
       options?: { signal?: AbortSignal },
@@ -85,8 +85,8 @@ export const createRig = (params: URLSearchParams): RigHandle | undefined => {
   log('meta', navigator.userAgent)
   log('meta', location.href)
 
-  // ---- 観測点 4: synqux 内部 action の到着 (transport 配送の生死) ----
-  // demo の synced action (counter/ledger) も記録し「適用が続いているか」も併せて見る
+  // ---- Observation point 4: incoming internal synqux actions (transport health) ----
+  // Also record demo synced actions (counter/ledger) to check whether application continues.
   const middleware: RigHandle['middleware'] = () => (next) => (action) => {
     const type = (action as UnknownAction).type
     if (typeof type === 'string') {
@@ -96,9 +96,9 @@ export const createRig = (params: URLSearchParams): RigHandle | undefined => {
   }
 
   const start: RigHandle['start'] = (context) => {
-    // ---- 観測点 1: timer throttling の粒度 ----
-    // setInterval は throttle 時にまとめ発火し得るため、chained setTimeout で
-    // 「実際に JS が走れた間隔」を測る。ズレ (actual - nominal) を detail に残す
+    // ---- Observation point 1: timer throttling level ----
+    // setInterval may fire in batches when throttled, so chained setTimeout measures
+    // the actual interval when JS could run. Store the drift (actual - nominal) in detail.
     let lastTick = Date.now()
     let lastTickGap = 0
     const tick = (): void => {
@@ -110,24 +110,24 @@ export const createRig = (params: URLSearchParams): RigHandle | undefined => {
     }
     window.setTimeout(tick, TICK_INTERVAL_MS)
 
-    // ---- 観測点 2: Page Lifecycle ----
+    // ---- Observation point 2: Page Lifecycle ----
     document.addEventListener('visibilitychange', () =>
       log('lifecycle', `visibility:${document.visibilityState}`),
     )
-    // freeze / resume は Page Lifecycle API (Chrome)。未対応ブラウザでは発火しないだけ
+    // freeze/resume use the Page Lifecycle API (Chrome) and do not fire in unsupported browsers.
     document.addEventListener('freeze', () => log('lifecycle', 'freeze'))
     document.addEventListener('resume', () => log('lifecycle', 'resume'))
     window.addEventListener('pagehide', () => log('lifecycle', 'pagehide'))
     window.addEventListener('pageshow', () => log('lifecycle', 'pageshow'))
 
-    // ---- 観測点 3: Firebase 接続の生死 ----
+    // ---- Observation point 3: Firebase connection health ----
     onValue(ref(context.db, '.info/connected'), (snapshot) =>
       log('connected', String(snapshot.val())),
     )
 
-    // ---- 観測点 5: heartbeat 書き込み probe ----
-    // Phase B の heartbeat と同じ「タイマー駆動でサーバ時刻を書く」を先取りし、
-    // throttle / freeze 下での最悪書き込み間隔を測る。ack latency も残す
+    // ---- Observation point 5: heartbeat write probe ----
+    // Preview Phase B's timer-driven server-time writes. Measure the worst write
+    // interval under throttling/freezing and record acknowledgement latency.
     const heartbeatRef = (): ReturnType<typeof ref> =>
       ref(
         context.db,
@@ -147,7 +147,7 @@ export const createRig = (params: URLSearchParams): RigHandle | undefined => {
     }
     window.setTimeout(heartbeat, HEARTBEAT_INTERVAL_MS)
 
-    // ---- 観測点 7: 自端末の host 状態遷移 (migration の観測) ----
+    // ---- Observation point 7: this device's host state changes (migration) ----
     let wasHost = context.getIsHost()
     log('host', String(wasHost))
     window.setInterval(() => {
@@ -158,9 +158,9 @@ export const createRig = (params: URLSearchParams): RigHandle | undefined => {
       }
     }, 1_000)
 
-    // ---- 観測点 6: guest probe (裁定 latency の継続測定) ----
-    // counter/add を +1 / -1 交互に送り count を汚さない。拒否 (result error) でも
-    // 「裁定された」事実と latency は取れるため成否は問わない
+    // ---- Observation point 6: guest probe (continuous decision latency) ----
+    // Alternate counter/add between +1 and -1 to preserve the count. Rejected requests
+    // still provide a decision and latency, so success or failure does not matter.
     if (Number.isFinite(probeSeconds) && probeSeconds > 0) {
       const probeIntervalMs = probeSeconds * 1_000
       let probeSign = 1
@@ -170,7 +170,7 @@ export const createRig = (params: URLSearchParams): RigHandle | undefined => {
         try {
           await context.dispatchAndWait(
             { type: 'counter/add', payload: probeSign } as Action,
-            // interval より僅かに短い timeout で「裁定されないまま」を検知する
+            // Use a timeout just below the interval to detect a missing decision.
             { signal: AbortSignal.timeout(probeIntervalMs - 1_000) },
           )
           log('probe-ok', Date.now() - started)

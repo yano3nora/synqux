@@ -2,8 +2,8 @@ import { fileURLToPath } from 'node:url'
 import { defineConfig } from 'vite'
 
 /**
- * demo は publish 前の src を直接読む (dist ビルド不要で API 変更が即反映される)
- * consumer と同じ import 文 (`from 'synqux'`) を保つための alias
+ * The demo reads src directly before publishing (API changes appear without a dist build).
+ * This alias keeps the same imports as consumers (`from 'synqux'`).
  */
 export default defineConfig({
   resolve: {

@@ -1,31 +1,42 @@
 synqux
 ===
 
-Redux (Redux Toolkit) アプリに「クライアントホスト型のリアルタイム端末間同期」を後付けするライブラリ。client の action を「host への request」に変換し、host が reducer の試し実行で成否判定、全端末が host の採番した順序で action を適用することで同期を成立させる。協力型・ターン制の少人数マルチプレイ向け。
+synqux adds client-hosted realtime multi-device sync to Redux (Redux Toolkit) apps. A client's action becomes a "request" to the host device, the host judges it by trial-running your reducer, and every device applies accepted actions in the order the host assigned. Built for small-scale cooperative / turn-based multiplayer.
 
-- **普通の RTK の書き方がそのまま同期される**: 独自ラッパーで reducer を包まない。楽観更新をしないため「画面に出る state = 同期済み state」が常に成立する
-- **reducer が唯一の判定器**: validation は reducer に集約し、host / client / 同期なし (standalone) でロジックが分岐しない
-- **transport 抽象**: core は特定インフラに依存しない。Firebase RTDB adapter (`synqux/firebase`) と決定的な in-memory 実装 (`synqux/testing`) を同梱
-- **停止の検知と自己修復**: 配送欠落などで適用が止まった端末を sync health が検知し、再購読 → snapshot restore の段階回復で自動復帰する。回復不能時だけ consumer にリロード案内を委ねる。requests は適用窓の外が自動 prune され無限成長しない
+## Core Concepts
+
+**Plain RTK is the sync framework.** You write ordinary Redux reducers and dispatch ordinary actions — no wrapper types, no special dispatch API. synqux does not do optimistic updates, so "the state on screen" is always "the synced state"; there is no rollback UI to design.
+
+**The reducer is the only arbiter.** Validation lives in the reducer: on failure it returns the unchanged state plus an error result (`stateWithError`). The host trial-runs the reducer against a request and accepts or rejects it based on that result. Because the reducer is the single source of judgment, the same code runs identically on host, client, and standalone (sync disabled) — no branching logic per role.
+
+**One host, one order.** Each sync group has exactly one host, derived deterministically from the connected peer pool (with automatic migration when the host leaves). The host stamps each accepted request with a sequence number `(epoch, seq)`, and every device applies actions strictly in that order. Rejected requests change nothing; only the requester is notified of the result.
+
+**Synced state vs. local state.** Your root state is split in two: exactly **one synced slice** (shared and arbitrated across devices) and any number of **locals slices** (per-device state such as scenes, UI, sound). Locals reducers can observe synced actions and their outcomes, so per-device presentation follows shared state without being part of it.
+
+**Transport is abstracted.** The core depends only on a small transport interface ("a NoSQL-ish JSON store with realtime push"). A Firebase Realtime Database adapter (`synqux/firebase`) and a deterministic in-memory implementation with fault injection (`synqux/testing`) ship in the box. Consumer tests are deterministic simulations — no emulator required.
+
+**Sync heals itself.** If delivery gaps stall a device, sync health detects it and runs staged recovery automatically: resubscribe, then restore from snapshot. Only when recovery fails does synqux ask the consumer to prompt a reload. The request log is pruned automatically outside the apply window, so it never grows unbounded.
+
+**Game developers learn three rules; setup is one file.** Feature code only needs the [three rules](#three-rules-to-remember) below. Store wiring lives in a single setup file that feature developers never touch.
 
 ## Quick Start
 
 > [!IMPORTANT]
-> synqux は、認証・認可済みの協調的なクライアントを前提とし、改造クライアント・チート・Firebase データの直接改ざんへの耐性は提供しない。敵対クライアントを想定する場合は、判定・採番・永続化を信頼できるサーバへ置くこと。`demo/database.rules.json` は emulator 専用であり、本番へ流用しない。
+> synqux assumes authenticated, cooperative clients. It provides no protection against modified clients, cheating, or direct tampering with Firebase data. If you must assume hostile clients, move arbitration, sequencing, and persistence to a trusted server. `demo/database.rules.json` is for the emulator only — never reuse it in production.
 
-動く完成形は [demo/](./demo/) (firebase emulator + 複数タブで同期を体験できる) にあり、以下は demo と同じ構成を最小手順に分解したもの。
+A working reference lives in [demo/](./demo/) (Firebase emulator + multiple tabs syncing live). The steps below are the same setup, minimized.
 
 ### 1. Install
 
 ```sh
 npm install synqux @reduxjs/toolkit
-# firebase transport を使う場合
+# if you use the firebase transport
 npm install firebase
 ```
 
-### 2. 同期対象 slice を書く
+### 2. Write a synced slice
 
-普通の Redux reducer に「`result` を持つ (`SynquxSynced`)」「validation 失敗は state を変えず `stateWithError` で表現する」の 2 点を足すだけ。成功時の result は root reducer helper が action ごとに自動生成する (全文: [demo/counter.ts](./demo/counter.ts))。
+Take a normal Redux reducer and add two things: the state carries a `result` (`SynquxSynced`), and validation failures return the unchanged state via `stateWithError`. Success results are stamped automatically by the root reducer helper (full source: [demo/counter.ts](./demo/counter.ts)).
 
 ```ts
 import { stateWithError, type SynquxSynced } from 'synqux'
@@ -40,11 +51,11 @@ export const counterReducer: Reducer<CounterState> = (
     case 'counter/add': {
       const next = state.count + (action.payload ?? 1)
 
-      // validation は reducer に集約する。host がこの result を見て request を
-      // 拒否し、依頼元にだけ通知される
+      // Validation lives in the reducer. The host reads this result to
+      // reject the request; only the requester gets notified.
       if (next > 100 || next < 0) {
         return stateWithError({ ...state }, action, {
-          message: { text: 'count は 0〜100 の範囲です' },
+          message: { text: 'count must stay between 0 and 100' },
         })
       }
 
@@ -56,29 +67,24 @@ export const counterReducer: Reducer<CounterState> = (
 }
 ```
 
-### 3. store を配線する
+### 3. Wire the store
 
-セットアップ層はテンプレに 1 ファイル。feature 開発者は触らない (全文: [demo/main.ts](./demo/main.ts))。firebase の匿名認証等は transport 生成前に済ませること。
-
-Firebase RTDB の rules では retention query 用に `requests/$groupId` へ `".indexOn": ["seq"]` を設定することを推奨する。
-Authentication と room membership に基づく read/write 認可は consumer が設計する。匿名認証を行うだけでは、別 room へのアクセスやデータ改ざんを防ぐ認可にはならない。
-prune 後も全量 replay 調査を可能にするには `firebaseTransport(db, { archivePrunedRequests: true })` で削除対象を `logs/` へ退避できる。
-`logs/` は無限成長するため、容量とグループ破棄時の削除は consumer 側で管理する。
+The setup layer is one file in your template; feature developers never touch it (full source: [demo/main.ts](./demo/main.ts)). Finish Firebase auth (e.g. anonymous sign-in) before creating the transport. Production notes for the Firebase transport are in [Usage](#firebase-transport-in-production).
 
 ```ts
 import { configureStore } from '@reduxjs/toolkit'
 import { createSynqux, createSynquxRootReducer } from 'synqux'
 import { firebaseTransport } from 'synqux/firebase'
-import { counterReducer } from './counter'        // 同期対象 (SynquxSynced を満たす)
-import { scenesReducer } from './scenes/reducers'  // 端末ローカル (同期しない slice)
+import { counterReducer } from './counter'        // synced slice (satisfies SynquxSynced)
+import { scenesReducer } from './scenes/reducers'  // local slice (not synced)
 
 export const synqux = createSynqux({
-  transport: firebaseTransport(db),                // 匿名認証等の auth は transport 生成前に済ませる
-  // rootReducer / selectSynced / isSyncedAction が返るので、そのまま config へ spread する
+  transport: firebaseTransport(db),                // finish auth before creating the transport
+  // Returns rootReducer / selectSynced / isSyncedAction — spread as-is into the config.
   ...createSynquxRootReducer({
     isSyncedAction: (a): a is CounterAction => a.type.startsWith('counter/'),
     synced: { counter: counterReducer },
-    locals: { scenes: scenesReducer },             // 宣言順に直列実行、meta.root で前段を読める
+    locals: { scenes: scenesReducer },             // run in declaration order; meta.root exposes earlier stages
   }),
 })
 
@@ -86,32 +92,52 @@ export const store = configureStore({
   reducer: synqux.rootReducer,
   middleware: (gdm) =>
     gdm({
-      serializableCheck: { ignoredActionPaths: ['meta.root'] }, // 必須
+      serializableCheck: { ignoredActionPaths: ['meta.root'] }, // required
     }).prepend(...synqux.middlewares),
 })
 ```
 
-NOTE: `synced` に渡せる slice は**ちょうど 1 つ** (仕様。2 つ以上は throw)。同期したいドメインが複数ある場合は 1 つの reducer に合成し、`result` を top-level に写す。実例は [demo/main.ts](./demo/main.ts) の `demoReducer` (counter と ledger を 1 slice に畳んでいる)。
+NOTE: `synced` accepts **exactly one** slice (by design; two or more throws). If you have multiple domains to sync, compose them into one reducer and lift `result` to the top level. See `demoReducer` in [demo/main.ts](./demo/main.ts), which folds counter and ledger into one slice.
 
-### 4. 同期を開始して動作確認
+### 4. Subscribe and sync
 
 ```ts
-// 起動時に 1 回 (standalone でも呼ぶ。snapshot restore がここで走る)
+// Call once at startup (even in standalone mode — snapshot restore happens here).
 await synqux.subscribe({ store, groupId: 'room-1' })
 
-// タイトル画面では host 候補から外し、参加時に in-place で切り替えられる
-await synqux.setRole('player') // subscribe 時に role: 'guest' で開始した場合
+// Keep title-screen devices out of host candidacy, then switch in place on join.
+await synqux.setRole('player') // when subscribe started with role: 'guest'
 
-// あとは普通に dispatch するだけ。middleware が request 化 → host 裁定 →
-// 全端末が同じ順序で適用、まで面倒を見る (楽観更新なし = 画面が同期済み state)
+// Then just dispatch as usual. The middleware turns it into a request, the
+// host arbitrates, and every device applies in the same order.
+// No optimistic updates — what you render is the synced state.
 store.dispatch({ type: 'counter/add', payload: 1 })
 ```
 
-同じ `groupId` を subscribe した端末 (タブ) すべてで `state.counter.count` が一致すれば成功。手元で試すなら demo が同じ構成なので、`npm run demo:emulator` + `npm run demo` で http://localhost:5173 を複数タブ開くのが早い。
+If `state.counter.count` matches across every device (tab) subscribed to the same `groupId`, it works. The fastest way to try it locally: `npm run demo:emulator` + `npm run demo`, then open http://localhost:5173 in multiple tabs.
 
-### React の購読開始を第一の入口にする
+React apps should subscribe through [`useSynquxSubscription`](#subscribe-from-react) instead of calling `subscribe` by hand.
 
-React consumer は次の 1 行を canonical な入口にする。store は `react-redux` の `useStore()` から取得され、`state.synqux.phase` により StrictMode や多重 mount の二重購読も抑止される。
+### Three rules to remember
+
+1. **Never mutate synced state directly — dispatch actions.** Requests happen automatically; you write plain Redux.
+2. **Validate in the reducer; return `stateWithError` on failure.**
+
+    ```ts
+    if (state.phase !== 'battle') {
+      return stateWithError(state, action, { message: { text: 'not available right now' } })
+    }
+    ```
+
+3. **Read "am I host?" and "who is here?" through selectors / hooks** — `selectIsHost` / `selectPeers` / `selectSelfId`, or with React, `useIsHost` / `usePeers` / `useLatestResult` from `synqux/react`. Reading the result off your own synced state (`state.game.result`) is also fine.
+
+## Usage
+
+Each section starts with the design concept, then the concrete behavior and options.
+
+### Subscribe from React
+
+**Concept.** React consumers get one canonical entry point for starting sync, so StrictMode double-mounts and multiple components racing to subscribe cannot double-subscribe.
 
 ```tsx
 const phase = useSynquxSubscription(synqux, {
@@ -120,99 +146,97 @@ const phase = useSynquxSubscription(synqux, {
 })
 ```
 
-非 React consumer だけが `synqux.subscribe({ store, groupId, ... })` を手続きで呼ぶ。`label` は dedicated 常駐プロセスの識別用で、player 端末では通常使わない。
-接続状態に連動する定型副作用は instance 生成時の callback に寄せられる。
+**Behavior.**
+
+- The store is taken from `react-redux`'s `useStore()`; `state.synqux.phase` guards against duplicate subscriptions.
+- Only non-React consumers call `synqux.subscribe({ store, groupId, ... })` imperatively. `label` identifies dedicated resident processes and is normally unused on player devices.
+- Recurring side effects tied to connection state belong in instance-level callbacks, not per-component effects:
 
 ```ts
 const synqux = createSynqux({
-  // E2E 用 dataset など、phase 監視だけの consumer effect を不要にする
+  // e.g. expose phase for E2E tests without a consumer effect
   onPhaseChanged: (phase) => { document.body.dataset.synquxPhase = phase },
-  // 購読失敗・タイムアウト時の UI 遷移。React consumer では必ず設定する
+  // UI transition on subscribe failure / timeout. Always set this in React consumers.
   onSubscribeFailed: () => showReloadPrompt(),
-  // 自動回復失敗時の UI 遷移。unsubscribe まで一度だけ呼ばれる
+  // UI transition when auto-recovery fails. Called once until unsubscribe.
   onUnrecoverable: () => showReloadPrompt(),
-  // ...transport / reducer 設定
+  // ...transport / reducer config
 })
 ```
 
-standalone (`enabled: false`) は browser では既定で synced state を localStorage に保存・復元する。不要なら `localSnapshots: false`、別の保存先が必要なら `SnapshotStore` 実装を渡す。
+### Handle unrecoverable sync stalls
 
-### ゲーム開発者が覚えること 3 つ
-
-1. **同期 state は直接触るな、action を dispatch しろ** — request 化は自動で起きる。書き方は普通の Redux と同じ
-2. **validation は reducer で、ダメなら `stateWithError` を返せ**
-
-    ```ts
-    if (state.phase !== 'battle') {
-      return stateWithError(state, action, { message: { text: 'いまは実行できません' } })
-    }
-    ```
-
-3. **host か・誰がいるかは selector / hooks で読め** — `selectIsHost` / `selectPeers` / `selectSelfId`、react なら `synqux/react` の `useIsHost` / `usePeers` / `useLatestResult`。判定結果は自分の synced state (`state.game.result`) を直接読んでもよい
-
-### 自動回復できなかった同期停止でリロードを案内する
+**Concept.** When a device detects a gap in applied sequence numbers, synqux recovers on its own: resubscribe to requests, then restore from snapshot. The consumer only owns the last resort — telling the user to reload.
 
 ```tsx
-const unrecoverable = useIsSyncUnrecoverable() // react なしなら selectIsSyncUnrecoverable(store.getState())
+const unrecoverable = useIsSyncUnrecoverable() // without React: selectIsSyncUnrecoverable(store.getState())
 
 useEffect(() => {
   if (
     unrecoverable &&
-    window.confirm('同期が停止しました。リロードして復帰しますか?')
+    window.confirm('Sync has stopped. Reload to recover?')
   ) {
     window.location.reload()
   }
 }, [unrecoverable])
 ```
 
-seq gap は検知後、requests 再購読 → snapshot restore で自動回復を試みる。1 巡しても戻らない `unrecoverable` のときだけリロードを案内する。`useIsSyncStalled` は回復中を含む進行表示に使える。UI 文言と通知・リロードの発火方法は consumer が決める。
+**Behavior.**
 
-consumer のテストは `synqux/testing` を使う。`createMemoryHub()` (fault injection つき決定的 in-memory transport) と、mode 宣言つきの `assertActionIdempotency()` (set 型は `'idempotent'`、execute-once 型は `'rejects-repeat'`、意図的な無限実行型は `'repeatable'` で明示除外) を提供する。action 設計ガイドラインと同期不具合の調査手順は [SPEC-0001](./docs/SPEC-0001-requests-sync.md) を参照。
+- `unrecoverable` turns true only after one full recovery cycle fails. Prompt a reload then, and only then.
+- `useIsSyncStalled` covers "stalled, including while recovering" — use it for progress indicators.
+- Wording, notification style, and how to trigger the reload are the consumer's choice.
 
-### サーバ時刻で機能を組む (`action.meta.dispatched`)
+### Use server time in reducers (`action.meta.dispatched`)
 
-「N 秒経過で解禁」「日付切替」などの時刻依存ロジックは、端末時計を読むと端末ごとに判定がズレて同期が壊れる (reducer 内の `Date.now()` は決定性違反として dev モードで検出される)。代わりに **synqux が action へ焼き込む `meta.dispatched` を読む**。同期経路では request 化の時点で transport のサーバ基準時刻 (`serverNow()`) に上書きされるため、全端末が同じ時刻で判定できる。
+**Concept.** Time-based logic ("unlocks after N seconds", "day rollover") breaks sync if each device reads its own clock — `Date.now()` inside a reducer is a determinism violation (detected in dev mode). Instead, read the timestamp synqux burns into the action: every device and the host's trial run see the same value.
 
 ```ts
 case 'game/harvest': {
-  // dispatched はサーバ基準時刻 (ms)。全端末・host の試し実行で同一値になる
+  // dispatched is server-based time (ms) — identical on every device and in the host's trial run
   const now = action.meta?.dispatched ?? 0
 
   if (now - state.plantedAt < GROW_MS) {
-    return stateWithError(state, action, { message: { text: 'まだ育っていません' } })
+    return stateWithError(state, action, { message: { text: 'not grown yet' } })
   }
   // ...
 }
 ```
 
-- reducer が読んでよい meta は `requestedBy` / `dispatched` のみ (SPEC-0002)
-- パフォーマンス: firebase transport の `serverNow()` は `.info/serverTimeOffset` を接続時に購読・キャッシュするため、request ごとの取得は `Date.now() + offset` の O(1)。往復は発生しない
-- 注意: standalone (`enabled: false`) や `setEnabled(false)` 中の local 適用では `dispatched` は端末時計 (`Date.now()`) になる。単独端末なので判定は壊れないが、「サーバ基準」が保証されるのは同期経路のみ
+**Behavior.**
 
-### tutorial などで同期を一時的に止める (`setEnabled`)
+- On the sync path, `meta.dispatched` is overwritten at request time with the transport's server-based clock (`serverNow()`).
+- The only meta fields a reducer may read are `requestedBy` and `dispatched` (SPEC-0002).
+- Performance: the firebase transport subscribes to `.info/serverTimeOffset` once at connection and caches it, so `serverNow()` is `Date.now() + offset` — O(1), no round trip per request.
+- Caveat: in standalone mode (`enabled: false`) or while `setEnabled(false)`, `dispatched` falls back to the device clock. A single device can't disagree with itself, but "server-based" is only guaranteed on the sync path.
 
-`synqux.actions.setEnabled(false)` は**送信ゲート**で、synced action を request 化せず local にのみ即時適用する (永続化もしない)。tutorial のような「本番の同期 state を汚さず、同じ reducer で local 完結に遊ぶ」用途のための機能で、受信・host 責務は止まらない。
+### Pause syncing for tutorials (`setEnabled`)
+
+**Concept.** A tutorial wants to run the same reducers locally without polluting the real synced state. `setEnabled(false)` is a **send gate**: synced actions skip request creation and apply locally, immediately, without persistence.
 
 ```ts
-store.dispatch(synqux.actions.setEnabled(false)) // tutorial 開始 (以降 local 完結)
-store.dispatch({ type: 'game/reset' })          // tutorial 用の初期化も普通の action で
-// ... tutorial 進行 (dispatch はすべて local 適用) ...
+store.dispatch(synqux.actions.setEnabled(false)) // tutorial starts (local-only from here)
+store.dispatch({ type: 'game/reset' })          // tutorial setup is a plain action too
+// ... tutorial plays out; every dispatch applies locally ...
 ```
 
-- 前提: **同期グループに他端末がいない / 動いていない状況で使う**。グループが動いていると remote 適用が local 乖離に混ざり、自端末が host の場合は乖離した state を土台に裁定・snapshot 保存されて同期 state (正史) 自体が汚染される
-- 復帰: `setEnabled(true)` に戻しても off 中の local 乖離は残るため、**tutorial 終了はリロード相当 (新しい store で `subscribe` し直す) で snapshot の正史へ戻す**のが正しい手順
-- 詳細な契約は [SPEC-0001](./docs/SPEC-0001-requests-sync.md) の「setEnabled の契約」を参照
+**Behavior.**
 
-### タイマーや状態条件で自動 dispatch する (`automations`)
+- Only sending stops. Receiving and host duties keep running.
+- Precondition: **use it while no other device in the group is active.** If the group is live, remote applies interleave with your local divergence — and if you are the host, you arbitrate and snapshot on top of diverged state, corrupting the canonical synced state.
+- Returning: flipping back to `setEnabled(true)` does not erase local divergence. End the tutorial with the equivalent of a reload — a fresh store and a new `subscribe` — to return to the snapshot's canonical history.
+- Full contract: [SPEC-0001](./docs/SPEC-0001-requests-sync.md), "setEnabled".
 
-「開始 10 分後に強制終了」「この状態になったら即 action」のような非ユーザー起点の発火を useEffect + setTimeout で書くと、全端末が同時に request を投げる (fan-out) 上に、push 失敗で 1 度きりの発火を取りこぼす。`automations` に rule を書くと **host だけ**が評価し、条件が消えるまで retry する (ADR-0015)。
+### Auto-dispatch on timers or state conditions (`automations`)
+
+**Concept.** Non-user-initiated dispatches ("force finish 10 minutes after start", "fire as soon as state X holds") written as `useEffect` + `setTimeout` fan out from every device at once, and a failed push loses a fire-once event forever. An automation rule is evaluated by **the host only**, and retried until its condition clears (ADR-0015).
 
 ```ts
 const synqux = createSynqux({
   transport,
   automations: [{
     id: 'force-finish',
-    // 契約: action が適用されたら when が false に戻ること (自己終了)
+    // Contract: applying the action must make `when` false again (self-terminating).
     when: (s, { now }) => s.phase === 'playing' && now - s.startedAt > 10 * 60_000,
     action: () => ({ type: 'game/finishGame' }),
   }],
@@ -220,31 +244,79 @@ const synqux = createSynqux({
 })
 ```
 
-- `when` が読めるのは synced state とサーバ時刻だけ。端末ローカルな演出状態や locals をゲートにはできない (型で遮断)
-- engine は exactly-once を保証しない (dual-host 窓で二重発行があり得る)。action は reducer 側で 2 回目を拒否できる形にし (`assertActionIdempotency` の `'rejects-repeat'`)、retry の拒否は `stateWithError` の message なし (log 専用) にすると UI ノイズが出ない
-- host migration があっても新 host が state から同じ結論を導くため、引き継ぎ処理は不要。tutorial (`setEnabled(false)`) 中も評価は続くので、止めたい rule は `when` の述語 (synced 上の tutorial フラグ等) で制御する
+**Behavior.**
 
-### 適用完了を待つ (`dispatchAndWait`)
+- Evaluated at two points: **right after each synced action applies**, and **every `retryMs` (default 1000ms)**. While `when` stays true, the action is re-issued every `retryMs`.
+- `when` sees only synced state and server time. Local presentation state and locals are unavailable by design (blocked at the type level).
+- The engine does not guarantee exactly-once (a dual-host window can double-fire). Make the reducer reject the second application (`assertActionIdempotency` mode `'rejects-repeat'`), and use a message-less `stateWithError` (log-only) for retry rejections to avoid UI noise.
+- Host migration needs no handoff: the new host derives the same conclusion from state. Evaluation continues during tutorials (`setEnabled(false)`) — gate rules you want paused via a predicate on synced state (e.g. a tutorial flag).
 
-同期時の `store.dispatch` は request の transport 書き込みまでしか表さない。thunk で「reset が適用されてから次へ進む」のような待ち合わせは `dispatchAndWait` を使う。
+### React to applied actions (`listeners`)
+
+**Concept.** "Notify an external system when this synced action applies (host only)" or "play a sound / log analytics on every device" — hand-writing these as RTK listeners behind the synqux middleware makes every consumer re-solve ordering, restore-replay resends, and host gating. A listener rule fires at the point of application, with those three handled by the engine (ADR-0017).
+
+```ts
+const synqux = createSynqux({
+  transport,
+  listeners: [{
+    id: 'report-progress',
+    mode: 'host-only', // external notification fires on the host device only
+    match: (action) => action.type === 'game/finishPhase',
+    effect: (_action, { synced }) => reportProgress(synced.phase),
+  }, {
+    id: 'play-draw-sound',
+    mode: 'everyone', // presentation / logging fires on each applying device
+    match: (action) => action.type === 'game/drawCard',
+    effect: (action) => playSound(action.payload.card),
+  }],
+  // ...
+})
+```
+
+**Behavior.**
+
+- Fires right after this device **actually applies** a synced action — but only while `phase === 'live'`. Past actions re-applied during restore replay do not fire. Effects are fire-and-forget and never block application.
+- Contrast with automations: automations act **before** application (host derives the next action from a state predicate); listeners act **after** (reacting to an applied action). Effects receive no `dispatch` — if you want the next synced action, use automations; if you want local state to follow synced state, use `extraReducers` in a locals reducer.
+- Not exactly-once (host handover can double-fire or drop). Write effects idempotently. Rejected requests never apply, so they never fire.
+
+### Wait for a dispatch to apply (`dispatchAndWait`)
+
+**Concept.** On the sync path, `store.dispatch` only means "the request was written to the transport". When a thunk needs "proceed after the reset has applied", use `dispatchAndWait`.
 
 ```ts
 const result = await synqux.dispatchAndWait(
   { type: 'game/resetGameState' },
   { signal: AbortSignal.timeout(5000) },
 )
-if (result.type === 'error') { /* 拒否された */ }
+if (result.type === 'error') { /* rejected */ }
 ```
 
-- 契約は「**自端末**での裁定結果の処理完了まで」。全端末への適用完了は分散システム上保証できない
-- success / error (拒否) いずれも Result で resolve する。reject は signal abort / unsubscribe のみ。timeout は `AbortSignal.timeout()` 等で consumer が選ぶ
+**Behavior.**
 
-### useSelector / useDispatch の型補完
+- The contract is "until **this device** finishes processing the verdict". Apply-on-every-device cannot be guaranteed in a distributed system.
+- Both success and error (rejection) resolve with a Result. It rejects only on signal abort or unsubscribe; pick your own timeout via `AbortSignal.timeout()` etc.
 
-synqux 固有の仕組みは不要で、Redux 公式の [`.withTypes<>()` パターン](https://redux.js.org/usage/usage-with-typescript#define-typed-hooks)がそのまま使える。RootState は `synqux.rootReducer` から導出すると synqux 内部 slice (`state.synqux`) も含めて型が合う。
+### Run without sync (standalone)
+
+**Concept.** Standalone mode (`enabled: false`) runs the exact same reducers and dispatch flow on a single device, so a solo mode or an offline title screen needs no separate code path.
+
+**Behavior.**
+
+- In browsers, synced state persists to localStorage by default and restores on the next `subscribe`.
+- Pass `localSnapshots: false` to disable, or your own `SnapshotStore` implementation for a different backend.
+
+### Firebase transport in production
+
+- In your RTDB rules, set `".indexOn": ["seq"]` on `requests/$groupId` for the retention query.
+- Design read/write authorization from Authentication and room membership yourself. Anonymous auth alone does not prevent access to other rooms or data tampering.
+- To keep full replay data after pruning, `firebaseTransport(db, { archivePrunedRequests: true })` moves pruned requests to `logs/`. `logs/` grows unbounded — the consumer owns its size and its deletion when a group is discarded.
+
+### Typed `useSelector` / `useDispatch`
+
+Nothing synqux-specific: Redux's official [`.withTypes<>()` pattern](https://redux.js.org/usage/usage-with-typescript#define-typed-hooks) works as-is. Derive RootState from `synqux.rootReducer` so the internal slice (`state.synqux`) is typed too.
 
 ```ts
-// hooks.ts (setup 層に 1 回だけ)
+// hooks.ts (once, in the setup layer)
 import { useDispatch, useSelector } from 'react-redux'
 import type { store, synqux } from './store'
 
@@ -254,128 +326,135 @@ export type AppDispatch = typeof store.dispatch
 export const useAppSelector = useSelector.withTypes<RootState>()
 export const useAppDispatch = useDispatch.withTypes<AppDispatch>()
 
-// ゲーム開発者はこちらを使う (state.counter が補完される)
+// Feature developers use these (s.counter is fully typed)
 const count = useAppSelector((s) => s.counter.count)
 ```
 
-`synqux/react` の hooks (`useIsHost` / `useLatestResult` 等) は Provider 経由で型解決するため、この配線がなくても動く。
+The `synqux/react` hooks (`useIsHost` / `useLatestResult` etc.) resolve types through the Provider and work without this wiring.
+
+### Test your consumer (`synqux/testing`)
+
+- `createMemoryHub()` — a deterministic in-memory transport hub with fault injection (duplicate / delay / drop / subscription cutoff), for simulation tests of your slices and flows.
+- `assertActionIdempotency()` — an action idempotency harness with explicit mode declarations: `'idempotent'` for set-style actions, `'rejects-repeat'` for execute-once actions, `'repeatable'` to explicitly exempt intentionally repeatable ones.
+- Action design guidelines and the sync-debugging playbook are in [SPEC-0001](./docs/SPEC-0001-requests-sync.md).
 
 ## API Reference
 
-公開 API の境界・型シグネチャ・提供しない理由の正は [SPEC-0002](./docs/SPEC-0002-public-api.md)。ここは全 export の一覧と一言説明のみ (公開 surface は `src/index.test.ts` の回帰テストで固定しており、この表と SPEC-0002 は増減とセットで更新する)。
+The authority on API boundaries, type signatures, and what is deliberately not provided is [SPEC-0002](./docs/SPEC-0002-public-api.md). This section is only the full export list with one-line descriptions (the public surface is pinned by regression tests in `src/index.test.ts`; update this table and SPEC-0002 together with any change).
 
 ### `synqux` (main entry)
 
-セットアップ層 (テンプレの setup 1 ファイルだけが触る):
+Setup layer (touched only by the single setup file in your template):
 
-| export | 説明 |
+| export | description |
 | --- | --- |
-| `createSynqux(config)` | 同期 instance を生成する。`middlewares` / `rootReducer` / `reducer` / `subscribe` / `setRole` / `dispatchAndWait` / `actions.setEnabled` / `selectSynced` を返す |
-| `createSynquxRootReducer({ isSyncedAction, synced, locals })` | 「synced は純粋、locals は前段参照」の直列 rootReducer helper。synced action へ default success result を自動 stamp する (ADR-0013)。返り値 (`rootReducer` / `selectSynced` / `isSyncedAction`) をそのまま `createSynqux` config へ spread する |
-| `localStorageSnapshotStore()` | standalone の browser 既定永続化実装。`localSnapshots` へ渡して明示的に利用・差し替えもできる |
-| `synquxReducer` | 予約 key `state.synqux` に mount する内部 slice reducer (primitive 方式用) |
-| `synquxRestored` | snapshot restore の内部 action。primitive 方式の rootReducer で match して synced を全量差し替える (**consumer からの dispatch は禁止**) |
-| `SYNQUX_VERSION` / `SYNQUX_SCHEMA_VERSION` | パッケージ version / wire format (封筒) の形式 version |
+| `createSynqux(config)` | Creates a sync instance. Returns `middlewares` / `rootReducer` / `reducer` / `subscribe` / `setRole` / `dispatchAndWait` / `actions.setEnabled` / `selectSynced` |
+| `createSynquxRootReducer({ isSyncedAction, synced, locals })` | Serial rootReducer helper ("synced is pure, locals see earlier stages"). Auto-stamps a default success result on synced actions (ADR-0013). Spread the return value (`rootReducer` / `selectSynced` / `isSyncedAction`) into the `createSynqux` config |
+| `localStorageSnapshotStore()` | Default browser persistence for standalone mode. Pass to `localSnapshots` to use or replace explicitly |
+| `synquxReducer` | Internal slice reducer mounted at the reserved key `state.synqux` (for the primitive wiring style) |
+| `synquxRestored` | Internal snapshot-restore action. Match it in a primitive-style rootReducer to swap in the full synced state (**never dispatch from a consumer**) |
+| `SYNQUX_VERSION` / `SYNQUX_SCHEMA_VERSION` | Package version / wire format (envelope) schema version |
 
-reducer ヘルパー (ゲーム開発者層。同期・standalone によらず同じ書き方):
+Reducer helpers (game-developer layer; identical with or without sync):
 
-| export | 説明 |
+| export | description |
 | --- | --- |
-| `createSyncedActionMatchers({ isSyncedAction, selectSynced })` | locals reducer で「適用 action が成功したか / 自分の依頼か」を判定する type guard (`isSucceededAction` / `isMySucceededAction`) を返す。`createSynquxRootReducer` の返り値をそのまま渡せる。synced reducer では使用禁止 |
-| `isSynquxAction(action)` | listener / middleware で synqux 内部 action を除外する。prefix の直接判定を避ける |
-| `isResultForPeer(result, peerId)` | result が全員宛てまたは指定 peer 宛てかを `targets` の契約どおり判定する |
-| `stateWithError(state, action, option?)` | validation 失敗を表明する。state を変えず error result を積む。`message` なしなら log 専用の拒否 (dispatch 省略) |
-| `stateWithResult(state, result)` | 任意の result (success + message 等) を積む |
-| `stateWithTransaction(state, mutate)` | mutate 内の複数変更を一括適用し、途中で error result が積まれたら**全変更を巻き戻して** error だけを残す。state 全体をコピーするため高頻度 action には使わない |
-| `stateWithDefaultResult(state, action)` | action 自身の default success result を immutable に載せる。`createSynquxRootReducer` 利用時は自動。primitive 方式では synced reducer の前段で必ず呼ぶ (ADR-0013) |
-| `generateResult(props)` | result object の生成 (上記 helper の低レベル材料) |
+| `createSyncedActionMatchers({ isSyncedAction, selectSynced })` | Returns type guards (`isSucceededAction` / `isMySucceededAction`) for locals reducers to check "did the applied action succeed / was it my request". Accepts the return value of `createSynquxRootReducer` as-is. Forbidden inside synced reducers |
+| `isSynquxAction(action)` | Excludes synqux-internal actions in listeners / middleware. Avoids direct prefix checks |
+| `isResultForPeer(result, peerId)` | Checks whether a result targets everyone or the given peer, per the `targets` contract |
+| `stateWithError(state, action, option?)` | Declares a validation failure: stacks an error result without changing state. Without `message`, the rejection is log-only (no dispatch to the requester) |
+| `stateWithResult(state, result)` | Stacks an arbitrary result (e.g. success + message) |
+| `stateWithTransaction(state, mutate)` | Applies multiple changes in `mutate` as a unit; if an error result is stacked midway, **all changes roll back** and only the error remains. Copies the whole state — avoid for high-frequency actions |
+| `stateWithDefaultResult(state, action)` | Immutably stamps the action's own default success result. Automatic with `createSynquxRootReducer`; in the primitive style, call it first in the synced reducer (ADR-0013) |
+| `generateResult(props)` | Builds a result object (low-level material for the helpers above) |
 
-selector (instance 不要の静的関数。react なしでも使える):
+Selectors (static functions, no instance needed, usable without React):
 
-| export | 説明 |
+| export | description |
 | --- | --- |
-| `selectIsHost(root)` | 自端末が host か |
-| `selectPeers(root)` / `selectSelfId(root)` | 接続端末一覧 / 自端末 id |
-| `selectSelf(root)` / `selectSelfRole(root)` | 自端末 Peer / 正規化済み role |
-| `selectSyncPhase(root)` / `selectIsLive(root)` | 初期 restore 中とライブ配信中の区別 / live 判定 |
-| `selectSyncHealth(root)` | 同期健全性 (`phase` ほか) |
-| `selectIsSyncStalled(root)` | 適用停滞中か (自動回復中を含む進行表示向け) |
-| `selectIsSyncUnrecoverable(root)` | 自動回復に失敗したか (リロード案内向け) |
+| `selectIsHost(root)` | Whether this device is the host |
+| `selectPeers(root)` / `selectSelfId(root)` | Connected peers / this device's id |
+| `selectSelf(root)` / `selectSelfRole(root)` | This device's Peer / normalized role |
+| `selectSyncPhase(root)` / `selectIsLive(root)` | Distinguish initial restore from live streaming / live check |
+| `selectSyncHealth(root)` | Sync health (`phase` and more) |
+| `selectIsSyncStalled(root)` | Whether application is stalled (includes auto-recovery; for progress UI) |
+| `selectIsSyncUnrecoverable(root)` | Whether auto-recovery failed (for reload prompts) |
 
-型 (契約型はすべて main entry から export):
+Types (all contract types are exported from the main entry):
 
-| export | 説明 |
+| export | description |
 | --- | --- |
-| `SynquxSynced<TAction, TMessage>` | 同期対象 slice の型契約 (`result` を持つ) |
-| `Result` / `ResultMessage` | reducer が書き host が読む成否判定と、その UI 表示データ |
-| `SynquxActionMeta` | synqux が action へ載せる meta (reducer が読んでよいのは `requestedBy` / `dispatched` のみ) |
-| `Peer` / `PeerRole` | 接続端末と役割 (`player` / `dedicated` / `guest`)。guest も request 発行は可能 |
-| `SynquxHealth` / `SynquxPhase` | 同期健全性 / 購読進行 phase |
-| `Synqux` / `CreateSynquxConfig` / `SynquxSubscribeOptions` | `createSynqux` の返り値 / config / `subscribe` オプション |
-| `SynquxAutomation` | `automations` config の rule 型 (host 駆動の自動 dispatch、ADR-0015) |
-| `SynquxRootState` / `SynquxState` / `PendingRequest` | rootReducer の合成 state / 内部 slice の state と pending request |
-| `SynquxTransport` / `RequestEnvelope` | transport 抽象と request 封筒 (adapter 実装者向け契約) |
-| `SnapshotStore` / `SnapshotFence` / `SnapshotEnvelope` | snapshot 永続化の契約 (fence つき条件付き書き込み) |
-| `Unsubscribe` | 購読解除関数 |
+| `SynquxSynced<TAction, TMessage>` | Type contract for the synced slice (carries `result`) |
+| `Result` / `ResultMessage` | The verdict a reducer writes and the host reads, and its UI display data |
+| `SynquxActionMeta` | Meta synqux attaches to actions (reducers may read only `requestedBy` / `dispatched`) |
+| `Peer` / `PeerRole` | Connected device and role (`player` / `dedicated` / `guest`). Guests can also issue requests |
+| `SynquxHealth` / `SynquxPhase` | Sync health / subscription phase |
+| `Synqux` / `CreateSynquxConfig` / `SynquxSubscribeOptions` | `createSynqux` return value / config / `subscribe` options |
+| `SynquxAutomation` | Rule type for the `automations` config (host-driven auto dispatch, ADR-0015) |
+| `SynquxListener` | Rule type for the `listeners` config (live-only reactions to applied synced actions, ADR-0017) |
+| `SynquxRootState` / `SynquxState` / `PendingRequest` | Composed rootReducer state / internal slice state and pending request |
+| `SynquxTransport` / `RequestEnvelope` | Transport abstraction and request envelope (contract for adapter authors) |
+| `SnapshotStore` / `SnapshotFence` / `SnapshotEnvelope` | Snapshot persistence contract (fenced conditional writes) |
+| `Unsubscribe` | Unsubscribe function |
 
 ### `synqux/react`
 
-| export | 説明 |
+| export | description |
 | --- | --- |
-| `SynquxProvider` | hooks の解決コンテキスト。`createSynqux` の返り値を `sync` prop に渡す |
-| `useIsHost()` / `usePeers()` / `useSelfId()` | selector 群の hooks 版 |
-| `useSelf()` / `useSelfRole()` | 自端末 Peer / 正規化済み role |
-| `useSyncPhase()` / `useIsLive()` | 初期 restore 中とライブ配信中の区別 / live 判定 |
-| `useSyncHealth()` / `useIsSyncStalled()` / `useIsSyncUnrecoverable()` | 同期健全性の hooks 版 |
-| `useLatestResult()` | 最新の result を読む (toast 等の通知向け。synced state の直読みでも可) |
-| `useMyLatestResult()` | 最新 result が全員宛てまたは自端末宛ての場合だけ返す |
-| `useSynquxSubscription(synqux, options)` | React consumer の購読開始の canonical な入口。store は `useStore()` から取得し、phase で二重購読を防ぐ |
+| `SynquxProvider` | Resolution context for the hooks. Pass the `createSynqux` return value as the `sync` prop |
+| `useIsHost()` / `usePeers()` / `useSelfId()` | Hook versions of the selectors |
+| `useSelf()` / `useSelfRole()` | This device's Peer / normalized role |
+| `useSyncPhase()` / `useIsLive()` | Distinguish initial restore from live streaming / live check |
+| `useSyncHealth()` / `useIsSyncStalled()` / `useIsSyncUnrecoverable()` | Hook versions of sync health |
+| `useLatestResult()` | Reads the latest result (for toasts etc.; reading synced state directly is also fine) |
+| `useMyLatestResult()` | Returns the latest result only if it targets everyone or this device |
+| `useSynquxSubscription(synqux, options)` | Canonical subscription entry for React consumers. Gets the store from `useStore()` and prevents double subscription via phase |
 
 ### `synqux/testing`
 
-| export | 説明 |
+| export | description |
 | --- | --- |
-| `createMemoryHub()` | fault injection (重複 / 遅延 / ドロップ / 購読打ち切り) つきの決定的 in-memory transport hub。consumer の simulation test 向け |
-| `assertActionIdempotency(...)` / `verifyActionIdempotency(...)` | mode 宣言つき action 冪等性ハーネス (`idempotent` / `rejects-repeat` / `repeatable`) の assert 版 / report 版 |
-| `MemoryHub` / `FaultTarget` / `IdempotencyReport` | 上記の型 |
+| `createMemoryHub()` | Deterministic in-memory transport hub with fault injection (duplicate / delay / drop / subscription cutoff), for consumer simulation tests |
+| `assertActionIdempotency(...)` / `verifyActionIdempotency(...)` | Action idempotency harness with mode declarations (`idempotent` / `rejects-repeat` / `repeatable`) — assert / report variants |
+| `MemoryHub` / `FaultTarget` / `IdempotencyReport` | Types for the above |
 
 ### `synqux/firebase`
 
-| export | 説明 |
+| export | description |
 | --- | --- |
-| `firebaseTransport(db, options?)` | Firebase RTDB adapter。`options.archivePrunedRequests` で prune 対象を `logs/` へ退避 |
+| `firebaseTransport(db, options?)` | Firebase RTDB adapter. `options.archivePrunedRequests` moves pruned requests to `logs/` |
 
 ## Development
-- node 20+ (開発は mise で 24 系を pin)
-- peerDependencies: `@reduxjs/toolkit` ^2 / optional: `react` 18+, `react-redux` 9+ (synqux/react 利用時), `firebase` 9+ (synqux/firebase 利用時)
-- demo の emulator 実行のみ Java が必要
+- node 20+ (development pins node 24 via mise)
+- peerDependencies: `@reduxjs/toolkit` ^2 / optional: `react` 18+, `react-redux` 9+ (for synqux/react), `firebase` 9+ (for synqux/firebase)
+- Java is required only for running the demo emulator
 
 ### Structure
 ```
 .
 ├ src/
-│ ├ core/       … transport 非依存の同期ステートマシン (main entry)
+│ ├ core/       … transport-agnostic sync state machine (main entry)
 │ ├ firebase/   … Firebase RTDB adapter (synqux/firebase)
-│ ├ react/      … 読み取り hooks (synqux/react)
-│ └ testing/    … in-memory transport / 冪等性ハーネス (synqux/testing)
-├ demo/         … firebase emulator での手動同期確認 (npm 配布対象外。型検査のみ npm test に含む)
-├ docs/         … 仕様と意思決定の記録 (SPEC / ADR / TASK)
-└ mise.toml     … Toolchain (node pin, git hooks)
+│ ├ react/      … read-only hooks (synqux/react)
+│ └ testing/    … in-memory transport / idempotency harness (synqux/testing)
+├ demo/         … manual sync check on the firebase emulator (not published; type-checked by npm test)
+├ docs/         … specs and decision records (SPEC / ADR / TASK)
+└ mise.toml     … toolchain (node pin, git hooks)
 ```
 
-- 仕様の正: [SPEC-0001-requests-sync](./docs/SPEC-0001-requests-sync.md) (仕組み・不変条件・既知の問題)
-- API 境界: [SPEC-0002-public-api](./docs/SPEC-0002-public-api.md)
-- 設計判断: [ADR-0001](./docs/ADR-0001-design.md) (全体設計) / [ADR-0002](./docs/ADR-0002-host-seq.md) (host 採番 seq) / [ADR-0003](./docs/ADR-0003-sync-health.md) (stall 検知) / [ADR-0004](./docs/ADR-0004-sync-auto-recovery.md) (自動回復) / [ADR-0005](./docs/ADR-0005-requests-retention.md) (retention) / [ADR-0006](./docs/ADR-0006-presence-reregistration.md) (presence 再登録) / [ADR-0007](./docs/ADR-0007-action-repeat-contract.md) (action repeat contract) / [ADR-0008](./docs/ADR-0008-result-envelope-reshape.md) (Result / wire v3) / [ADR-0009](./docs/ADR-0009-trust-model.md) (trust model) / [ADR-0010](./docs/ADR-0010-response-immutability-and-fork-survival.md) (response 凍結再送) / [ADR-0011](./docs/ADR-0011-snapshot-fencing.md) (snapshot fencing) / [ADR-0012](./docs/ADR-0012-transport-failure-and-abort.md) (失敗通知 / abort)
+- Spec authority: [SPEC-0001-requests-sync](./docs/SPEC-0001-requests-sync.md) (mechanism, invariants, known issues)
+- API boundary: [SPEC-0002-public-api](./docs/SPEC-0002-public-api.md)
+- Decisions: [ADR-0001](./docs/ADR-0001-design.md) (overall design) / [ADR-0002](./docs/ADR-0002-host-seq.md) (host-assigned seq) / [ADR-0003](./docs/ADR-0003-sync-health.md) (stall detection) / [ADR-0004](./docs/ADR-0004-sync-auto-recovery.md) (auto recovery) / [ADR-0005](./docs/ADR-0005-requests-retention.md) (retention) / [ADR-0006](./docs/ADR-0006-presence-reregistration.md) (presence re-registration) / [ADR-0007](./docs/ADR-0007-action-repeat-contract.md) (action repeat contract) / [ADR-0008](./docs/ADR-0008-result-envelope-reshape.md) (Result / wire v3) / [ADR-0009](./docs/ADR-0009-trust-model.md) (trust model) / [ADR-0010](./docs/ADR-0010-response-immutability-and-fork-survival.md) (frozen response resend) / [ADR-0011](./docs/ADR-0011-snapshot-fencing.md) (snapshot fencing) / [ADR-0012](./docs/ADR-0012-transport-failure-and-abort.md) (failure notification / abort)
 
 ### Getting Started
 ```sh
-mise install     # node の pin
+mise install     # pin node
 mise trust
-mise run provision  # git hooks 生成 + npm ci
+mise run provision  # generate git hooks + npm ci
 
-# demo (firebase emulator で同期確認、詳細は demo/README.md)
-npm run demo:emulator  # terminal 1: RTDB emulator (Java 必須)
-npm run demo           # terminal 2: http://localhost:5173 を複数タブで
+# demo (sync check on the firebase emulator; see demo/README.md)
+npm run demo:emulator  # terminal 1: RTDB emulator (requires Java)
+npm run demo           # terminal 2: open http://localhost:5173 in multiple tabs
 ```
 
 ### Commands
@@ -385,42 +464,44 @@ npm run fix        # fix lint, format
 npm run check      # check lint, format
 npm test           # type check & test (vitest / oxlint / oxfmt / tsc)
 npm run dev:test   # vitest watch
-npm run build      # dist へ d.ts 込みでビルド
+npm run build      # build to dist with d.ts
 ```
 
-## Publishment
-publish は人間が判断して手動で行う (Agent は実行しない)。version bump・test/build/smoke・
-publish ゲートは [`scripts/release.mjs`](./scripts/release.mjs) に集約する。配布の本体は `npm publish`
-(`prepublishOnly` が test + build + smoke を強制するので緑でしか出せない)、変更履歴は
-`gh release create --generate-notes` が commit / PR から自動生成する GitHub Release に残す
-(手書きの CHANGELOG は持たない)。version は package.json を正とし、`prepare` が package.json /
-package-lock / `src/index.ts` の `SYNQUX_VERSION` を一括同期する (旧 `npm version` の inline sync は
-廃止。手動で `npm version` を叩くと src が同期されず `src/index.test.ts` が落ちる)。
+## Publishing
+Publishing is a human decision, done manually (agents never run it). Version bump, test/build/smoke,
+and the publish gate are centralized in [`scripts/release.mjs`](./scripts/release.mjs). Distribution
+itself is `npm publish` (`prepublishOnly` forces test + build + smoke, so only green builds ship).
+The changelog is a GitHub Release generated by `gh release create --generate-notes` from commits / PRs
+(no hand-written CHANGELOG). package.json is the version authority; `prepare` syncs package.json /
+package-lock / `SYNQUX_VERSION` in `src/index.ts` at once (the old inline `npm version` sync is gone —
+running `npm version` by hand leaves src out of sync and fails `src/index.test.ts`).
 
 ```sh
-# 1. prepare: version 3 点同期 + test → build → smoke (publish なし)
-mise run release:prepare -- 0.1.0   # semver 厳守 (ADR-0001 Decision 6)
+# 1. prepare: sync the three version sites + test → build → smoke (no publish)
+mise run release:prepare -- 0.1.0   # strict semver (ADR-0001 Decision 6)
 
-# 2. 人間: diff を確認して bump を commit し、tag を打つ
+# 2. human: review the diff, commit the bump, tag it
 git add .
 git commit -m "release: release v0.1.0"
 git tag v0.1.0
 
-# 3. publish 前に browser 経由で npm login
+# 3. npm login via browser before publishing
 npm login
 
-# 4. publish: 整合チェック → push → npm publish → GitHub Release 作成 (人間のみ)
+# 4. publish: consistency checks → push → npm publish → GitHub Release (humans only)
 mise run release:publish -- 0.1.0 --i-understand-this-pushes-and-publishes
 ```
 
-同一 version での `prepare` 再実行は bump が冪等なので安全。breaking (wire format schema version の
-変更) を含む release は GitHub Release の notes で「協調デプロイの要否」を明記すること。
+Re-running `prepare` for the same version is safe (the bump is idempotent). For releases with breaking
+changes (wire format schema version changes), state in the GitHub Release notes whether a coordinated
+deploy is required.
 
-`publish` は「焼き込み version == tag」「working tree clean」「tag が HEAD を指す」を満たさないと
-中断する。push は npm publish (取り消し困難) より先に行い、tag だけ remote に進んでも消して再実行できる。
+`publish` aborts unless "burned-in version == tag", "working tree clean", and "tag points at HEAD" all
+hold. Push happens before `npm publish` (which is hard to undo), so a tag that reached the remote alone
+can be deleted and retried.
 
-- 消費者の運用は「テンプレは `^latest` 追従、出荷済みゲーム repo は exact pin」。breaking change (wire format の schema version 変更を含む) は必ず major
-- wire format (schema version) を変えるデプロイは「進行中セッションがない時間帯」に行う運用で新旧混在を吸収する
+- Consumer policy: templates track `^latest`; shipped game repos pin exact versions. Breaking changes (including wire format schema version changes) are always a major
+- Deploys that change the wire format (schema version) are rolled out "while no session is in progress" to absorb old/new coexistence
 
 ### Resources
 - [GitHub](https://github.com/yano3nora/synqux) / [npm](https://www.npmjs.com/package/synqux)
