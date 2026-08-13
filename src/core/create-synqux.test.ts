@@ -3,7 +3,12 @@ import { createMemoryHub } from '../testing/memory-hub.js'
 import { createWaker } from './create-synqux.js'
 import { selectIsHost } from './selectors.js'
 import { parseSnapshotPayload } from './snapshot.js'
-import { createHubClient, settle, type GameState } from './test-fixtures.js'
+import {
+  createClient,
+  createHubClient,
+  settle,
+  type GameState,
+} from './test-fixtures.js'
 import type { SnapshotStore } from './types.js'
 
 /**
@@ -236,6 +241,100 @@ describe('createSynqux (end-to-end)', () => {
     expect(second.store.getState().game.result).toBeNull()
   })
 
+  it('購読 phase は実遷移ごとに一度だけ通知し、unsubscribe で idle を通知する', async () => {
+    const onPhaseChanged = vi.fn()
+    const client = createHubClient(createMemoryHub(), { onPhaseChanged })
+
+    const unsubscribe = await client.sync.subscribe({
+      store: client.store,
+      groupId: 'phase-callback',
+    })
+    expect(onPhaseChanged.mock.calls).toEqual([['subscribing'], ['live']])
+
+    await unsubscribe()
+    expect(onPhaseChanged.mock.calls).toEqual([
+      ['subscribing'],
+      ['live'],
+      ['idle'],
+    ])
+  })
+
+  it('subscribe 失敗は rollback 後に元 error 付きで onSubscribeFailed へ一度通知する', async () => {
+    const failure = new Error('offline')
+    const hub = createMemoryHub()
+    const transport = hub.createTransport()
+    transport.connect = async () => {
+      throw failure
+    }
+    const onSubscribeFailed = vi.fn()
+    const client = createClient(transport, { onSubscribeFailed })
+
+    await expect(
+      client.sync.subscribe({ store: client.store, groupId: 'failed' }),
+    ).rejects.toBe(failure)
+    expect(client.store.getState().synqux.phase).toBe('idle')
+    expect(onSubscribeFailed).toHaveBeenCalledOnce()
+    expect(onSubscribeFailed).toHaveBeenCalledWith(failure)
+  })
+
+  it('subscribe 成功時は onSubscribeFailed を呼ばない', async () => {
+    const onSubscribeFailed = vi.fn()
+    const client = createHubClient(createMemoryHub(), { onSubscribeFailed })
+
+    await client.sync.subscribe({
+      store: client.store,
+      groupId: 'subscribe-success',
+    })
+
+    expect(onSubscribeFailed).not.toHaveBeenCalled()
+  })
+
+  it('onSubscribeFailed が throw しても subscribe は元 error で reject する', async () => {
+    const consoleError = vi
+      .spyOn(console, 'error')
+      .mockImplementation(() => undefined)
+    const failure = new Error('offline')
+    const callbackFailure = new Error('callback failed')
+    const hub = createMemoryHub()
+    const transport = hub.createTransport()
+    transport.connect = async () => {
+      throw failure
+    }
+    const onSubscribeFailed = vi.fn(() => {
+      throw callbackFailure
+    })
+    const client = createClient(transport, { onSubscribeFailed })
+
+    await expect(
+      client.sync.subscribe({ store: client.store, groupId: 'callback-throw' }),
+    ).rejects.toBe(failure)
+    expect(onSubscribeFailed).toHaveBeenCalledOnce()
+    expect(consoleError).toHaveBeenCalledWith(callbackFailure)
+    consoleError.mockRestore()
+  })
+
+  it('onSubscribeFailed 未設定の subscribe 失敗は沈黙端末の警告を出す', async () => {
+    const consoleError = vi
+      .spyOn(console, 'error')
+      .mockImplementation(() => undefined)
+    const failure = new Error('offline')
+    const hub = createMemoryHub()
+    const transport = hub.createTransport()
+    transport.connect = async () => {
+      throw failure
+    }
+    const client = createClient(transport)
+
+    await expect(
+      client.sync.subscribe({ store: client.store, groupId: 'unconfigured' }),
+    ).rejects.toBe(failure)
+    expect(consoleError).toHaveBeenCalledWith(
+      '[synqux] subscribe failed and no onSubscribeFailed is configured. The device may be left silently unconnected.',
+      failure,
+    )
+    consoleError.mockRestore()
+  })
+
   it('setRole は未 subscribe なら拒否し、standalone session では no-op になる', async () => {
     const hub = createMemoryHub()
     const synced = createHubClient(hub)
@@ -253,6 +352,44 @@ describe('createSynqux (end-to-end)', () => {
 
     await expect(standalone.sync.setRole('player')).resolves.toBeUndefined()
     expect(hub.inspect.peers('solo-role')).toEqual([])
+  })
+
+  it('setRole は state 上の正規化済み role と同値なら no-op、異なれば更新する', async () => {
+    const hub = createMemoryHub()
+    const transport = hub.createTransport()
+    const updateSelf = vi.spyOn(transport, 'updateSelf')
+    const client = createClient(transport)
+    await client.sync.subscribe({
+      store: client.store,
+      groupId: 'role-idempotent',
+    })
+    await settle()
+
+    // role 未指定 peer は player として扱うため、既定値への更新は不要。
+    await client.sync.setRole('player')
+    expect(updateSelf).not.toHaveBeenCalled()
+
+    await client.sync.setRole('guest')
+    expect(updateSelf).toHaveBeenCalledTimes(1)
+    await settle()
+    await client.sync.setRole('guest')
+    expect(updateSelf).toHaveBeenCalledTimes(1)
+  })
+
+  it('setRole は自 peer が state に未反映なら比較せず transport を更新する', async () => {
+    const hub = createMemoryHub()
+    const transport = hub.createTransport()
+    transport.subscribePeers = () => () => undefined
+    const updateSelf = vi.spyOn(transport, 'updateSelf')
+    const client = createClient(transport)
+    await client.sync.subscribe({
+      store: client.store,
+      groupId: 'role-before-echo',
+    })
+
+    expect(client.store.getState().synqux.connections.entities).toEqual({})
+    await client.sync.setRole('player')
+    expect(updateSelf).toHaveBeenCalledWith({ role: 'player' })
   })
 })
 

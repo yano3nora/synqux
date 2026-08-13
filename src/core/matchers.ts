@@ -3,6 +3,14 @@ import type { SynquxState } from './slice.js'
 import type { SynquxActionMeta, SynquxSynced } from './types.js'
 
 /**
+ * synqux 内部 action (synqux/restored, synqux/setEnabled など) の判定。
+ * consumer が listener / middleware の除外条件に使う。
+ * action type の prefix 文字列は内部実装詳細のため公開しない (これを使うこと)
+ */
+export const isSynquxAction = (action: Action): boolean =>
+  action.type.startsWith('synqux/')
+
+/**
  * locals reducer から、直前に適用された synced action の成功と依頼元を判定する。
  * createSynquxRootReducer の返り値をそのまま config に渡せる。
  *

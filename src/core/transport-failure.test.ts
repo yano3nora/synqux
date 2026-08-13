@@ -34,7 +34,8 @@ describe('transport 購読の打ち切り (契約 8)', () => {
 
   it('購読を打ち切られた端末は unrecoverable になり、heartbeat で ok へ巻き戻されない', async () => {
     const hub = createMemoryHub()
-    const a = createHubClient(hub)
+    const onUnrecoverable = vi.fn()
+    const a = createHubClient(hub, { onUnrecoverable })
     const b = createHubClient(hub)
 
     await a.sync.subscribe({ store: a.store, groupId: GROUP_ID })
@@ -47,10 +48,12 @@ describe('transport 購読の打ち切り (契約 8)', () => {
 
     expect(consoleErrorSpy).toHaveBeenCalledTimes(1)
     expect(selectIsSyncUnrecoverable(a.store.getState())).toBe(true)
+    expect(onUnrecoverable).toHaveBeenCalledTimes(1)
 
     // gap なし (maxSeen <= applied) でも health heartbeat が ok へ戻さないこと
     await settle(30)
     expect(selectIsSyncUnrecoverable(a.store.getState())).toBe(true)
+    expect(onUnrecoverable).toHaveBeenCalledTimes(1)
 
     // 健全な端末は影響を受けず、同期を継続できる
     expect(selectSyncHealth(b.store.getState()).phase).toBe('ok')

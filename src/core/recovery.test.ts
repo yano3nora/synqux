@@ -422,12 +422,22 @@ describe('sync auto recovery', () => {
   it('1 巡で unrecoverable になり、遅着で ok に戻っても retry loop しない', async () => {
     const hub = createMemoryHub()
     let loadCount = 0
-    const a = createTrackedClient(hub, {
+    const transport = hub.createTransport()
+    Object.assign(transport, {
       async loadSnapshot() {
         loadCount += 1
         return null
       },
     })
+    const onUnrecoverable = vi.fn()
+    const loadSnapshot = vi.spyOn(transport, 'loadSnapshot')
+    const a = {
+      ...createClient(transport, {
+        stallAfterMs: STALL_AFTER_MS,
+        onUnrecoverable,
+      }),
+      loadSnapshot,
+    }
     const b = createHubClient(hub, { stallAfterMs: STALL_AFTER_MS })
     await a.sync.subscribe({ store: a.store, groupId: GROUP_ID })
     await b.sync.subscribe({ store: b.store, groupId: GROUP_ID })
@@ -451,6 +461,7 @@ describe('sync auto recovery', () => {
     await vi.advanceTimersByTimeAsync(STALL_AFTER_MS * 3 + 4_000)
     expect(selectSyncHealth(a.store.getState()).phase).toBe('unrecoverable')
     expect(a.loadSnapshot).toHaveBeenCalledTimes(2)
+    expect(onUnrecoverable).toHaveBeenCalledTimes(1)
 
     await vi.advanceTimersByTimeAsync(STALL_AFTER_MS * 2)
     expect(a.loadSnapshot).toHaveBeenCalledTimes(2)
@@ -460,6 +471,7 @@ describe('sync auto recovery', () => {
     await settle(20)
     expect(a.store.getState().game.log).toEqual(['increment:1', 'increment:10'])
     expect(selectSyncHealth(a.store.getState()).phase).toBe('ok')
+    expect(onUnrecoverable).toHaveBeenCalledTimes(1)
   })
 
   it.each(['resubscribed', 'restoring'] as const)(

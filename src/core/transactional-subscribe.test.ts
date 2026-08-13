@@ -1,6 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { createMemoryHub } from '../testing/memory-hub.js'
 import { buildSnapshotPayload } from './snapshot.js'
+import { selectSyncPhase } from './selectors.js'
 import {
   createClient,
   createHubClient,
@@ -75,6 +76,58 @@ describe('subscribe initialization transaction', () => {
     expect(client.store.getState()).toEqual(stateBefore)
 
     await expectRetrySynchronizes(client)
+  })
+
+  it('idle → subscribing → live → idle の購読 lifecycle を公開する', async () => {
+    const hub = createMemoryHub()
+    const transport = hub.createTransport()
+    const connect = transport.connect.bind(transport)
+    let releaseConnect!: () => void
+    const connectGate = new Promise<void>((resolve) => {
+      releaseConnect = resolve
+    })
+    transport.connect = async (options) => {
+      await connectGate
+      return connect(options)
+    }
+    const client = createClient(transport)
+
+    expect(selectSyncPhase(client.store.getState())).toBe('idle')
+    const subscribing = client.sync.subscribe({
+      store: client.store,
+      groupId: GROUP_ID,
+    })
+    expect(selectSyncPhase(client.store.getState())).toBe('subscribing')
+
+    releaseConnect()
+    const unsubscribe = await subscribing
+    expect(selectSyncPhase(client.store.getState())).toBe('live')
+
+    await unsubscribe()
+    expect(selectSyncPhase(client.store.getState())).toBe('idle')
+  })
+
+  it('connect reject 後は phase を idle へ戻す', async () => {
+    const client = createClient(
+      failOnce(createMemoryHub().createTransport(), 'connect'),
+    )
+
+    await expect(
+      client.sync.subscribe({ store: client.store, groupId: GROUP_ID }),
+    ).rejects.toThrow('Injected connect failure')
+    expect(selectSyncPhase(client.store.getState())).toBe('idle')
+  })
+
+  it('standalone も subscribe 完了後は live になる', async () => {
+    const client = createHubClient(createMemoryHub(), { enabled: false })
+    const unsubscribe = await client.sync.subscribe({
+      store: client.store,
+      groupId: GROUP_ID,
+    })
+
+    expect(selectSyncPhase(client.store.getState())).toBe('live')
+    await unsubscribe()
+    expect(selectSyncPhase(client.store.getState())).toBe('idle')
   })
 
   it('subscribePeers 失敗では presence を解除し、再 subscribe できる', async () => {

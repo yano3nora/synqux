@@ -82,6 +82,8 @@ export type SynquxHealth = {
   gapSince: number | null
 }
 
+export type SynquxPhase = 'idle' | 'subscribing' | 'live'
+
 /**
  * synqux が action に載せる meta の契約
  * synced reducer が読んでよいのは requestedBy / dispatched のみ (Decision 8)
@@ -135,12 +137,17 @@ export type CreateSynquxConfig<
    */
   hostLiveness?: SynquxHostLiveness | false
   /**
-   * standalone (enabled=false で生成した instance) の synced state 永続化先
-   * 封筒・直列化は transport の snapshot と完全に同一 (canonical JSON)。保存タイミングは
-   * 「適用 synced action ごと」で、host の snapshot 永続化と同じ policy 点を通る (Decision 11)
-   * runtime の setEnabled(false) (tutorial 等) では保存しない — 移植元の tutorial 除外の一般化
+   * standalone (enabled=false で生成した instance) の synced state 永続化先。
+   * browser では省略時に localStorageSnapshotStore() を使い、false で無効化する。
+   * SnapshotStore 注入で差し替え可能。runtime の setEnabled(false) では保存しない
    */
-  localSnapshots?: SnapshotStore
+  localSnapshots?: SnapshotStore | false
+  /** 購読 phase の実遷移通知。同値遷移では呼ばない */
+  onPhaseChanged?: (phase: SynquxPhase) => void
+  /** subscribe の rollback 後に失敗を通知。callback の throw は握りつぶす */
+  onSubscribeFailed?: (error: unknown) => void
+  /** unrecoverable へ遷移した瞬間の通知。unsubscribe まで一度だけ */
+  onUnrecoverable?: () => void
 }
 
 /** host 生存監視の設定 (ADR-0016)。既定 30,000 / 180,000 */
@@ -170,6 +177,15 @@ export type SynquxAutomation<TSynced, TAction extends Action> = {
   retryMs?: number
 }
 
+export type SynquxSubscribeOptions<TRoot> = {
+  store: { dispatch: Dispatch; getState: () => TRoot }
+  groupId: string
+  role?: Peer['role']
+  label?: Peer['label']
+  /** 初期化の中断。低レベル API では省略時に無期限待機 */
+  signal?: AbortSignal
+}
+
 export type Synqux<TRoot, TSynced, TAction> = {
   /**
    * store 構築時に prepend する middleware 群 (順序保証のため配列で提供)
@@ -188,13 +204,7 @@ export type Synqux<TRoot, TSynced, TAction> = {
    * standalone (enabled=false) 時は transport に触れず localSnapshots から restore する
    * 返り値で購読破棄 + presence 解除。二重購読はインスタンス内部でガード
    */
-  subscribe: (options: {
-    store: { dispatch: Dispatch; getState: () => TRoot }
-    groupId: string
-    role?: Peer['role']   // 自端末の役割。dedicated の判定材料 (query 等) の取得は consumer 責務
-    label?: Peer['label']
-    signal?: AbortSignal  // 初期化 (接続確立・restore) の中断 (ADR-0012)。省略時は無期限待機。timeout 政策は consumer が AbortSignal.timeout() 等で選ぶ
-  }) => Promise<() => Promise<void>>
+  subscribe: (options: SynquxSubscribeOptions<TRoot>) => Promise<() => Promise<void>>
 
   /** 自端末の role を presence 上で in-place 更新する。未 subscribe は throw、standalone は no-op */
   setRole(role: PeerRole): Promise<void>
@@ -340,6 +350,15 @@ export function createSyncedActionMatchers<
   isMySucceededAction: (action: Action) => action is TAction
 }
 
+/** prefix を consumer に露出せず、listener / middleware から内部 action を除外する */
+export function isSynquxAction(action: Action): boolean
+
+/** Result.targets の [] = 全員、それ以外 = peer id 宛て、という意味論を一元化する */
+export function isResultForPeer(
+  result: Pick<Result, 'targets'> | null | undefined,
+  peerId: Peer['id'] | null,
+): boolean
+
 // ============================================================
 // 読み取り selector (ゲーム開発者層、Decision 7)
 // state.synqux が予約 key のため instance 不要の静的関数として提供できる
@@ -348,6 +367,10 @@ export function createSyncedActionMatchers<
 export function selectIsHost(root: { synqux: SynquxState }): boolean  // standalone (enabled=false) 時は常に true
 export function selectPeers(root: { synqux: SynquxState }): Peer[]
 export function selectSelfId(root: { synqux: SynquxState }): Peer['id'] | null
+export function selectSelf(root: { synqux: SynquxState }): Peer | null
+export function selectSelfRole(root: { synqux: SynquxState }): PeerRole | null  // role 省略は player
+export function selectSyncPhase(root: { synqux: SynquxState }): SynquxPhase  // replay と live の区別
+export function selectIsLive(root: { synqux: SynquxState }): boolean
 export function selectSyncHealth(root: { synqux: SynquxState }): SynquxHealth
 export function selectIsSyncStalled(root: { synqux: SynquxState }): boolean
 export function selectIsSyncUnrecoverable(root: { synqux: SynquxState }): boolean
@@ -356,6 +379,7 @@ export function selectIsSyncUnrecoverable(root: { synqux: SynquxState }): boolea
 // result は consumer 自身の synced state の所有物であり SynquxSynced 契約で型も見えるため
 // `(s) => s.game.result` と直接読めばよい。「情報は隠さない」方針とも整合する
 // react では useLatestResult を提供する (Provider が synced の位置を解決できるため迂回が不要)
+// isResultForPeer / useMyLatestResult は直読み原則を変えず、「自分宛てか」の意味論だけを提供する
 ```
 
 ### `state.synqux` 内部 state (書き込み禁止・語彙は非公開)
@@ -363,6 +387,8 @@ export function selectIsSyncUnrecoverable(root: { synqux: SynquxState }): boolea
 ```ts
 /** 型自体は export するが、中身への直接アクセスは selector 経由のみサポート */
 export type SynquxState = {
+  /** subscribe の初期 restore 中か、ライブ配信へ移ったか。自動回復中は live のまま */
+  phase: 'idle' | 'subscribing' | 'live'
   enabled: boolean
   health: SynquxHealth
   connections: {
@@ -388,11 +414,27 @@ export function SynquxProvider(props: { sync: Synqux<any, any, any>; children: R
 export function useIsHost(): boolean
 export function usePeers(): Peer[]
 export function useSelfId(): Peer['id'] | null
+export function useSelf(): Peer | null
+export function useSelfRole(): PeerRole | null
+export function useSyncPhase(): SynquxPhase
+export function useIsLive(): boolean
 export function useSyncHealth(): SynquxHealth
 export function useIsSyncStalled(): boolean
 export function useIsSyncUnrecoverable(): boolean
 export function useLatestResult<TAction, TMessage extends ResultMessage = ResultMessage>(): Result<TAction, TMessage> | null  // synced の位置は Provider 経由で解決
+export function useMyLatestResult<TAction, TMessage extends ResultMessage = ResultMessage>(): Result<TAction, TMessage> | null
+/** react consumer の購読開始の canonical な入口。groupId 未確定時は開始しない */
+export function useSynquxSubscription<TRoot extends { synqux: SynquxState }>(
+  synqux: Pick<Synqux<TRoot>, 'subscribe'>,
+  options: Omit<SynquxSubscribeOptions<TRoot>, 'store' | 'groupId'> & {
+    groupId?: string
+  },
+): SynquxPhase
 ```
+
+`store` は `useStore()` から取得する。`state.synqux.phase !== 'idle'` を排他に使うため、
+StrictMode や同一 store の多重 mount でも subscribe は二重発火しない。signal 省略時は
+30 秒 timeout を補う。失敗遷移は `createSynqux` の `onSubscribeFailed` で設定する。
 
 - peerDependencies: `react` / `react-redux` (optional peer、`synqux/react` を使うときのみ)
 
@@ -586,8 +628,8 @@ type SnapshotEnvelope<TSynced> = {
 
 | subpath | 主な export | 対象 |
 | --- | --- | --- |
-| `synqux` | `createSynqux` / `createSynquxRootReducer` / `synquxReducer` / `synquxRestored` (primitive 方式の restore 契約。dispatch 禁止・match 専用) / `stateWithDefaultResult` / `stateWithError` / `stateWithResult` / `stateWithTransaction` / `generateResult` / `createSyncedActionMatchers` / `selectIsHost` / `selectPeers` / `selectSelfId` / `selectSyncHealth` / `selectIsSyncStalled` / `selectIsSyncUnrecoverable` / `localStorageSnapshotStore` / 型 (`SynquxSynced` / `SynquxHealth` / `Result` / `ResultMessage` / `Peer` / `SynquxActionMeta` / `SynquxAutomation` / `SynquxHostLiveness` / `SynquxTransport` / `SnapshotStore` / `RequestEnvelope` / `SynquxState` / `PendingRequest`) | セットアップ層 + reducer ヘルパー |
-| `synqux/react` | `SynquxProvider` / `useIsHost` / `usePeers` / `useSelfId` / `useSyncHealth` / `useIsSyncStalled` / `useIsSyncUnrecoverable` / `useLatestResult` | ゲーム開発者層 |
+| `synqux` | `createSynqux` / `createSynquxRootReducer` / `synquxReducer` / `synquxRestored` / reducer helpers / `createSyncedActionMatchers` / `isSynquxAction` / `isResultForPeer` / peer・phase・health selectors / `localStorageSnapshotStore` / 契約型 | セットアップ層 + reducer ヘルパー |
+| `synqux/react` | `SynquxProvider` / `useSynquxSubscription` / peer・phase・health hooks / `useLatestResult` / `useMyLatestResult` | ゲーム開発者層 |
 | `synqux/testing` | `createMemoryHub` / `verifyActionIdempotency` / `assertActionIdempotency` | consumer CI / 本 repo の simulation test |
 | `synqux/firebase` | `firebaseTransport(db, options?: { archivePrunedRequests?: boolean })` | Phase 2 で実装 |
 
@@ -601,7 +643,7 @@ type SnapshotEnvelope<TSynced> = {
 | `reproduce` (requests JSON replay 復旧ツール) | Phase 1 スコープ外 (合意済み) |
 | `connections.isNotFoundGame` / `getAgentIdFromQuery` | consumer 責務 (エラー画面遷移・query 読み取りはアプリ都合) |
 | result の toast 表示 (`result-notifier`) | consumer 責務。`useLatestResult` + `Result.message` (拡張は TMessage generics) で材料は提供 (ADR-0008) |
-| `loadGameState` / `saveGameState` (standalone の localStorage 永続化) | **取り込む** (レビュー決定)。`localSnapshots: SnapshotStore` として一般化し、封筒・直列化・policy 点を transport の snapshot と共有する。既定実装 `localStorageSnapshotStore` を同梱。restore 時の result 除去 (移植元 `clearResultFromGameState`) も踏襲 |
+| `loadGameState` / `saveGameState` (standalone の localStorage 永続化) | **取り込む** (レビュー決定)。`localSnapshots?: SnapshotStore | false` として一般化し、封筒・直列化・policy 点を transport の snapshot と共有する。browser の省略時は `localStorageSnapshotStore()`、`false` で無効化する。restore 時の result 除去 (移植元 `clearResultFromGameState`) も踏襲 |
 | `@yano3nora/ts-utils` (`sleepTimer` / `waitUntilOrFail`) | **dependencies に含める** (レビュー決定: 作者が同一のため内製化は二重管理になる)。public npm + ライセンス整合が publish (Phase 2) の前提条件 |
 | `debugRevisions` (console.log デバッグ action) | 落とす。simulation test で代替 |
 
@@ -614,4 +656,4 @@ type SnapshotEnvelope<TSynced> = {
 5. **`agent` / `guest` → `role: 'player' | 'dedicated' | 'observer'` へ改名** (レビュー決定): 排他 enum にすることで「agent かつ guest」という不正状態を型で排除。dedicated は「常駐プロセスを強制 host にして安定進行・無人進行を担う」ユースケース由来 (dedicated server 文化)。process id は `label` へ分離
    - その後 `observer` → `guest` へ再改名した (TASK-260811 / ADR-0014)。observer は readonly を暗示する一方、role の実際の作用は host 適格性だけであり、request 発行を制限しないため
 6. **`canRequest` hook を追加** (移植元の readonly 端末対応の一般化)。これがないとテンプレ置換 (Phase 2) が成立しないため
-7. **standalone の local 永続化を責務に含める** (レビュー決定): `localSnapshots: SnapshotStore` として snapshot 機構と統合。保存は「適用 synced action ごと」で host の snapshot 永続化と同じ policy 点を通る。runtime の `setEnabled(false)` では保存しない (移植元の tutorial 除外の一般化)
+7. **standalone の local 永続化を責務に含める** (レビュー決定): `localSnapshots?: SnapshotStore | false` として snapshot 機構と統合。browser では既定で localStorage へ保存し、`false` で無効化する。保存は「適用 synced action ごと」で host の snapshot 永続化と同じ policy 点を通る。runtime の `setEnabled(false)` では保存しない (移植元の tutorial 除外の一般化)

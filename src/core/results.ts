@@ -7,11 +7,36 @@ import {
   type UnknownAction,
 } from '@reduxjs/toolkit'
 import type {
+  Peer,
   Result,
   ResultMessage,
   SynquxActionMeta,
   SynquxSynced,
 } from './types.js'
+
+/**
+ * result が指定 peer に表示すべきものかの判定。
+ * targets の意味論 (generateResult 参照): [] は standalone / 全員宛てで無条件表示、
+ * 非空は宛先 peer id のリスト (未指定時は生成側で requestedBy 宛てに落ちている)。
+ *
+ * @example
+ * createSelector([selectSelfId, selectGameResult], (selfId, result) =>
+ *   isResultForPeer(result, selfId) ? result : null,
+ * )
+ */
+export const isResultForPeer = (
+  result: Pick<Result, 'targets'> | null | undefined,
+  peerId: Peer['id'] | null,
+): boolean => {
+  if (!result) {
+    return false
+  }
+
+  return (
+    result.targets.length === 0 ||
+    (peerId !== null && result.targets.includes(peerId))
+  )
+}
 
 /**
  * reducer (唯一の判定器) 用の result 生成ヘルパー

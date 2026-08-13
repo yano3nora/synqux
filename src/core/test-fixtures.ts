@@ -157,6 +157,9 @@ type ClientOptions = Partial<
     | 'devDeterminismCheck'
     | 'automations'
     | 'hostLiveness'
+    | 'onPhaseChanged'
+    | 'onSubscribeFailed'
+    | 'onUnrecoverable'
   >
 >
 

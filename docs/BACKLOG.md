@@ -16,7 +16,7 @@
 - xxx
 
 ### P1 — 本番境界と公開契約
-- [consumer boilerplate の library 吸収 (subscription lifecycle / replay可視化 / self・result selector / matcher)](TASK-260812-consumer-boilerplate-absorption.md) — 起票済み・未着手
+- [sideEffects (host 駆動の外部通知)](TASK-260812-side-effects.md) — 起票済み・未着手。ADR-0017 起草から。replay/live 判定は購読 phase (`selectSyncPhase`、TASK-260812 consumer boilerplate 吸収で実装済み) を判定材料に使える
 
 ### P2 — 文書・consumer 導入・コスト最適化
 - xxx

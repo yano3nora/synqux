@@ -1,9 +1,9 @@
 import type { Action, Reducer } from '@reduxjs/toolkit'
 import { describe, expect, it } from 'vitest'
-import { createSyncedActionMatchers } from './matchers.js'
+import { createSyncedActionMatchers, isSynquxAction } from './matchers.js'
 import { stateWithError } from './results.js'
 import { createSynquxRootReducer } from './root-reducer.js'
-import { synquxActions } from './slice.js'
+import { synquxActions, synquxRestored } from './slice.js'
 import type { SynquxActionMeta, SynquxSynced } from './types.js'
 
 type GameAction = Action<`game/${string}`> & {
@@ -137,5 +137,13 @@ describe('createSyncedActionMatchers', () => {
       : null
 
     expect(amount).toBe(1)
+  })
+})
+
+describe('isSynquxAction', () => {
+  it('内部 action を判定し consumer action を除外する', () => {
+    expect(isSynquxAction(synquxActions.setEnabled(true))).toBe(true)
+    expect(isSynquxAction(synquxRestored({ synced: {} }))).toBe(true)
+    expect(isSynquxAction({ type: 'game/foo' })).toBe(false)
   })
 })

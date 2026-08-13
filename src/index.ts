@@ -30,13 +30,15 @@ export {
   synquxRestored,
   type PendingRequest,
   type SynquxHealth,
+  type SynquxPhase,
   type SynquxState,
 } from './core/slice.js'
 
 // ゲーム開発者層: reducer ヘルパーと読み取り selector
-export { createSyncedActionMatchers } from './core/matchers.js'
+export { createSyncedActionMatchers, isSynquxAction } from './core/matchers.js'
 export {
   generateResult,
+  isResultForPeer,
   stateWithDefaultResult,
   stateWithError,
   stateWithResult,
@@ -44,9 +46,13 @@ export {
 } from './core/results.js'
 export {
   selectIsHost,
+  selectIsLive,
   selectIsSyncStalled,
   selectIsSyncUnrecoverable,
   selectPeers,
+  selectSelf,
   selectSelfId,
+  selectSelfRole,
   selectSyncHealth,
+  selectSyncPhase,
 } from './core/selectors.js'

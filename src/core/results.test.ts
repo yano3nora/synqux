@@ -2,6 +2,7 @@ import { createReducer } from '@reduxjs/toolkit'
 import { describe, expect, it } from 'vitest'
 import {
   generateResult,
+  isResultForPeer,
   stateWithDefaultResult,
   stateWithError,
   stateWithResult,
@@ -74,6 +75,21 @@ describe('generateResult', () => {
     })
     expect(result.message?.duration).toBe(3000)
   })
+})
+
+describe('isResultForPeer', () => {
+  it.each([
+    { result: null, peerId: 'peer-1', expected: false },
+    { result: { targets: [] }, peerId: null, expected: true },
+    { result: { targets: ['peer-1'] }, peerId: 'peer-1', expected: true },
+    { result: { targets: ['peer-2'] }, peerId: 'peer-1', expected: false },
+    { result: { targets: ['peer-1'] }, peerId: null, expected: false },
+  ])(
+    'targets と peerId の組から $expected を返す',
+    ({ result, peerId, expected }) => {
+      expect(isResultForPeer(result, peerId)).toBe(expected)
+    },
+  )
 })
 
 describe('stateWithError', () => {

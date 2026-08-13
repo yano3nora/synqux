@@ -23,3 +23,13 @@ role は transport の `connect` 時に固定されていた。タイトル画�
 - role 切替は再購読せずに host migration を起こし、既存の request fork と epoch fencing が昇格・降格を吸収する。
 - Firebase adapter は更新後の role を session に保持しないと、切断復帰で旧 role へ巻き戻るため、再登録テストを必須とする。
 - `PeerRole` と transport 契約の変更は pre-1.0 の breaking change となる。
+
+## Amendment (2026-08-12): setRole の冪等化
+
+TASK-260812 で、consumer が `setRole` の多重発火を module 変数で抑止していた責務を
+core へ移した。state 上の自 role を `'player'` へ正規化した値が指定 role と同じなら、
+`setRole` は `updateSelf` を呼ばず no-op とする。
+
+presence echo 前は自 peer が未反映または旧 role のため重複 write が残り得る。ただし
+transport 契約の in-place 同値書き込みで無害であり、consumer は独自の抑止状態を
+持たなくてよい。

@@ -44,6 +44,8 @@ export type SynquxHealth = {
   gapSince: number | null
 }
 
+export type SynquxPhase = 'idle' | 'subscribing' | 'live'
+
 /**
  * 予約 key `state.synqux` 配下の内部 state (ADR-0001 Decision 7)
  *
@@ -52,6 +54,13 @@ export type SynquxHealth = {
  * インスタンス内部の順序判定モジュール (ordering.ts) が持つ
  */
 export type SynquxState = {
+  /**
+   * subscribe の進行 phase。restore replay 中 (`'subscribing'`) かライブ配信
+   * (`'live'`) かを consumer が区別するために公開する。自動回復の再 restore 中
+   * (ADR-0004) は `'live'` のまま — 回復状態は health 側で表現する
+   */
+  phase: SynquxPhase
+
   /**
    * false 時 middleware 動作を抑止し standalone 完結させる
    * 初期値 true は「subscribe() までの間、request 送信条件 (selfId あり) が
@@ -74,6 +83,7 @@ export type SynquxState = {
 }
 
 export const synquxInitialState: SynquxState = {
+  phase: 'idle',
   enabled: true,
   health: {
     phase: 'ok',
@@ -110,6 +120,10 @@ const synquxSlice = createSlice({
   name: 'synqux',
   initialState: synquxInitialState,
   reducers: {
+    phaseChanged: (state, action: PayloadAction<SynquxPhase>) => {
+      state.phase = action.payload
+    },
+
     /** subscribe() 完了時に instance 設定と自端末 id を state へ反映する */
     sessionStarted: (
       state,

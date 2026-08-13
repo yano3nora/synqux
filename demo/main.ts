@@ -94,7 +94,7 @@ const demoReducer: Reducer<DemoState> = (state = demoInitialState, action) => {
 const isSyncedAction = (action: Action): action is DemoAction =>
   isCounterAction(action) || isLedgerAction(action)
 
-const sync = createSynqux({
+const synqux = createSynqux({
   transport: firebaseTransport(db, { archivePrunedRequests: true }),
   ...createSynquxRootReducer({
     isSyncedAction,
@@ -108,11 +108,11 @@ const sync = createSynqux({
 const rig = createRig(params)
 
 const store = configureStore({
-  reducer: sync.rootReducer,
+  reducer: synqux.rootReducer,
   middleware: (getDefaultMiddleware) =>
     getDefaultMiddleware({
       serializableCheck: { ignoredActionPaths: ['meta.root'] },
-    }).prepend(...(rig ? [rig.middleware] : []), ...sync.middlewares),
+    }).prepend(...(rig ? [rig.middleware] : []), ...synqux.middlewares),
 })
 
 // ---- UI (依存を増やさないため plain DOM。react を使う場合は synqux/react 参照) ----
@@ -221,7 +221,7 @@ el('lock-toggle').onclick = () =>
 
 const setRole = async (nextRole: PeerRole): Promise<void> => {
   try {
-    await sync.setRole(nextRole)
+    await synqux.setRole(nextRole)
   } catch (error) {
     console.error(error)
     el('status').textContent = 'role の変更に失敗しました'
@@ -231,8 +231,14 @@ el('role-guest').onclick = () => void setRole('guest')
 el('role-player').onclick = () => void setRole('player')
 
 // ---- 同期開始 (presence 登録 → snapshot restore → requests 購読) ----
-void sync
-  .subscribe({ store, groupId, role })
+// 非 React consumer は instance を手続きで直接購読し、失敗 UX もここで扱う。
+void synqux
+  .subscribe({
+    store,
+    groupId,
+    role,
+    signal: AbortSignal.timeout(30_000),
+  })
   .then(() => {
     el('status').textContent = 'connected'
 
@@ -247,7 +253,7 @@ void sync
           .map((peer) => `${peer.id}:${peer.role ?? 'player'}`)
           .join(','),
       dispatchAndWait: (action, options) =>
-        sync.dispatchAndWait(action as DemoAction, options),
+        synqux.dispatchAndWait(action as DemoAction, options),
     })
 
     // URL 指定は subscribe 後に開始し、未接続時の request 生成を避ける。
@@ -255,8 +261,8 @@ void sync
       startStorm(stormTotal)
     }
   })
-  .catch((e: unknown) => {
-    console.error(e)
+  .catch((error: unknown) => {
+    console.error(error)
     el('status').textContent =
       'emulator に接続できません。demo/README.md の手順で起動してください'
   })

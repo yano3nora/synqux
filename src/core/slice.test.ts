@@ -4,8 +4,11 @@ import {
   selectIsSyncStalled,
   selectIsSyncUnrecoverable,
   selectPeers,
+  selectSelf,
   selectSelfId,
+  selectSelfRole,
   selectSyncHealth,
+  selectSyncPhase,
 } from './selectors.js'
 import {
   synquxActions,
@@ -186,6 +189,21 @@ describe('selectors', () => {
     expect(selectIsHost(withSynqux(state))).toBe(true)
     expect(selectPeers(withSynqux(state))).toHaveLength(2)
     expect(selectSelfId(withSynqux(state))).toBe('peer-2')
+    expect(selectSelf(withSynqux(state))?.id).toBe('peer-2')
+    expect(selectSelfRole(withSynqux(state))).toBe('player')
+  })
+
+  it('self 不在時は Peer / role とも null', () => {
+    expect(selectSelf(withSynqux(synquxInitialState))).toBeNull()
+    expect(selectSelfRole(withSynqux(synquxInitialState))).toBeNull()
+  })
+
+  it('購読 phase を state から返す', () => {
+    const subscribing = reduce(
+      synquxInitialState,
+      synquxActions.phaseChanged('subscribing'),
+    )
+    expect(selectSyncPhase(withSynqux(subscribing))).toBe('subscribing')
   })
 
   it('host 離脱で自端末が次点なら host に昇格する (host migration)', () => {

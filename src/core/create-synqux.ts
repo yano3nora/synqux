@@ -15,7 +15,8 @@ import {
 } from './ordering.js'
 import { findFirstDivergence } from './diff.js'
 import { deriveHostId } from './host.js'
-import { selectIsHost } from './selectors.js'
+import { localStorageSnapshotStore } from './local-storage.js'
+import { selectIsHost, selectSelf } from './selectors.js'
 import {
   buildSnapshotPayload,
   canonicalStringify,
@@ -27,6 +28,7 @@ import {
   synquxRestored,
   type PendingRequest,
   type SynquxHealth,
+  type SynquxPhase,
   type SynquxState,
 } from './slice.js'
 import {
@@ -136,8 +138,33 @@ export type CreateSynquxConfig<
   /** readonly 端末などで request 送信自体を抑止する hook。既定は常に許可 */
   canRequest?: (root: TRoot) => boolean
 
-  /** standalone 時の synced state 永続化先。省略時は永続化しない */
-  localSnapshots?: SnapshotStore
+  /**
+   * standalone 時の synced state 永続化先。browser では省略時に localStorage を
+   * 使い、false で明示的に無効化する。独自実装の SnapshotStore へ差し替え可能
+   */
+  localSnapshots?: SnapshotStore | false
+
+  /**
+   * 購読 phase の遷移通知。dataset 属性の付与 (E2E 用フラグ) など、接続状態に
+   * 連動する定型処理を consumer の effect 監視なしで書くための hook。
+   * 同値遷移では呼ばない
+   */
+  onPhaseChanged?: (phase: SynquxPhase) => void
+
+  /**
+   * subscribe の失敗・タイムアウト時の失敗遷移 (リロード案内等)。未設定のまま
+   * 失敗すると「未接続なのに操作できるように見える」沈黙端末が残るため、
+   * react consumer は必ず設定すること。手続き購読 (subscribe を直接 await する
+   * 非 react consumer) がこれを設定した場合、呼び出し側の catch はログ程度に
+   * 留めて政策を二重にしない
+   */
+  onSubscribeFailed?: (error: unknown) => void
+
+  /**
+   * 自動回復に失敗し unrecoverable へ遷移した瞬間の通知 (リロード案内など
+   * consumer の失敗遷移用)。unsubscribe まで再発火しない
+   */
+  onUnrecoverable?: () => void
 
   /** host が synced state とサーバ時刻から評価する自動 dispatch rule */
   automations?: SynquxAutomation<TSynced, TAction>[]
@@ -234,7 +261,9 @@ export type Synqux<
 
   /**
    * 自端末の role を presence 上で切り替える。
-   * subscribe 中でなければ throw。standalone (enabled=false) 時は no-op
+   * subscribe 中でなければ throw。standalone (enabled=false) 時は no-op。
+   * state 上の現在 role と同値なら transport 更新もしない。presence 反映ラグの
+   * 窓では同値の重複 updateSelf が残り得るが、in-place 同値書き込みで無害
    */
   setRole: (role: PeerRole) => Promise<void>
 
@@ -272,6 +301,33 @@ export const createSynqux = <
   const canRequest = config.canRequest ?? (() => true)
   const stallAfterMs = config.stallAfterMs ?? 30_000
   const automations = config.automations ?? []
+  const localSnapshots = (() => {
+    if (config.localSnapshots === false) {
+      return undefined
+    }
+    if (config.localSnapshots) {
+      return config.localSnapshots
+    }
+    // core の型環境は WebWorker も含み `window` global を前提にしないため、
+    // globalThis 上の browser window を構造型で確認する。
+    const browserWindow = (
+      globalThis as { window?: { localStorage: typeof localStorage } }
+    ).window
+    if (browserWindow === undefined) {
+      return undefined
+    }
+
+    try {
+      // localStorage は存在しても SecurityError や容量制限で使用不能な環境がある。
+      // create 時に一度だけ実書き込みで確認し、失敗時は永続化なしへ退避する。
+      const probeKey = `__synqux_storage_probe__${Math.random().toString(36)}`
+      browserWindow.localStorage.setItem(probeKey, probeKey)
+      browserWindow.localStorage.removeItem(probeKey)
+      return localStorageSnapshotStore()
+    } catch {
+      return undefined
+    }
+  })()
   const automationIds = new Set<string>()
 
   for (const automation of automations) {
@@ -387,6 +443,27 @@ export const createSynqux = <
   let session: SubscriptionSession | null = null
   // session 確定前の await 中も、同一 instance の並行初期化を同期的に拒否する
   let subscribing = false
+  // phase dispatch と外部通知を同じ遷移点へ集約する。sessionEnded が state を先に
+  // idle へ戻す cleanup 順でも、通知済み値を基準に idle を一度だけ通知できる。
+  let lastNotifiedPhase: SynquxPhase = 'idle'
+  const changePhase = (
+    store: SynquxSubscribeOptions<TRoot>['store'],
+    phase: SynquxPhase,
+  ): void => {
+    if (lastNotifiedPhase === phase) {
+      return
+    }
+
+    store.dispatch(synquxActions.phaseChanged(phase))
+    lastNotifiedPhase = phase
+    try {
+      config.onPhaseChanged?.(phase)
+    } catch (error) {
+      // dataset 更新等の consumer callback が投げても、購読の初期化・cleanup を
+      // 中断して phase と実セッションを食い違わせない。
+      console.error(error)
+    }
+  }
 
   const resultHash = (result: Result): string | undefined =>
     ((result.action as UnknownAction).meta as SynquxActionMeta | undefined)
@@ -486,14 +563,14 @@ export const createSynqux = <
   }
 
   const persistLocalSnapshot = (root: TRoot): void => {
-    if (!session || !config.localSnapshots) {
+    if (!session || !localSnapshots) {
       return
     }
 
     const orderingState = ordering.state()
     // 移植元 saveGameState 踏襲で失敗は握りつぶす (standalone 永続化は best effort)
     void Promise.resolve(
-      config.localSnapshots.saveSnapshot(
+      localSnapshots.saveSnapshot(
         session.groupId,
         buildSnapshotPayload({
           synced: config.selectSynced(root),
@@ -1097,6 +1174,13 @@ export const createSynqux = <
       )
     }
 
+    changePhase(store, 'subscribing')
+    // 失敗 rollback 時に sessionEnded の cleanup がまだ積まれていなくても
+    // 'subscribing' のまま取り残さないよう、phase の復帰は独立した cleanup で持つ
+    cleanups.push(() => {
+      changePhase(store, 'idle')
+    })
+
     /**
      * rule の retry 状態と interval は subscribe session に閉じ込める。
      * 発行時刻は dispatch 前に記録し、同期的な再評価でも同じ rule を二重発行しない。
@@ -1355,7 +1439,7 @@ export const createSynqux = <
         store.dispatch(synquxActions.sessionEnded())
       })
 
-      const payload = await config.localSnapshots?.loadSnapshot(groupId)
+      const payload = await localSnapshots?.loadSnapshot(groupId)
       signal?.throwIfAborted()
 
       if (payload) {
@@ -1368,6 +1452,8 @@ export const createSynqux = <
       }
 
       startAutomationEngine(subscriptionSession)
+
+      changePhase(store, 'live')
 
       return async () => {
         await runSubscribeCleanups(cleanups, true)
@@ -1382,9 +1468,27 @@ export const createSynqux = <
       left.maxSeenSeq === right.maxSeenSeq &&
       left.gapSince === right.gapSince
 
+    let unrecoverableNotified = false
     const updateHealth = (health: SynquxHealth): void => {
-      if (!healthEquals(store.getState().synqux.health, health)) {
-        store.dispatch(synquxActions.healthChanged(health))
+      const previous = store.getState().synqux.health
+      if (healthEquals(previous, health)) {
+        return
+      }
+
+      store.dispatch(synquxActions.healthChanged(health))
+      if (
+        !unrecoverableNotified &&
+        previous.phase !== 'unrecoverable' &&
+        health.phase === 'unrecoverable'
+      ) {
+        unrecoverableNotified = true
+        try {
+          config.onUnrecoverable?.()
+        } catch (error) {
+          // consumer の失敗 UI callback が投げても、購読 teardown や回復処理を
+          // 止めず、診断可能な形で console にだけ残す。
+          console.error(error)
+        }
       }
     }
 
@@ -1724,6 +1828,8 @@ export const createSynqux = <
     startAutomationEngine(subscriptionSession)
     startHostLivenessEngine(subscriptionSession)
 
+    changePhase(store, 'live')
+
     return async () => {
       await runSubscribeCleanups(cleanups, true)
     }
@@ -1736,18 +1842,32 @@ export const createSynqux = <
       throw new Error('synqux is already subscribed')
     }
 
-    options.signal?.throwIfAborted()
-
     // check-then-act の間に await を挟まず、初期化中であることを先に確定する。
     subscribing = true
     const cleanups: SubscribeCleanup[] = []
 
     try {
+      // 既に abort 済みの場合も subscribe 失敗政策の対象にするため、共通の
+      // rollback / onSubscribeFailed 経路へ入れてから初期化を始める。
+      options.signal?.throwIfAborted()
       return await initializeSubscription(options, cleanups)
     } catch (error) {
       // ordering.restore 済みでも次回の全量 restore が完全置換するため rollback
       // しない。その他の副作用は逆順に片付け、cleanup 失敗より元 error を優先する。
       await runSubscribeCleanups(cleanups, false)
+      if (config.onSubscribeFailed) {
+        try {
+          config.onSubscribeFailed(error)
+        } catch (callbackError) {
+          // consumer の失敗遷移が投げても、手続き購読へ返す元の失敗を変えない。
+          console.error(callbackError)
+        }
+      } else {
+        console.error(
+          '[synqux] subscribe failed and no onSubscribeFailed is configured. The device may be left silently unconnected.',
+          error,
+        )
+      }
       throw error
     } finally {
       subscribing = false
@@ -1846,6 +1966,13 @@ export const createSynqux = <
       )
     }
     if (!instanceEnabled) {
+      return
+    }
+
+    // state 上の自 peer が既に目標 role なら transport へ書かない (冪等、ADR-0014 追補)。
+    // 自 peer が presence 反映前で state に居ない間は比較材料がないため素通しで更新する
+    const self = selectSelf(session.store.getState())
+    if (self && (self.role ?? 'player') === role) {
       return
     }
 
