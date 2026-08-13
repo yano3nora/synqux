@@ -2,7 +2,11 @@ import { readFileSync } from 'node:fs'
 import type { Action } from '@reduxjs/toolkit'
 import { describe, expect, expectTypeOf, it } from 'vitest'
 import * as synqux from './index.js'
-import { SYNQUX_VERSION, type SynquxAutomation } from './index.js'
+import {
+  SYNQUX_VERSION,
+  type SynquxAutomation,
+  type SynquxListener,
+} from './index.js'
 
 describe('package smoke test', () => {
   it('SYNQUX_VERSION は package.json の version と一致する (publish 時の更新漏れ検出)', () => {
@@ -53,6 +57,23 @@ describe('package smoke test', () => {
       when: (synced: { count: number }, ctx: { now: number }) => boolean
       action: (synced: { count: number }) => Action
       retryMs?: number
+    }>()
+  })
+
+  it('SynquxListener 型を main entry から公開し、effect ctx は synced だけを持つ', () => {
+    type Listener = SynquxListener<{ count: number }, Action>
+
+    expectTypeOf<Listener>().toMatchTypeOf<{
+      id: string
+      match: (action: Action) => boolean
+      mode: 'host-only' | 'everyone'
+      effect: (
+        action: Action,
+        ctx: { synced: { count: number } },
+      ) => void | Promise<void>
+    }>()
+    expectTypeOf<Parameters<Listener['effect']>[1]>().toEqualTypeOf<{
+      synced: { count: number }
     }>()
   })
 })

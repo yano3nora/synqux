@@ -134,6 +134,7 @@ NOTE: `markApplied` を dispatch **前**へ前倒しする案は不可 (dispatch
 4. **validation は reducer に集約し、`stateWithError` で表現する**: middleware や UI 側に成否判定を分散させない。reducer が唯一の判定器であることが同期の前提
 5. **result は synced action ごとに再生成する** (ADR-0013): `createSynquxRootReducer` なら自動。primitive 方式では synced reducer の前段で `stateWithDefaultResult` を必ず呼ぶ。これを省くと過去の error が次の request を誤って拒否する
 6. **UI からの自動 dispatch を作らない** (ADR-0015): ユーザー起点操作は即時 dispatch し、付随効果は reducer 内で同一 request として原子的に適用する (content へ action オブジェクトを埋め込んで UI の setTimeout で dispatch する形は、cleanup 漏れ・全端末 fan-out・複数 request 化の温床)。演出は state を読む render 制御のみで表現し、端末ローカルな演出タイマーをロジックのゲートにしない。表示と同時の自動実行が必要なら automations の汎用ルールで行う
+7. **synced action への反応は listeners で書く** (ADR-0017): 外部通知・演出・記録は listeners に集約する。synqux middleware 後段の手書き listener や React hook での自作は、配置順序・restore replay の再送・host ゲート漏れの温床になるため禁止する。synced action に追従する local state は locals reducer の `extraReducers` で決定的に表現し、local dispatch を伴う反応だけは consumer の RTK listener に残す
 
 ## 改善ロードマップ
 

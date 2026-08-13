@@ -129,6 +129,12 @@ export type CreateSynquxConfig<
    */
   automations?: SynquxAutomation<TSynced, TAction>[]
   /**
+   * 適用済み synced action に反応する live 配信専用 rule 表 (ADR-0017)。
+   * host-only / everyone の発火主体、restore replay の除外、effect 失敗の隔離を
+   * engine が担う。effect は best-effort のため冪等にし、dispatch しないこと
+   */
+  listeners?: SynquxListener<TSynced, TAction>[]
+  /**
    * host 生存監視 (ADR-0016)。host は heartbeatIntervalMs (既定 30,000) ごとに
    * presence の lastSeenAt をサーバ時刻で更新し、他端末は staleThresholdMs
    * (既定 180,000) を超えて沈黙した host を guest へ降格して migration を促す。
@@ -175,6 +181,22 @@ export type SynquxAutomation<TSynced, TAction extends Action> = {
   action: (synced: TSynced) => TAction
   /** 再発行間隔 ms。既定 1000 */
   retryMs?: number
+}
+
+/**
+ * 適用済み synced action に反応する live 配信専用 listener (ADR-0017)。
+ * restore replay では発火せず、throw / rejection は engine が握りつぶす。
+ * exactly-once は保証しないため effect は冪等にし、effect から dispatch しないこと
+ */
+export type SynquxListener<TSynced, TAction extends Action> = {
+  /** rule の識別子。重複は createSynqux が throw */
+  id: string
+  /** 適用された synced action に対する発火トリガー */
+  match: (action: TAction) => boolean
+  /** host 端末だけで発火するか、適用した全端末で発火するか */
+  mode: 'host-only' | 'everyone'
+  /** dispatch を持たない副作用本体。ctx は適用後の synced state のみ */
+  effect: (action: TAction, ctx: { synced: TSynced }) => void | Promise<void>
 }
 
 export type SynquxSubscribeOptions<TRoot> = {

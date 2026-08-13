@@ -169,6 +169,9 @@ export type CreateSynquxConfig<
   /** host が synced state とサーバ時刻から評価する自動 dispatch rule */
   automations?: SynquxAutomation<TSynced, TAction>[]
 
+  /** 適用済み synced action に反応する live 配信専用 listener */
+  listeners?: SynquxListener<TSynced, TAction>[]
+
   /**
    * host 生存監視 (ADR-0016)。host は heartbeatIntervalMs ごとに presence の
    * lastSeenAt をサーバ時刻で更新し、他端末は staleThresholdMs を超えて沈黙した
@@ -208,6 +211,25 @@ export type SynquxAutomation<TSynced, TAction extends Action> = {
 
   /** when が true のままの場合の再発行間隔。既定 1000ms */
   retryMs?: number
+}
+
+/**
+ * 適用済み synced action に反応する live 配信専用 listener。
+ * exactly-once は保証しないため effect は冪等にし、effect から dispatch しないこと。
+ * throw / rejection は engine が記録して握りつぶし、restore replay では発火しない。
+ */
+export type SynquxListener<TSynced, TAction extends Action> = {
+  /** rule の識別子。1 instance 内で一意であること */
+  id: string
+
+  /** 適用された synced action に対する発火トリガー */
+  match: (action: TAction) => boolean
+
+  /** host 端末だけで発火するか、適用した全端末で発火するか */
+  mode: 'host-only' | 'everyone'
+
+  /** 副作用本体。dispatch は渡さず、適用後の synced state だけを渡す */
+  effect: (action: TAction, ctx: { synced: TSynced }) => void | Promise<void>
 }
 
 export type SynquxSubscribeOptions<TRoot> = {
@@ -301,6 +323,7 @@ export const createSynqux = <
   const canRequest = config.canRequest ?? (() => true)
   const stallAfterMs = config.stallAfterMs ?? 30_000
   const automations = config.automations ?? []
+  const listeners = config.listeners ?? []
   const localSnapshots = (() => {
     if (config.localSnapshots === false) {
       return undefined
@@ -343,6 +366,19 @@ export const createSynqux = <
       throw new Error(
         `SynquxAutomation retryMs must be a positive finite number: ${automation.id}`,
       )
+    }
+  }
+
+  const listenerIds = new Set<string>()
+
+  for (const listener of listeners) {
+    if (listenerIds.has(listener.id)) {
+      throw new Error(`Duplicate SynquxListener id: ${listener.id}`)
+    }
+    listenerIds.add(listener.id)
+
+    if (listener.mode !== 'host-only' && listener.mode !== 'everyone') {
+      throw new Error(`Invalid SynquxListener mode: ${String(listener.mode)}`)
     }
   }
 
@@ -508,6 +544,55 @@ export const createSynqux = <
   // action 適用 middleware から、現在の subscribe session に属する engine だけを
   // 起こす。未 subscribe / unsubscribe 後は no-op に戻して session leak を防ぐ。
   let evaluateAutomationsAfterApply: () => void = () => undefined
+
+  /** automations / listeners が共有する presence 由来の host 判定。 */
+  const isSelfHost = (root: TRoot): boolean => {
+    if (!instanceEnabled) {
+      return true
+    }
+
+    const { selfId, entities } = root.synqux.connections
+    return !!selfId && deriveHostId(Object.values(entities)) === selfId
+  }
+
+  /**
+   * 実適用後かつ live の action だけを配列順に評価する。effect は同期適用を
+   * block せず、個別の失敗を次の rule や後続 action へ伝播させない。
+   */
+  const fireListenersAfterApply = (root: TRoot, action: TAction): void => {
+    if (listeners.length === 0 || root.synqux.phase !== 'live') {
+      return
+    }
+
+    // 1 発火点につき synced の導出は 1 回だけ行い、全 rule で適用後 state を共有する。
+    const synced = config.selectSynced(root)
+
+    for (const listener of listeners) {
+      if (listener.mode === 'host-only' && !isSelfHost(root)) {
+        continue
+      }
+
+      let matched: boolean
+      try {
+        matched = listener.match(action)
+      } catch (error) {
+        console.error(error)
+        continue
+      }
+
+      if (!matched) {
+        continue
+      }
+
+      try {
+        void Promise.resolve(listener.effect(action, { synced })).catch(
+          (error: unknown) => console.error(error),
+        )
+      } catch (error) {
+        console.error(error)
+      }
+    }
+  }
 
   type SubscribeCleanup = () => void | Promise<void>
 
@@ -763,7 +848,9 @@ export const createSynqux = <
 
       if (isSynced) {
         // 適用 (同期 dispatch・standalone 双方) が生んだ result.log を出力する
-        emitAppliedResultLog(store.getState() as TRoot, action as UnknownAction)
+        const root = store.getState() as TRoot
+        emitAppliedResultLog(root, action as UnknownAction)
+        fireListenersAfterApply(root, action as TAction)
         evaluateAutomationsAfterApply()
       }
 
@@ -1194,14 +1281,6 @@ export const createSynqux = <
 
       const lastIssuedAt = new Map<string, number>()
       let active = true
-      const isAutomationHost = (root: TRoot): boolean => {
-        if (!instanceEnabled) {
-          return true
-        }
-
-        const { selfId, entities } = root.synqux.connections
-        return !!selfId && deriveHostId(Object.values(entities)) === selfId
-      }
 
       const evaluate = async (): Promise<void> => {
         if (!active || session !== subscriptionSession) {
@@ -1209,7 +1288,7 @@ export const createSynqux = <
         }
 
         const beforeTime = store.getState()
-        if (!isAutomationHost(beforeTime) || !canRequest(beforeTime)) {
+        if (!isSelfHost(beforeTime) || !canRequest(beforeTime)) {
           return
         }
 
@@ -1228,7 +1307,7 @@ export const createSynqux = <
         }
 
         const root = store.getState()
-        if (!isAutomationHost(root) || !canRequest(root)) {
+        if (!isSelfHost(root) || !canRequest(root)) {
           return
         }
 
