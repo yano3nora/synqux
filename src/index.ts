@@ -4,7 +4,7 @@
  * 設計は docs/ADR-0001-design.md、同期仕様は docs/SPEC-0001-requests-sync.md、
  * 公開 API の境界と理由は docs/SPEC-0002-public-api.md を参照。
  */
-export const SYNQUX_VERSION = '0.8.0'
+export const SYNQUX_VERSION = '0.9.0'
 
 // 共有語彙 (契約型)
 export * from './core/types.js'
