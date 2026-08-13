@@ -18,6 +18,9 @@ describe('host 裁定 lifecycle', () => {
     vi.useFakeTimers()
     vi.setSystemTime(new Date('2026-07-20T00:00:00.000Z'))
     vi.spyOn(console, 'error').mockImplementation(() => undefined)
+    // announce は result envelope の検証用で、result.log の console 出力
+    // (announce applied) はここでは対象外のため黙らせる
+    vi.spyOn(console, 'log').mockImplementation(() => undefined)
   })
 
   afterEach(() => {

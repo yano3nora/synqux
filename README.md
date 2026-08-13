@@ -482,7 +482,7 @@ npm run dev:test   # vitest watch
 npm run build      # build to dist with d.ts
 ```
 
-## Publishing
+## Release
 Publishing is a human decision, done manually (agents never run it). Version bump, test/build/smoke,
 and the publish gate are centralized in [`scripts/release.mjs`](./scripts/release.mjs). Distribution
 itself is `npm publish` (`prepublishOnly` forces test + build + smoke, so only green builds ship).
