@@ -45,6 +45,7 @@ export type SynquxHealth = {
 }
 
 export type SynquxPhase = 'idle' | 'subscribing' | 'live'
+export type SynquxMode = 'synced' | 'standalone'
 
 /**
  * 予約 key `state.synqux` 配下の内部 state (ADR-0001 Decision 7)
@@ -61,13 +62,8 @@ export type SynquxState = {
    */
   phase: SynquxPhase
 
-  /**
-   * false 時 middleware 動作を抑止し standalone 完結させる
-   * 初期値 true は「subscribe() までの間、request 送信条件 (selfId あり) が
-   * 揃わず素通しになる」移植元と同じ挙動に倒すための値。instance 設定
-   * (enabled: false) は subscribe() 時の sessionStarted で反映される
-   */
-  enabled: boolean
+  /** subscribe 時に固定される実効 mode。次の subscribe まで変更されない */
+  mode: SynquxMode
 
   health: SynquxHealth
 
@@ -84,7 +80,7 @@ export type SynquxState = {
 
 export const synquxInitialState: SynquxState = {
   phase: 'idle',
-  enabled: true,
+  mode: 'synced',
   health: {
     phase: 'ok',
     expectedSeq: null,
@@ -124,22 +120,17 @@ const synquxSlice = createSlice({
       state.phase = action.payload
     },
 
-    /** subscribe() 完了時に instance 設定と自端末 id を state へ反映する */
+    /** subscribe() 完了時に session の実効 mode と自端末 id を反映する */
     sessionStarted: (
       state,
-      action: PayloadAction<{ selfId: Peer['id'] | null; enabled: boolean }>,
+      action: PayloadAction<{ selfId: Peer['id'] | null; mode: SynquxMode }>,
     ) => {
-      state.enabled = action.payload.enabled
+      state.mode = action.payload.mode
       state.connections.selfId = action.payload.selfId
     },
 
     /** unsubscribe 時に全内部 state を破棄する (移植元 disconnectConnections 相当) */
     sessionEnded: () => synquxInitialState,
-
-    /** tutorial 等で runtime に同期を on/off する (移植元 _prepareTutorial 相当) */
-    setEnabled: (state, action: PayloadAction<boolean>) => {
-      state.enabled = action.payload
-    },
 
     healthChanged: (state, action: PayloadAction<SynquxHealth>) => {
       state.health = action.payload

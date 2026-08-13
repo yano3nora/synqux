@@ -10,12 +10,12 @@ type WithSynqux = { synqux: SynquxState }
 
 /**
  * 自端末が host か
- * standalone (enabled=false) 時は常に true として単独進行させる (移植元踏襲)
+ * standalone 時は常に true として単独進行させる (移植元踏襲)
  */
 export const selectIsHost = (root: WithSynqux): boolean => {
-  const { enabled, connections } = root.synqux
+  const { mode, connections } = root.synqux
 
-  if (!enabled) {
+  if (mode === 'standalone') {
     return true
   }
 

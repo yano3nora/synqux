@@ -54,8 +54,11 @@ const setup = () => {
     return actionSeenByLocal
   }
 
-  const startSession = (enabled: boolean, selfId: string | null) => {
-    dispatch(synquxActions.sessionStarted({ enabled, selfId }))
+  const startSession = (
+    mode: 'synced' | 'standalone',
+    selfId: string | null,
+  ) => {
+    dispatch(synquxActions.sessionStarted({ mode, selfId }))
   }
 
   return { dispatch, matchers, startSession }
@@ -83,7 +86,7 @@ describe('createSyncedActionMatchers', () => {
 
   it('standalone で hash が両側 undefined でも非 synced action を成功と誤判定しない', () => {
     const { dispatch, matchers, startSession } = setup()
-    startSession(false, null)
+    startSession('standalone', null)
     dispatch(gameAction('game/increment'))
 
     const localAction = dispatch({ type: 'local/open-scene' })
@@ -103,7 +106,7 @@ describe('createSyncedActionMatchers', () => {
 
   it('standalone では成功した synced action を自分の操作と判定する', () => {
     const { dispatch, matchers, startSession } = setup()
-    startSession(false, null)
+    startSession('standalone', null)
     const action = dispatch(gameAction('game/increment'))
 
     expect(matchers.isMySucceededAction(action)).toBe(true)
@@ -117,7 +120,7 @@ describe('createSyncedActionMatchers', () => {
     '同期中は requestedBy=$requestedBy / selfId=$selfId で $expected',
     ({ requestedBy, selfId, expected }) => {
       const { dispatch, matchers, startSession } = setup()
-      startSession(true, selfId)
+      startSession('synced', selfId)
       const action = dispatch(
         gameAction('game/increment', { hash: 'synced', requestedBy }),
       )
@@ -142,7 +145,11 @@ describe('createSyncedActionMatchers', () => {
 
 describe('isSynquxAction', () => {
   it('内部 action を判定し consumer action を除外する', () => {
-    expect(isSynquxAction(synquxActions.setEnabled(true))).toBe(true)
+    expect(
+      isSynquxAction(
+        synquxActions.sessionStarted({ selfId: null, mode: 'standalone' }),
+      ),
+    ).toBe(true)
     expect(isSynquxAction(synquxRestored({ synced: {} }))).toBe(true)
     expect(isSynquxAction({ type: 'game/foo' })).toBe(false)
   })

@@ -39,19 +39,19 @@ const reduce = (
 ): SynquxState => actions.reduce(synquxReducer, state)
 
 describe('synquxSlice', () => {
-  it('sessionStarted で instance 設定 (enabled / selfId) を state に反映する', () => {
+  it('sessionStarted で session 設定 (mode / selfId) を state に反映する', () => {
     const state = reduce(
       synquxInitialState,
-      synquxActions.sessionStarted({ selfId: 'peer-1', enabled: true }),
+      synquxActions.sessionStarted({ selfId: 'peer-1', mode: 'synced' }),
     )
-    expect(state.enabled).toBe(true)
+    expect(state.mode).toBe('synced')
     expect(state.connections.selfId).toBe('peer-1')
   })
 
   it('sessionEnded で内部 state を全破棄する (移植元 disconnectConnections 相当)', () => {
     const state = reduce(
       synquxInitialState,
-      synquxActions.sessionStarted({ selfId: 'peer-1', enabled: true }),
+      synquxActions.sessionStarted({ selfId: 'peer-1', mode: 'synced' }),
       synquxActions.peerUpserted(peer({ id: 'peer-1', connected: 1 })),
       synquxActions.requestAdded({ request: pending({ id: 'r-1' }) }),
       synquxActions.sessionEnded(),
@@ -167,10 +167,10 @@ describe('synquxSlice', () => {
 describe('selectors', () => {
   const withSynqux = (synqux: SynquxState) => ({ synqux })
 
-  it('standalone (enabled=false) では常に host', () => {
+  it('standalone では常に host', () => {
     const state = reduce(
       synquxInitialState,
-      synquxActions.sessionStarted({ selfId: null, enabled: false }),
+      synquxActions.sessionStarted({ selfId: null, mode: 'standalone' }),
     )
     expect(selectIsHost(withSynqux(state))).toBe(true)
   })
@@ -182,7 +182,7 @@ describe('selectors', () => {
   it('host 導出結果が自端末なら host', () => {
     const state = reduce(
       synquxInitialState,
-      synquxActions.sessionStarted({ selfId: 'peer-2', enabled: true }),
+      synquxActions.sessionStarted({ selfId: 'peer-2', mode: 'synced' }),
       synquxActions.peerUpserted(peer({ id: 'peer-1', connected: 1 })),
       synquxActions.peerUpserted(peer({ id: 'peer-2', connected: 2 })),
     )
@@ -209,7 +209,7 @@ describe('selectors', () => {
   it('host 離脱で自端末が次点なら host に昇格する (host migration)', () => {
     const both = reduce(
       synquxInitialState,
-      synquxActions.sessionStarted({ selfId: 'peer-1', enabled: true }),
+      synquxActions.sessionStarted({ selfId: 'peer-1', mode: 'synced' }),
       synquxActions.peerUpserted(peer({ id: 'peer-1', connected: 1 })),
       synquxActions.peerUpserted(peer({ id: 'peer-2', connected: 2 })),
     )

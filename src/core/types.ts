@@ -211,7 +211,7 @@ export type SnapshotEnvelope<TSynced> = {
  *
  * 封筒構築と canonical JSON 直列化は core の責務で、store 実装は payload を
  * parse せず fence と並べて保存する。transport の snapshot API と standalone
- * (enabled=false) の localSnapshots が本契約を共有する
+ * mode の localSnapshots が本契約を共有する
  */
 export type SnapshotFence = { epoch: number; appliedSeq: number }
 

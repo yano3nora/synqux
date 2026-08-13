@@ -123,7 +123,7 @@ describe('subscribe initialization transaction', () => {
   })
 
   it('standalone も subscribe 完了後は live になる', async () => {
-    const client = createHubClient(createMemoryHub(), { enabled: false })
+    const client = createHubClient(createMemoryHub(), { mode: 'standalone' })
     const unsubscribe = await client.sync.subscribe({
       store: client.store,
       groupId: GROUP_ID,
@@ -268,7 +268,7 @@ describe('subscribe initialization transaction', () => {
       },
     }
     const client = createHubClient(createMemoryHub(), {
-      enabled: false,
+      mode: 'standalone',
       localSnapshots,
     })
 

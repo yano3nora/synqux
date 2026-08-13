@@ -208,24 +208,37 @@ case 'game/harvest': {
 - On the sync path, `meta.dispatched` is overwritten at request time with the transport's server-based clock (`serverNow()`).
 - The only meta fields a reducer may read are `requestedBy` and `dispatched` (SPEC-0002).
 - Performance: the firebase transport subscribes to `.info/serverTimeOffset` once at connection and caches it, so `serverNow()` is `Date.now() + offset` — O(1), no round trip per request.
-- Caveat: in standalone mode (`enabled: false`) or while `setEnabled(false)`, `dispatched` falls back to the device clock. A single device can't disagree with itself, but "server-based" is only guaranteed on the sync path.
+- Caveat: in standalone mode, `dispatched` falls back to the device clock. A single device can't disagree with itself, but "server-based" is only guaranteed on the sync path.
 
-### Pause syncing for tutorials (`setEnabled`)
+### Run a local tutorial session
 
-**Concept.** A tutorial wants to run the same reducers locally without polluting the real synced state. `setEnabled(false)` is a **send gate**: synced actions skip request creation and apply locally, immediately, without persistence.
+**Concept.** A tutorial needs the same reducers without joining or polluting the real sync group. Replace the synced session with a non-persistent standalone session, then subscribe again to restore canonical history.
 
 ```ts
-store.dispatch(synqux.actions.setEnabled(false)) // tutorial starts (local-only from here)
-store.dispatch({ type: 'game/reset' })          // tutorial setup is a plain action too
-// ... tutorial plays out; every dispatch applies locally ...
+let unsubscribe = await synqux.subscribe({ store, groupId })
+
+export const startTutorial = () => async () => {
+  await unsubscribe()
+  unsubscribe = await synqux.subscribe({
+    store,
+    groupId,
+    mode: 'standalone',
+    localSnapshots: false,
+  })
+  store.dispatch({ type: 'game/reset' })
+}
+
+export const finishTutorial = () => async () => {
+  await unsubscribe()
+  unsubscribe = await synqux.subscribe({ store, groupId })
+}
 ```
 
 **Behavior.**
 
-- Only sending stops. Receiving and host duties keep running.
-- Precondition: **use it while no other device in the group is active.** If the group is live, remote applies interleave with your local divergence — and if you are the host, you arbitrate and snapshot on top of diverged state, corrupting the canonical synced state.
-- Returning: flipping back to `setEnabled(true)` does not erase local divergence. End the tutorial with the equivalent of a reload — a fresh store and a new `subscribe` — to return to the snapshot's canonical history.
-- Full contract: [SPEC-0001](./docs/SPEC-0001-requests-sync.md), "setEnabled".
+- The standalone session does not connect, register presence, push requests, or read/write local snapshots.
+- Do not dispatch synced actions during the `unsubscribe → subscribe` transition window; the app-level thunk owns that exclusion.
+- Re-subscribing in synced mode restores the canonical snapshot. Local tutorial state is deliberately not merged.
 
 ### Auto-dispatch on timers or state conditions (`automations`)
 
@@ -249,7 +262,7 @@ const synqux = createSynqux({
 - Evaluated at two points: **right after each synced action applies**, and **every `retryMs` (default 1000ms)**. While `when` stays true, the action is re-issued every `retryMs`.
 - `when` sees only synced state and server time. Local presentation state and locals are unavailable by design (blocked at the type level).
 - The engine does not guarantee exactly-once (a dual-host window can double-fire). Make the reducer reject the second application (`assertActionIdempotency` mode `'rejects-repeat'`), and use a message-less `stateWithError` (log-only) for retry rejections to avoid UI noise.
-- Host migration needs no handoff: the new host derives the same conclusion from state. Evaluation continues during tutorials (`setEnabled(false)`) — gate rules you want paused via a predicate on synced state (e.g. a tutorial flag).
+- Host migration needs no handoff: the new host derives the same conclusion from state. Automations also run in standalone sessions — gate rules you want paused via a predicate on synced state (e.g. a tutorial flag).
 
 ### React to applied actions (`listeners`)
 
@@ -298,7 +311,7 @@ if (result.type === 'error') { /* rejected */ }
 
 ### Run without sync (standalone)
 
-**Concept.** Standalone mode (`enabled: false`) runs the exact same reducers and dispatch flow on a single device, so a solo mode or an offline title screen needs no separate code path.
+**Concept.** Standalone mode (`mode: 'standalone'`) runs the exact same reducers and dispatch flow on a single device, so a solo mode or an offline title screen needs no separate code path.
 
 **Behavior.**
 
@@ -348,7 +361,7 @@ Setup layer (touched only by the single setup file in your template):
 
 | export | description |
 | --- | --- |
-| `createSynqux(config)` | Creates a sync instance. Returns `middlewares` / `rootReducer` / `reducer` / `subscribe` / `setRole` / `dispatchAndWait` / `actions.setEnabled` / `selectSynced` |
+| `createSynqux(config)` | Creates a sync instance. Returns `middlewares` / `rootReducer` / `reducer` / `subscribe` / `setRole` / `dispatchAndWait` / `selectSynced` |
 | `createSynquxRootReducer({ isSyncedAction, synced, locals })` | Serial rootReducer helper ("synced is pure, locals see earlier stages"). Auto-stamps a default success result on synced actions (ADR-0013). Spread the return value (`rootReducer` / `selectSynced` / `isSyncedAction`) into the `createSynqux` config |
 | `localStorageSnapshotStore()` | Default browser persistence for standalone mode. Pass to `localSnapshots` to use or replace explicitly |
 | `synquxReducer` | Internal slice reducer mounted at the reserved key `state.synqux` (for the primitive wiring style) |

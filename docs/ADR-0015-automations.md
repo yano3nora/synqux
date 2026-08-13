@@ -45,3 +45,10 @@ SPEC-0001 ガイドライン 2「1 度しか発火しない自動 dispatch を�
 - host migration の引き継ぎ状態がゼロになる — 新 host は synced state から同じ結論を導出するだけで、queue の移譲も再スケジュールも不要。リロード・途中参加も snapshot restore がそのまま復旧手段になる
 - dual-host 窓・push 失敗・遅延は「次の評価パスでの再発行 + reducer 契約」で吸収する。retry 由来の拒否 result は log 専用推奨により UI ノイズにならない
 - API 表面積の増分は型 1 つ + config 1 項目 + instance メソッド 1 つ。breaking change なし (minor release)
+
+## Amendment (2026-08-13): setEnabled の廃止 (ADR-0018)
+
+runtime の `setEnabled(false)` は ADR-0018 で廃止され、tutorial は standalone session
+(`subscribe({ mode: 'standalone' })`) で表現されるようになった。Decision 4 の
+「enabled gate は設けない (tutorial 中も評価継続)」は「mode gate は設けない
+(standalone session でも評価継続・local 適用)」と読み替える。本文は当時の記録のまま残す。

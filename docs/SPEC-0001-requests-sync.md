@@ -87,13 +87,14 @@ client                      firebase                     host
 - **push 失敗・切断による取りこぼしは依然あり得る**ため「タイマー等で 1 度しか発火しない action」は禁止。state 監視で retry するか、ユーザ操作で dispatch させる作りにする (v1 の「遅延 request の意図的ドロップ」は seq 化で消滅したが、この一般則は残る)
 - **log 専用の error result (`result.type === 'error' && message なし`) の request は dispatch せず `console.error` へ流す** (連打・遅延で弾かれた操作の通知はノイズのため)。result の通知チャネルは message (UI 表示、表示は consumer 責務) と log (console 出力、synqux が targets 準拠で出力) の 2 系統 (ADR-0008)
 
-### setEnabled の契約 (runtime on/off、tutorial 用途)
+### tutorial (local 分岐 session)
 
-`actions.setEnabled(false)` は**送信ゲートのみ** (移植元 `_prepareTutorial` と同じセマンティクス)。再現テスト: `src/core/set-enabled.test.ts`
+tutorial は現在の購読を `unsubscribe()` してから、`subscribe({ mode: 'standalone', localSnapshots: false })` で独立 session として開始する。再現テスト: `src/core/session-mode.test.ts`
 
-- off 中の synced action は request 化されず **local にのみ即時適用**される (楽観更新なし原則の意図的な例外)。transport への push・localSnapshots への永続化は行わない (standalone = instance `enabled: false` とは別物)
-- **受信 request の適用・host 責務・購読は止まらない**。グループが動いていると remote 適用が local 乖離へ混ざり、さらに**自端末が host の場合は乖離した state を土台に裁定・snapshot 保存されるため、正史そのものが汚染されて群内で state が割れる** (host 導出は peer pool の全端末合意であり、enabled は端末 local のため host 候補から自動では外れない)。tutorial は「グループに他端末がいない / 動いていない」前提で使うこと
-- `setEnabled(true)` に戻しても off 中の local 乖離は残る。自端末が host にならない限り乖離が正史へ乗ることはないが、自端末の以降の同期適用は乖離した土台に乗り続ける。**tutorial 後の復帰はリロード相当 (新しい store / client での再 subscribe) で snapshot の正史へ戻すこと**
+- standalone session は group に presence 登録せず、request の送受信・host 責務・snapshot の read/write を一切行わない。synced action は local に即時適用される
+- 切替中は phase が `live → idle → subscribing → live` と遷移する。この窓で synced action を dispatch しないことは consumer の tutorial 開始・終了 thunk の責務
+- tutorial 終了時は standalone session を `unsubscribe()` し、通常の `subscribe()` を再実行する。synced snapshot が local 分岐 state を全量置換し、正史へ復帰する
+- local 分岐 state の正史へのマージは提供しない。host 採番 seq による単一の適用列と両立しないため
 
 ## 既知の問題
 

@@ -214,7 +214,7 @@ describe('sync health', () => {
 
     const timersBeforeStandalone = vi.getTimerCount()
     const standalone = createHubClient(hub, {
-      enabled: false,
+      mode: 'standalone',
       stallAfterMs: STALL_AFTER_MS,
     })
     const unsubscribeStandalone = await standalone.sync.subscribe({

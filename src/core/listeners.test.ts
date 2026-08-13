@@ -245,10 +245,10 @@ describe('listeners', () => {
     expect(client.store.getState().game.count).toBe(2)
   })
 
-  it('standalone と setEnabled(false) 中の local 適用で発火する', async () => {
+  it('instance / session 指定の standalone の local 適用で発火する', async () => {
     const standaloneEffect = vi.fn()
     const standalone = createClient(createMemoryHub().createTransport(), {
-      enabled: false,
+      mode: 'standalone',
       listeners: [
         incrementListener('standalone', 'host-only', standaloneEffect),
       ],
@@ -265,13 +265,16 @@ describe('listeners', () => {
     const local = createHubClient(hub, {
       listeners: [incrementListener('local', 'host-only', localEffect)],
     })
-    await local.sync.subscribe({ store: local.store, groupId: 'local' })
-    await settle(5)
-    local.store.dispatch(local.sync.actions.setEnabled(false))
+    const unsubscribe = await local.sync.subscribe({
+      store: local.store,
+      groupId: 'local',
+      mode: 'standalone',
+    })
     local.store.dispatch({ type: 'game/increment', payload: 1 })
 
     expect(localEffect).toHaveBeenCalledTimes(1)
     expect(hub.inspect.requests('local')).toEqual([])
+    await unsubscribe()
   })
 
   it('id 重複と不正な mode は createSynqux が同期的に throw する', () => {

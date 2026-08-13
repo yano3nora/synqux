@@ -61,3 +61,11 @@
 - host migration の引き継ぎ状態はゼロ — 新 host は以後の適用で発火するだけ。遡り発火・queue 移譲はない
 - dispatch を渡さないため、local dispatch を伴う反応は consumer の RTK listener に残る (本機構が RTK listener を全廃するわけではない)。実測で要求が出たら「synced action は拒否するガード付き dispatch」を追補で検討する
 - API 表面積の増分は型 1 つ + config 1 項目。breaking change なし (minor release)
+
+## Amendment (2026-08-13): setEnabled の廃止 (ADR-0018)
+
+runtime の `setEnabled(false)` は ADR-0018 で廃止され、tutorial は standalone session
+(`subscribe({ mode: 'standalone' })`) で表現されるようになった。Context の
+「`selectIsHost` は `setEnabled(false)` 中に常時 true」および Decision 2 / 8 の
+setEnabled 言及は standalone session に読み替える (standalone は host 常時 true のまま)。
+本文は当時の記録のまま残す。

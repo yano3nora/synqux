@@ -59,7 +59,7 @@ describe('synqux/react hooks', () => {
     const { store, wrapper } = setup()
 
     store.dispatch(
-      synquxActions.sessionStarted({ selfId: 'peer-1', enabled: true }),
+      synquxActions.sessionStarted({ selfId: 'peer-1', mode: 'synced' }),
     )
     store.dispatch(
       synquxActions.peerUpserted({ id: 'peer-1', groupId: 'g', connected: 1 }),
@@ -113,7 +113,7 @@ describe('synqux/react hooks', () => {
   it('useMyLatestResult は自端末宛てだけを返す', () => {
     const { store, wrapper } = setup()
     store.dispatch(
-      synquxActions.sessionStarted({ selfId: 'peer-1', enabled: true }),
+      synquxActions.sessionStarted({ selfId: 'peer-1', mode: 'synced' }),
     )
     store.dispatch({
       type: 'game/message-forbidden',

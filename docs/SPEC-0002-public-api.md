@@ -115,8 +115,8 @@ export type CreateSynquxConfig<
   rootReducer: Reducer<TRoot>
   /** 試し実行結果から result を読む位置。通常 createSynquxRootReducer の返り値を渡す */
   selectSynced: (root: TRoot) => TSynced
-  /** false で standalone (同期なし・host 常時 true)。既定 true。runtime 切替は actions.setEnabled */
-  enabled?: boolean
+  /** subscribe 時の既定 mode。既定 'synced' */
+  mode?: 'synced' | 'standalone'
   /** seq gap が継続したと判定するヒステリシス ms。既定 30,000。correctness には使わない */
   stallAfterMs?: number
   /** readonly 端末などで request 送信自体を抑止する hook (移植元 scenes.readonly 相当)。既定 () => true */
@@ -124,8 +124,7 @@ export type CreateSynquxConfig<
   /**
    * host だけが評価する自動 dispatch rule 表 (ADR-0015)。非ユーザー起点 dispatch
    * (状態 watcher / タイマー / retry) の統一 API。標準 middleware 経路で request 化
-   * されるため canRequest に従う。setEnabled(false) 中も評価を止めない (tutorial 中の
-   * 制御は consumer が when の述語で行う)
+   * されるため canRequest に従う。standalone session でも local に適用する
    */
   automations?: SynquxAutomation<TSynced, TAction>[]
   /**
@@ -143,9 +142,9 @@ export type CreateSynquxConfig<
    */
   hostLiveness?: SynquxHostLiveness | false
   /**
-   * standalone (enabled=false で生成した instance) の synced state 永続化先。
+   * standalone session の synced state 永続化先。
    * browser では省略時に localStorageSnapshotStore() を使い、false で無効化する。
-   * SnapshotStore 注入で差し替え可能。runtime の setEnabled(false) では保存しない
+   * SnapshotStore 注入で差し替え可能
    */
   localSnapshots?: SnapshotStore | false
   /** 購読 phase の実遷移通知。同値遷移では呼ばない */
@@ -204,6 +203,10 @@ export type SynquxSubscribeOptions<TRoot> = {
   groupId: string
   role?: Peer['role']
   label?: Peer['label']
+  /** session の mode。instance の既定値を上書き */
+  mode?: 'synced' | 'standalone'
+  /** この standalone session に限り永続化を無効化 */
+  localSnapshots?: false
   /** 初期化の中断。低レベル API では省略時に無期限待機 */
   signal?: AbortSignal
 }
@@ -223,7 +226,7 @@ export type Synqux<TRoot, TSynced, TAction> = {
 
   /**
    * presence 登録 → snapshot restore → requests 購読を開始する
-   * standalone (enabled=false) 時は transport に触れず localSnapshots から restore する
+   * standalone 時は transport に触れず localSnapshots から restore する
    * 返り値で購読破棄 + presence 解除。二重購読はインスタンス内部でガード
    */
   subscribe: (options: SynquxSubscribeOptions<TRoot>) => Promise<() => Promise<void>>
@@ -238,14 +241,10 @@ export type Synqux<TRoot, TSynced, TAction> = {
    * 全端末への適用完了は分散システム上保証できない。timeout は提供せず consumer が
    * AbortSignal.timeout() 等で選ぶ (ADR-0012 と同じ政策)。未 subscribe は throw、
    * 非 synced action / canRequest false (request 化されず解決不能) は即 reject。
-   * standalone / setEnabled(false) 中は local 即時適用の result で即 resolve
+   * standalone 中は local 即時適用の result で即 resolve
    */
   dispatchAndWait(action: TAction, options?: { signal?: AbortSignal }): Promise<Result<TAction>>
 
-  actions: {
-    /** tutorial 等で runtime に同期を on/off する (移植元 _prepareTutorial 相当) */
-    setEnabled: ActionCreator<boolean>
-  }
 }
 
 export function createSynqux<TRoot, TSynced, TAction>(
@@ -386,7 +385,7 @@ export function isResultForPeer(
 // state.synqux が予約 key のため instance 不要の静的関数として提供できる
 // ============================================================
 
-export function selectIsHost(root: { synqux: SynquxState }): boolean  // standalone (enabled=false) 時は常に true
+export function selectIsHost(root: { synqux: SynquxState }): boolean  // standalone 時は常に true
 export function selectPeers(root: { synqux: SynquxState }): Peer[]
 export function selectSelfId(root: { synqux: SynquxState }): Peer['id'] | null
 export function selectSelf(root: { synqux: SynquxState }): Peer | null
@@ -411,7 +410,7 @@ export function selectIsSyncUnrecoverable(root: { synqux: SynquxState }): boolea
 export type SynquxState = {
   /** subscribe の初期 restore 中か、ライブ配信へ移ったか。自動回復中は live のまま */
   phase: 'idle' | 'subscribing' | 'live'
-  enabled: boolean
+  mode: 'synced' | 'standalone'
   health: SynquxHealth
   connections: {
     selfId: Peer['id'] | null
@@ -424,7 +423,7 @@ export type SynquxState = {
 }
 ```
 
-- 移植元との差分: `requests.enabled` → `synqux.enabled` へ昇格 (requests/connections を synqux 予約 key 配下に統合)。`connections.isNotFoundGame` / `connections.agent` は consumer 固有のため core から除外 (agent 相当は subscribe の `role: 'dedicated'` + `label` オプションへ)
+- session の実効 mode は `synqux.mode` に保持し、subscribe 中は固定する。`connections.isNotFoundGame` / `connections.agent` は consumer 固有のため core から除外 (agent 相当は subscribe の `role: 'dedicated'` + `label` オプションへ)
 - prev チェーン / revisions / 処理中ガードは redux state にすら置かず、インスタンス内部の順序判定モジュール (Decision 10) に持つ。ゲーム開発者から語彙ごと見えない
 
 ### `synqux/react` (ゲーム開発者層)
@@ -678,4 +677,4 @@ type SnapshotEnvelope<TSynced> = {
 5. **`agent` / `guest` → `role: 'player' | 'dedicated' | 'observer'` へ改名** (レビュー決定): 排他 enum にすることで「agent かつ guest」という不正状態を型で排除。dedicated は「常駐プロセスを強制 host にして安定進行・無人進行を担う」ユースケース由来 (dedicated server 文化)。process id は `label` へ分離
    - その後 `observer` → `guest` へ再改名した (TASK-260811 / ADR-0014)。observer は readonly を暗示する一方、role の実際の作用は host 適格性だけであり、request 発行を制限しないため
 6. **`canRequest` hook を追加** (移植元の readonly 端末対応の一般化)。これがないとテンプレ置換 (Phase 2) が成立しないため
-7. **standalone の local 永続化を責務に含める** (レビュー決定): `localSnapshots?: SnapshotStore | false` として snapshot 機構と統合。browser では既定で localStorage へ保存し、`false` で無効化する。保存は「適用 synced action ごと」で host の snapshot 永続化と同じ policy 点を通る。runtime の `setEnabled(false)` では保存しない (移植元の tutorial 除外の一般化)
+7. **standalone の local 永続化を責務に含める** (レビュー決定): config の `localSnapshots?: SnapshotStore | false` として snapshot 機構と統合。browser では既定で localStorage へ保存し、`false` で無効化する。subscribe の `localSnapshots: false` は session 単位で read/write とも無効化する。保存は「適用 synced action ごと」で host の snapshot 永続化と同じ policy 点を通る

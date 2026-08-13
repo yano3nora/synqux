@@ -213,7 +213,7 @@ describe('createSynqux (end-to-end)', () => {
     }
   })
 
-  it('standalone (enabled=false) は即時ローカル適用し、localSnapshots で復元できる', async () => {
+  it('standalone は即時ローカル適用し、localSnapshots で復元できる', async () => {
     const saved = new Map<string, string>()
     const localSnapshots: SnapshotStore = {
       saveSnapshot: (key, payload) => {
@@ -224,7 +224,7 @@ describe('createSynqux (end-to-end)', () => {
     }
 
     const hub = createMemoryHub()
-    const first = createHubClient(hub, { enabled: false, localSnapshots })
+    const first = createHubClient(hub, { mode: 'standalone', localSnapshots })
     await first.sync.subscribe({ store: first.store, groupId: 'solo' })
 
     // standalone は常に host 扱いで、request 化せず即時に適用される
@@ -235,7 +235,7 @@ describe('createSynqux (end-to-end)', () => {
     expect(saved.has('solo')).toBe(true)
 
     // リロード相当: 新しい store + instance が localSnapshots から復元する
-    const second = createHubClient(hub, { enabled: false, localSnapshots })
+    const second = createHubClient(hub, { mode: 'standalone', localSnapshots })
     await second.sync.subscribe({ store: second.store, groupId: 'solo' })
     expect(second.store.getState().game.count).toBe(11)
     expect(second.store.getState().game.result).toBeNull()
@@ -343,7 +343,7 @@ describe('createSynqux (end-to-end)', () => {
       'synqux is not subscribed. Call subscribe() before setRole().',
     )
 
-    const standalone = createHubClient(hub, { enabled: false })
+    const standalone = createHubClient(hub, { mode: 'standalone' })
     await standalone.sync.subscribe({
       store: standalone.store,
       groupId: 'solo-role',

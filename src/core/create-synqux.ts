@@ -28,6 +28,7 @@ import {
   synquxRestored,
   type PendingRequest,
   type SynquxHealth,
+  type SynquxMode,
   type SynquxPhase,
   type SynquxState,
 } from './slice.js'
@@ -122,11 +123,8 @@ export type CreateSynquxConfig<
   /** 試し実行結果から result を読む位置。通常 createSynquxRootReducer の返り値を渡す */
   selectSynced: (root: TRoot) => TSynced
 
-  /**
-   * false で standalone (同期なし・host 常時 true) として動作する
-   * runtime の on/off (tutorial 等) は actions.setEnabled で行う
-   */
-  enabled?: boolean
+  /** subscribe 時の既定 mode。既定は synced */
+  mode?: SynquxMode
 
   /**
    * stall 判定のヒステリシス ms。「観測済み最大 seq が appliedSeq を超えたまま
@@ -241,6 +239,12 @@ export type SynquxSubscribeOptions<TRoot> = {
   role?: Peer['role']
   label?: Peer['label']
 
+  /** この session の mode。instance の既定値を上書きする */
+  mode?: SynquxMode
+
+  /** standalone session の永続化を、この session に限り無効化する */
+  localSnapshots?: false
+
   /**
    * subscribe 完了までの初期化 (接続確立・restore) の中断 (ADR-0012)。
    * 省略時は無期限に待つ — offline 起動は transport の自動再接続でそのまま
@@ -274,7 +278,7 @@ export type Synqux<
 
   /**
    * presence 登録 → snapshot restore → requests 購読を開始する
-   * standalone (enabled=false) 時は transport に触れず localSnapshots から
+   * standalone 時は transport に触れず localSnapshots から
    * restore だけ行う。返り値で購読破棄 + presence 解除
    */
   subscribe: (
@@ -283,7 +287,7 @@ export type Synqux<
 
   /**
    * 自端末の role を presence 上で切り替える。
-   * subscribe 中でなければ throw。standalone (enabled=false) 時は no-op。
+   * subscribe 中でなければ throw。standalone 時は no-op。
    * state 上の現在 role と同値なら transport 更新もしない。presence 反映ラグの
    * 窓では同値の重複 updateSelf が残り得るが、in-place 同値書き込みで無害
    */
@@ -297,11 +301,6 @@ export type Synqux<
     action: TAction,
     options?: { signal?: AbortSignal },
   ) => Promise<Result<TAction>>
-
-  actions: {
-    /** tutorial 等で runtime に同期を on/off する */
-    setEnabled: typeof synquxActions.setEnabled
-  }
 
   /**
    * synqux/react の useLatestResult が synced の位置を解決するための内部 field。
@@ -319,12 +318,12 @@ export const createSynqux = <
   config: CreateSynquxConfig<TRoot, TSynced, TAction>,
 ): Synqux<TRoot, TAction> => {
   const { transport } = config
-  const instanceEnabled = config.enabled ?? true
+  const instanceMode = config.mode ?? 'synced'
   const canRequest = config.canRequest ?? (() => true)
   const stallAfterMs = config.stallAfterMs ?? 30_000
   const automations = config.automations ?? []
   const listeners = config.listeners ?? []
-  const localSnapshots = (() => {
+  const instanceLocalSnapshots = (() => {
     if (config.localSnapshots === false) {
       return undefined
     }
@@ -472,6 +471,8 @@ export const createSynqux = <
   type SubscriptionSession = {
     groupId: string
     store: SynquxSubscribeOptions<TRoot>['store']
+    mode: SynquxMode
+    localSnapshots: SnapshotStore | undefined
     pendingDispatches: Map<string, PendingDispatch>
   }
 
@@ -547,7 +548,7 @@ export const createSynqux = <
 
   /** automations / listeners が共有する presence 由来の host 判定。 */
   const isSelfHost = (root: TRoot): boolean => {
-    if (!instanceEnabled) {
+    if (root.synqux.mode === 'standalone') {
       return true
     }
 
@@ -648,14 +649,14 @@ export const createSynqux = <
   }
 
   const persistLocalSnapshot = (root: TRoot): void => {
-    if (!session || !localSnapshots) {
+    if (!session || session.mode !== 'standalone' || !session.localSnapshots) {
       return
     }
 
     const orderingState = ordering.state()
     // 移植元 saveGameState 踏襲で失敗は握りつぶす (standalone 永続化は best effort)
     void Promise.resolve(
-      localSnapshots.saveSnapshot(
+      session.localSnapshots.saveSnapshot(
         session.groupId,
         buildSnapshotPayload({
           synced: config.selectSynced(root),
@@ -804,7 +805,7 @@ export const createSynqux = <
         | undefined
       const selfId = state.synqux.connections.selfId
       const shouldRequest =
-        instanceEnabled && state.synqux.enabled && !!selfId && !!session
+        state.synqux.mode === 'synced' && !!selfId && !!session
 
       if (shouldRequest && isSynced && !meta?.requestedBy) {
         // readonly 端末などは request 送信自体を行わない (握りつぶす)
@@ -854,9 +855,8 @@ export const createSynqux = <
         evaluateAutomationsAfterApply()
       }
 
-      // standalone (instance 設定で無効) のときだけ localSnapshots へ永続化する。
-      // runtime の setEnabled(false) (tutorial 等) では保存しない
-      if (!instanceEnabled && isSynced) {
+      // standalone session だけが session 固有の localSnapshots 設定へ永続化する。
+      if (state.synqux.mode === 'standalone' && isSynced) {
         persistLocalSnapshot(store.getState() as TRoot)
       }
 
@@ -1252,7 +1252,15 @@ export const createSynqux = <
   // ---------------------------------------------------------------
 
   const initializeSubscription = async (
-    { store, groupId, role, label, signal }: SynquxSubscribeOptions<TRoot>,
+    {
+      store,
+      groupId,
+      role,
+      label,
+      signal,
+      mode: sessionMode = instanceMode,
+      localSnapshots: sessionLocalSnapshotsOption,
+    }: SynquxSubscribeOptions<TRoot>,
     cleanups: SubscribeCleanup[],
   ): Promise<() => Promise<void>> => {
     if (store.getState().synqux === undefined) {
@@ -1296,7 +1304,10 @@ export const createSynqux = <
         // 接続しないため端末時刻を使い、全 rule で同じ now を共有する。
         let now: number
         try {
-          now = instanceEnabled ? await transport.serverNow() : Date.now()
+          now =
+            subscriptionSession.mode === 'synced'
+              ? await transport.serverNow()
+              : Date.now()
         } catch {
           // 時刻を得られなければ安全に発行できない。次の path で再試行する。
           return
@@ -1502,23 +1513,29 @@ export const createSynqux = <
     }
 
     // ---- standalone: transport に触れず local restore だけ行う ----
-    if (!instanceEnabled) {
+    if (sessionMode === 'standalone') {
       const subscriptionSession: SubscriptionSession = {
         groupId,
         store,
+        mode: sessionMode,
+        localSnapshots:
+          sessionLocalSnapshotsOption === false
+            ? undefined
+            : instanceLocalSnapshots,
         pendingDispatches: new Map(),
       }
       session = subscriptionSession
       cleanups.push(() => endSubscriptionSession(subscriptionSession))
       store.dispatch(
-        synquxActions.sessionStarted({ selfId: null, enabled: false }),
+        synquxActions.sessionStarted({ selfId: null, mode: sessionMode }),
       )
       cleanups.push(() => {
         expectedSyncedByRequest.clear()
         store.dispatch(synquxActions.sessionEnded())
       })
 
-      const payload = await localSnapshots?.loadSnapshot(groupId)
+      const payload =
+        await subscriptionSession.localSnapshots?.loadSnapshot(groupId)
       signal?.throwIfAborted()
 
       if (payload) {
@@ -1593,10 +1610,7 @@ export const createSynqux = <
         error,
       )
 
-      // 即時通知は best effort (setEnabled off 中は heartbeat 側の裁定に任せる)
-      if (store.getState().synqux.enabled) {
-        updateHealth(fatalHealth)
-      }
+      updateHealth(fatalHealth)
     }
 
     const { selfId } = await transport.connect({ groupId, role, label, signal })
@@ -1611,7 +1625,7 @@ export const createSynqux = <
     })
     cleanups.push(unsubscribePeers)
 
-    store.dispatch(synquxActions.sessionStarted({ selfId, enabled: true }))
+    store.dispatch(synquxActions.sessionStarted({ selfId, mode: sessionMode }))
     cleanups.push(() => {
       expectedSyncedByRequest.clear()
       store.dispatch(synquxActions.sessionEnded())
@@ -1725,6 +1739,9 @@ export const createSynqux = <
     const subscriptionSession: SubscriptionSession = {
       groupId,
       store,
+      mode: sessionMode,
+      // synced session は local snapshot を一切参照しないが、session shape を固定する。
+      localSnapshots: undefined,
       pendingDispatches: new Map(),
     }
     session = subscriptionSession
@@ -1806,14 +1823,6 @@ export const createSynqux = <
      */
     const healthTimer = setInterval(() => {
       const applied = ordering.appliedSeq()
-
-      if (!store.getState().synqux.enabled) {
-        gapStartedAt = null
-        lastAppliedSeq = applied
-        resetRecovery()
-        updateHealth(OK_HEALTH)
-        return
-      }
 
       // transport 購読の打ち切りは gap の有無と無関係に回復不能 (ADR-0012)。
       // gap なし (maxSeen <= applied) の ok 巻き戻しより先に判定する
@@ -1971,7 +1980,7 @@ export const createSynqux = <
 
     const root = subscriptionSession.store.getState()
     const shouldRequest =
-      instanceEnabled && root.synqux.enabled && !!root.synqux.connections.selfId
+      root.synqux.mode === 'synced' && !!root.synqux.connections.selfId
     if (shouldRequest && !canRequest(root)) {
       return Promise.reject(
         new Error('dispatchAndWait cannot dispatch while canRequest is false'),
@@ -2029,7 +2038,7 @@ export const createSynqux = <
         // だけを reject 理由とする。
       }
 
-      // standalone / runtime disabled は middleware 内で同期的に local 適用済み。
+      // standalone は middleware 内で同期的に local 適用済み。
       if (!shouldRequest) {
         resolvePendingDispatch(
           config.selectSynced(subscriptionSession.store.getState()).result,
@@ -2044,7 +2053,7 @@ export const createSynqux = <
         'synqux is not subscribed. Call subscribe() before setRole().',
       )
     }
-    if (!instanceEnabled) {
+    if (session.mode === 'standalone') {
       return
     }
 
@@ -2072,9 +2081,6 @@ export const createSynqux = <
     subscribe,
     dispatchAndWait,
     setRole,
-    actions: {
-      setEnabled: synquxActions.setEnabled,
-    },
     selectSynced: config.selectSynced,
   }
 }

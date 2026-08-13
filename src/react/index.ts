@@ -63,7 +63,7 @@ export const SynquxProvider = (props: {
     props.children,
   )
 
-/** 自端末が host か。standalone (enabled=false) 時は常に true */
+/** 自端末が host か。standalone 時は常に true */
 export const useIsHost = (): boolean =>
   useSelector((state) => selectIsHost(state as WithSynqux))
 

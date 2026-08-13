@@ -150,7 +150,7 @@ export const rootReducer: Reducer<RootState> = (state, action) => {
 type ClientOptions = Partial<
   Pick<
     CreateSynquxConfig<RootState, GameState, GameAction>,
-    | 'enabled'
+    | 'mode'
     | 'stallAfterMs'
     | 'canRequest'
     | 'localSnapshots'

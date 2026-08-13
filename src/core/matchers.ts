@@ -3,7 +3,7 @@ import type { SynquxState } from './slice.js'
 import type { SynquxActionMeta, SynquxSynced } from './types.js'
 
 /**
- * synqux 内部 action (synqux/restored, synqux/setEnabled など) の判定。
+ * synqux 内部 action (synqux/restored, synqux/sessionStarted など) の判定。
  * consumer が listener / middleware の除外条件に使う。
  * action type の prefix 文字列は内部実装詳細のため公開しない (これを使うこと)
  */
@@ -60,7 +60,7 @@ export const createSyncedActionMatchers = <
 
     const meta = (action as UnknownAction).meta as SynquxActionMeta
     const root = meta.root as TRoot
-    if (!root.synqux.enabled) {
+    if (root.synqux.mode === 'standalone') {
       return true
     }
 

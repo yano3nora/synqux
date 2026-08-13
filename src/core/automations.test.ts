@@ -147,12 +147,12 @@ describe('automations', () => {
     }
   })
 
-  it('standalone と runtime setEnabled(false) のどちらでも評価を続け local 適用する', async () => {
+  it('instance / session 指定の standalone で評価を続け local 適用する', async () => {
     const standaloneHub = createMemoryHub()
     const standaloneTransport = standaloneHub.createTransport()
     const standaloneServerNow = vi.spyOn(standaloneTransport, 'serverNow')
     const standalone = createClient(standaloneTransport, {
-      enabled: false,
+      mode: 'standalone',
       automations: [incrementOnce()],
     })
 
@@ -165,20 +165,18 @@ describe('automations', () => {
     expect(standaloneServerNow).not.toHaveBeenCalled()
     expect(standaloneHub.inspect.requests('standalone')).toEqual([])
 
-    const syncedHub = createMemoryHub()
-    const synced = createHubClient(syncedHub, {
+    const sessionHub = createMemoryHub()
+    const sessionStandalone = createHubClient(sessionHub, {
       automations: [incrementOnce()],
     })
-    await synced.sync.subscribe({
-      store: synced.store,
-      groupId: 'runtime-disabled',
+    await sessionStandalone.sync.subscribe({
+      store: sessionStandalone.store,
+      groupId: 'session-standalone',
+      mode: 'standalone',
     })
-    await vi.advanceTimersByTimeAsync(0)
-    synced.store.dispatch(synced.sync.actions.setEnabled(false))
-
     await vi.advanceTimersByTimeAsync(100)
-    expect(synced.store.getState().game.count).toBe(1)
-    expect(syncedHub.inspect.requests('runtime-disabled')).toEqual([])
+    expect(sessionStandalone.store.getState().game.count).toBe(1)
+    expect(sessionHub.inspect.requests('session-standalone')).toEqual([])
   })
 
   it('when が throw する rule を記録して skip し、他 rule は動かし続ける', async () => {

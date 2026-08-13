@@ -139,10 +139,10 @@ describe('dispatchAndWait', () => {
     )
   })
 
-  it('standalone と runtime disabled は local 適用結果で即 resolve する', async () => {
+  it('instance / session 指定の standalone は local 適用結果で即 resolve する', async () => {
     const standaloneHub = createMemoryHub()
     const standalone = createClient(standaloneHub.createTransport(), {
-      enabled: false,
+      mode: 'standalone',
     })
     await standalone.sync.subscribe({
       store: standalone.store,
@@ -155,17 +155,17 @@ describe('dispatchAndWait', () => {
     expect(standalone.store.getState().game.count).toBe(1)
     expect(standaloneHub.inspect.requests('standalone')).toEqual([])
 
-    const disabledHub = createMemoryHub()
-    const disabled = createHubClient(disabledHub)
-    await disabled.sync.subscribe({
-      store: disabled.store,
-      groupId: 'disabled',
+    const sessionHub = createMemoryHub()
+    const sessionStandalone = createHubClient(sessionHub)
+    await sessionStandalone.sync.subscribe({
+      store: sessionStandalone.store,
+      groupId: 'session-standalone',
+      mode: 'standalone',
     })
-    disabled.store.dispatch(disabled.sync.actions.setEnabled(false))
     await expect(
-      disabled.sync.dispatchAndWait({ type: 'game/increment' }),
+      sessionStandalone.sync.dispatchAndWait({ type: 'game/increment' }),
     ).resolves.toMatchObject({ type: 'success' })
-    expect(disabledHub.inspect.requests('disabled')).toEqual([])
+    expect(sessionHub.inspect.requests('session-standalone')).toEqual([])
   })
 
   it('未 subscribe は throw、非 synced action と canRequest=false は即 reject する', async () => {

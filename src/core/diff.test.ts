@@ -5,8 +5,8 @@ describe('findFirstDivergence', () => {
   it('同じ JSON 値には差分がない', () => {
     expect(
       findFirstDivergence(
-        { talks: [{ text: 'hello' }], enabled: true },
-        { enabled: true, talks: [{ text: 'hello' }] },
+        { talks: [{ text: 'hello' }], mode: 'synced' },
+        { mode: 'synced', talks: [{ text: 'hello' }] },
       ),
     ).toBeNull()
   })
