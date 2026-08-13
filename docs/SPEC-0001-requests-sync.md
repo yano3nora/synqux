@@ -89,11 +89,11 @@ client                      firebase                     host
 
 ### tutorial (local 分岐 session)
 
-tutorial は現在の購読を `unsubscribe()` してから、`subscribe({ mode: 'standalone', localSnapshots: false })` で独立 session として開始する。再現テスト: `src/core/session-mode.test.ts`
+tutorial は instance の `synqux.unsubscribe()` で現在の購読を破棄してから、`synqux.subscribe({ mode: 'standalone', localSnapshots: false })` で独立 session として開始する (`docs/ADR-0019-instance-unsubscribe.md`)。再現テスト: `src/core/session-mode.test.ts` / `src/core/instance-unsubscribe.test.ts`
 
-- standalone session は group に presence 登録せず、request の送受信・host 責務・snapshot の read/write を一切行わない。synced action は local に即時適用される
+- standalone session は group に presence 登録せず、request の送受信・host 責務・transport snapshot の read/write を行わない。一方、local snapshot は既定で read/write し、この tutorial のように `localSnapshots: false` を指定した session でだけ無効になる。synced action は local に即時適用される
 - 切替中は phase が `live → idle → subscribing → live` と遷移する。この窓で synced action を dispatch しないことは consumer の tutorial 開始・終了 thunk の責務
-- tutorial 終了時は standalone session を `unsubscribe()` し、通常の `subscribe()` を再実行する。synced snapshot が local 分岐 state を全量置換し、正史へ復帰する
+- tutorial 終了時は standalone session を `synqux.unsubscribe()` し、通常の `synqux.subscribe()` を再実行する。synced snapshot が local 分岐 state を全量置換し、正史へ復帰する
 - local 分岐 state の正史へのマージは提供しない。host 採番 seq による単一の適用列と両立しないため
 
 ## 既知の問題

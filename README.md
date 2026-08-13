@@ -117,6 +117,7 @@ store.dispatch({ type: 'counter/add', payload: 1 })
 If `state.counter.count` matches across every device (tab) subscribed to the same `groupId`, it works. The fastest way to try it locally: `npm run demo:emulator` + `npm run demo`, then open http://localhost:5173 in multiple tabs.
 
 React apps should subscribe through [`useSynquxSubscription`](#subscribe-from-react) instead of calling `subscribe` by hand.
+The instance-level `synqux.unsubscribe()` tears down the current session even when the subscribe return-value closure is not retained; see [ADR-0019](./docs/ADR-0019-instance-unsubscribe.md).
 
 ### Three rules to remember
 
@@ -215,11 +216,11 @@ case 'game/harvest': {
 **Concept.** A tutorial needs the same reducers without joining or polluting the real sync group. Replace the synced session with a non-persistent standalone session, then subscribe again to restore canonical history.
 
 ```ts
-let unsubscribe = await synqux.subscribe({ store, groupId })
+await synqux.subscribe({ store, groupId })
 
 export const startTutorial = () => async () => {
-  await unsubscribe()
-  unsubscribe = await synqux.subscribe({
+  await synqux.unsubscribe()
+  await synqux.subscribe({
     store,
     groupId,
     mode: 'standalone',
@@ -229,14 +230,15 @@ export const startTutorial = () => async () => {
 }
 
 export const finishTutorial = () => async () => {
-  await unsubscribe()
-  unsubscribe = await synqux.subscribe({ store, groupId })
+  await synqux.unsubscribe()
+  await synqux.subscribe({ store, groupId })
 }
 ```
 
 **Behavior.**
 
-- The standalone session does not connect, register presence, push requests, or read/write local snapshots.
+- A standalone session does not connect, register presence, push requests, or read/write the transport snapshot. Local snapshots are read/written by default; `localSnapshots: false` disables them for this tutorial session.
+- `synqux.unsubscribe()` is an idempotent no-op without a session. It rejects during subscribe initialization; abort that path with the subscribe `signal`. It shares a single-flight teardown with the closure returned by `subscribe` ([ADR-0019](./docs/ADR-0019-instance-unsubscribe.md)).
 - Do not dispatch synced actions during the `unsubscribe → subscribe` transition window; the app-level thunk owns that exclusion.
 - Re-subscribing in synced mode restores the canonical snapshot. Local tutorial state is deliberately not merged.
 
@@ -361,7 +363,7 @@ Setup layer (touched only by the single setup file in your template):
 
 | export | description |
 | --- | --- |
-| `createSynqux(config)` | Creates a sync instance. Returns `middlewares` / `rootReducer` / `reducer` / `subscribe` / `setRole` / `dispatchAndWait` / `selectSynced` |
+| `createSynqux(config)` | Creates a sync instance. Returns `middlewares` / `rootReducer` / `reducer` / `subscribe` / `unsubscribe` / `setRole` / `dispatchAndWait` / `selectSynced` |
 | `createSynquxRootReducer({ isSyncedAction, synced, locals })` | Serial rootReducer helper ("synced is pure, locals see earlier stages"). Auto-stamps a default success result on synced actions (ADR-0013). Spread the return value (`rootReducer` / `selectSynced` / `isSyncedAction`) into the `createSynqux` config |
 | `localStorageSnapshotStore()` | Default browser persistence for standalone mode. Pass to `localSnapshots` to use or replace explicitly |
 | `synquxReducer` | Internal slice reducer mounted at the reserved key `state.synqux` (for the primitive wiring style) |

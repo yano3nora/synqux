@@ -1,7 +1,7 @@
 # SPEC: 公開 API 境界
 
 - Status: **Accepted (2026-07-05 レビュー反映済み)**。本書を正として Phase 1 の実装に入る
-- 根拠: `ADR-0001-design.md` Decision 3 / 7 / 8 / 10 / 11、移植元 (社内 repo) の現物コード
+- 根拠: `ADR-0001-design.md` Decision 3 / 7 / 8 / 10 / 11、`ADR-0019-instance-unsubscribe.md`、移植元 (社内 repo) の現物コード
 - 実装が進んで型定義が実体化したら、詳細シグネチャはコード (d.ts) を正とし、本書は「境界の線引きと理由」を保守する
 
 ## 設計コンセプト
@@ -227,9 +227,16 @@ export type Synqux<TRoot, TSynced, TAction> = {
   /**
    * presence 登録 → snapshot restore → requests 購読を開始する
    * standalone 時は transport に触れず localSnapshots から restore する
-   * 返り値で購読破棄 + presence 解除。二重購読はインスタンス内部でガード
+   * 返り値で購読破棄 + presence 解除。初期化中・購読中・teardown 中の再 subscribe は throw
+   * (teardown 中は unsubscribe の完了を await してから再試行する)
    */
   subscribe: (options: SynquxSubscribeOptions<TRoot>) => Promise<() => Promise<void>>
+
+  /**
+   * 現在の session を破棄する。未 subscribe は no-op、初期化中は throw
+   * (中断は subscribe options の signal を使う)。返り値 closure と teardown を single-flight 共有 (ADR-0019)
+  */
+  unsubscribe(): Promise<void>
 
   /** 自端末の role を presence 上で in-place 更新する。未 subscribe は throw、standalone は no-op */
   setRole(role: PeerRole): Promise<void>

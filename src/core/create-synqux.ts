@@ -279,11 +279,18 @@ export type Synqux<
   /**
    * presence 登録 → snapshot restore → requests 購読を開始する
    * standalone 時は transport に触れず localSnapshots から
-   * restore だけ行う。返り値で購読破棄 + presence 解除
+   * restore だけ行う。初期化中・購読中・teardown 中の再 subscribe は拒否する。
+   * 返り値で購読破棄 + presence 解除を行う。
    */
   subscribe: (
     options: SynquxSubscribeOptions<TRoot>,
   ) => Promise<() => Promise<void>>
+
+  /**
+   * 現在の session の購読破棄 + presence 解除を完了まで待つ。
+   * 未 subscribe は no-op。subscribe 初期化中の中断には options.signal を使う。
+   */
+  unsubscribe: () => Promise<void>
 
   /**
    * 自端末の role を presence 上で切り替える。
@@ -474,10 +481,15 @@ export const createSynqux = <
     mode: SynquxMode
     localSnapshots: SnapshotStore | undefined
     pendingDispatches: Map<string, PendingDispatch>
+    /** instance method と subscribe の返り値 closure が共有する session 固有 teardown */
+    teardown: () => Promise<void>
   }
 
   // subscribe 後に確定する購読セッション。待機 resolver も session と共に破棄する。
   let session: SubscriptionSession | null = null
+  // endSubscriptionSession 後も続く非同期 cleanup を idle と誤認しないため、
+  // session とは別に instance 全体で現在の teardown を追跡する。
+  let teardownInFlight: Promise<void> | null = null
   // session 確定前の await 中も、同一 instance の並行初期化を同期的に拒否する
   let subscribing = false
   // phase dispatch と外部通知を同じ遷移点へ集約する。sessionEnded が state を先に
@@ -619,6 +631,40 @@ export const createSynqux = <
     if (rethrowCleanupFailure && firstCleanupError !== undefined) {
       throw firstCleanupError
     }
+  }
+
+  type SubscriptionSessionOptions = Omit<SubscriptionSession, 'teardown'>
+
+  /**
+   * teardown Promise を session に閉じ込め、並行呼び出し・stale closure の再実行を
+   * 同じ結果へ合流させる。Promise の確定と cleanup 開始の間に await は挟まない。
+   */
+  const createSubscriptionSession = (
+    options: SubscriptionSessionOptions,
+    cleanups: readonly SubscribeCleanup[],
+  ): SubscriptionSession => {
+    let teardownPromise: Promise<void> | null = null
+    const teardown = (): Promise<void> => {
+      if (!teardownPromise) {
+        teardownPromise = runSubscribeCleanups(cleanups, true)
+        teardownInFlight = teardownPromise
+
+        const trackedPromise = teardownPromise
+        const clearTeardownInFlight = (): void => {
+          // stale session の settle が後続 session の追跡を消さないよう、
+          // 登録した Promise 自身との identity で守る。
+          if (teardownInFlight === trackedPromise) {
+            teardownInFlight = null
+          }
+        }
+        // finally() は戻り値に新しい reject を作るため、両経路を同じ
+        // handler で購読し、cleanup 失敗時も unhandled rejection を増やさない。
+        void trackedPromise.then(clearTeardownInFlight, clearTeardownInFlight)
+      }
+      return teardownPromise
+    }
+
+    return { ...options, teardown }
   }
 
   let hashSequence = 0
@@ -1514,16 +1560,19 @@ export const createSynqux = <
 
     // ---- standalone: transport に触れず local restore だけ行う ----
     if (sessionMode === 'standalone') {
-      const subscriptionSession: SubscriptionSession = {
-        groupId,
-        store,
-        mode: sessionMode,
-        localSnapshots:
-          sessionLocalSnapshotsOption === false
-            ? undefined
-            : instanceLocalSnapshots,
-        pendingDispatches: new Map(),
-      }
+      const subscriptionSession = createSubscriptionSession(
+        {
+          groupId,
+          store,
+          mode: sessionMode,
+          localSnapshots:
+            sessionLocalSnapshotsOption === false
+              ? undefined
+              : instanceLocalSnapshots,
+          pendingDispatches: new Map(),
+        },
+        cleanups,
+      )
       session = subscriptionSession
       cleanups.push(() => endSubscriptionSession(subscriptionSession))
       store.dispatch(
@@ -1551,9 +1600,7 @@ export const createSynqux = <
 
       changePhase(store, 'live')
 
-      return async () => {
-        await runSubscribeCleanups(cleanups, true)
-      }
+      return subscriptionSession.teardown
     }
 
     // ---- synced: presence 登録 → restore → requests 購読 ----
@@ -1736,14 +1783,17 @@ export const createSynqux = <
       gapSince: gapStartedAt,
     })
 
-    const subscriptionSession: SubscriptionSession = {
-      groupId,
-      store,
-      mode: sessionMode,
-      // synced session は local snapshot を一切参照しないが、session shape を固定する。
-      localSnapshots: undefined,
-      pendingDispatches: new Map(),
-    }
+    const subscriptionSession = createSubscriptionSession(
+      {
+        groupId,
+        store,
+        mode: sessionMode,
+        // synced session は local snapshot を一切参照しないが、session shape を固定する。
+        localSnapshots: undefined,
+        pendingDispatches: new Map(),
+      },
+      cleanups,
+    )
     session = subscriptionSession
     cleanups.push(() => endSubscriptionSession(subscriptionSession))
 
@@ -1918,14 +1968,18 @@ export const createSynqux = <
 
     changePhase(store, 'live')
 
-    return async () => {
-      await runSubscribeCleanups(cleanups, true)
-    }
+    return subscriptionSession.teardown
   }
 
   const subscribe = async (
     options: SynquxSubscribeOptions<TRoot>,
   ): Promise<() => Promise<void>> => {
+    if (teardownInFlight) {
+      throw new Error(
+        'synqux is still unsubscribing. Await unsubscribe completion before subscribing again.',
+      )
+    }
+
     if (session || subscribing) {
       throw new Error('synqux is already subscribed')
     }
@@ -1960,6 +2014,18 @@ export const createSynqux = <
     } finally {
       subscribing = false
     }
+  }
+
+  const unsubscribe = (): Promise<void> => {
+    if (subscribing) {
+      return Promise.reject(
+        new Error(
+          'synqux subscription is still initializing. Abort initialization with the subscribe options signal.',
+        ),
+      )
+    }
+
+    return session?.teardown() ?? teardownInFlight ?? Promise.resolve()
   }
 
   const dispatchAndWait = (
@@ -2079,6 +2145,7 @@ export const createSynqux = <
     reducer: synquxReducer,
     rootReducer: config.rootReducer,
     subscribe,
+    unsubscribe,
     dispatchAndWait,
     setRole,
     selectSynced: config.selectSynced,
