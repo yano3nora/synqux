@@ -59,9 +59,13 @@ describe('subscribe initialization transaction', () => {
   beforeEach(() => {
     vi.useFakeTimers()
     vi.setSystemTime(new Date('2026-07-20T00:00:00.000Z'))
+    // subscribe を意図的に失敗させるため、onSubscribeFailed 未設定の警告
+    // (仕様通りの出力) がテストの stderr に漏れないよう握りつぶす
+    vi.spyOn(console, 'error').mockImplementation(() => undefined)
   })
 
   afterEach(() => {
+    vi.restoreAllMocks()
     vi.useRealTimers()
   })
 

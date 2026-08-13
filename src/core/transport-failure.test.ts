@@ -93,9 +93,13 @@ describe('subscribe の AbortSignal 中断', () => {
   beforeEach(() => {
     vi.useFakeTimers()
     vi.setSystemTime(new Date('2026-07-20T00:00:00.000Z'))
+    // abort による subscribe 失敗で onSubscribeFailed 未設定の警告
+    // (仕様通りの出力) がテストの stderr に漏れないよう握りつぶす
+    vi.spyOn(console, 'error').mockImplementation(() => undefined)
   })
 
   afterEach(() => {
+    vi.restoreAllMocks()
     vi.useRealTimers()
   })
 
