@@ -106,16 +106,29 @@ export type SynquxSynced<
 /**
  * synqux が action に載せる meta の契約
  *
- * synced reducer が読んでよいのは requestedBy / dispatched のみ (Decision 8)。
- * root は locals reducer 専用で、synced reducer には渡らない — host の試し実行と
- * 各端末での適用が同一結果になる (決定性) ことを構成上保証するため
+ * synced reducer がゲーム判定に使ってよいのは requestedBy / dispatched のみ。
+ * response 系は host の試し実行と実配達へ同値を注入するが、dual-host 窓では裁定
+ * 候補ごとに異なり得るため、middleware / listener / DevTools / log での診断専用。
+ * root は locals reducer 専用で、synced reducer には渡らない。
  */
 export type SynquxActionMeta = {
   /** request 経路を通った action に付与。request 化済み action の素通し判定を兼ねる */
   requestedBy?: Peer['id']
 
-  /** transport サーバ基準の登録時刻 */
+  /** transport サーバ基準の request 登録時刻 (RequestEnvelope.requested と同値) */
   dispatched?: number
+
+  /** 裁定した host。診断専用で、synced reducer のゲーム判定には使わない */
+  responsedBy?: Peer['id']
+
+  /** transport サーバ基準の裁定時刻。診断専用 */
+  responsed?: number
+
+  /** 裁定した host 世代番号。同期順序の診断用 */
+  epoch?: number
+
+  /** host が採番した適用順連番。同期順序の診断用 */
+  seq?: number
 
   /** 端末内での action 一意性 (適用完了の検知・result 通知の重複判定に使う) */
   hash?: string

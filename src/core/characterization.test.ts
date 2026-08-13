@@ -105,6 +105,7 @@ const responded = (
 ): PendingRequest => ({
   ...request,
   responsedBy: stamp.by ?? SELF,
+  responsed: 1700000001000 + stamp.seq,
   epoch: stamp.epoch ?? 1,
   seq: stamp.seq,
   result: successResult(request),
@@ -136,6 +137,7 @@ const echoResponses = (fixture: Fixture, options?: { ackDelayMs?: number }) => {
         epoch: number
         seq: number
         responsedBy: string
+        responsed: number
         result: string | null
       },
     ]
@@ -146,6 +148,7 @@ const echoResponses = (fixture: Fixture, options?: { ackDelayMs?: number }) => {
         request: {
           ...pending!,
           responsedBy: patch.responsedBy,
+          responsed: patch.responsed,
           epoch: patch.epoch,
           seq: patch.seq,
           result: patch.result
@@ -232,7 +235,13 @@ describe('host 裁定 fork (requestListener)', () => {
       type: 'success',
       action: {
         type: 'game/increment',
-        meta: { hash: request.action.meta?.hash },
+        meta: {
+          hash: request.action.meta?.hash,
+          responsedBy: SELF,
+          responsed: patch.responsed,
+          epoch: 1,
+          seq: 1,
+        },
       },
     })
 

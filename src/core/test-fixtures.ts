@@ -18,7 +18,15 @@ import type { Result, SynquxSynced, SynquxTransport } from './types.js'
 
 export type GameAction = Action<`game/${string}`> & {
   payload?: number
-  meta?: { requestedBy?: string; hash?: string; dispatched?: number }
+  meta?: {
+    requestedBy?: string
+    hash?: string
+    dispatched?: number
+    responsedBy?: string
+    responsed?: number
+    epoch?: number
+    seq?: number
+  }
 }
 
 export type GameState = SynquxSynced<GameAction> & {

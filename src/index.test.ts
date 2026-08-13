@@ -29,6 +29,7 @@ describe('package smoke test', () => {
         'createSynqux',
         'createSynquxRootReducer',
         'createSyncedActionMatchers',
+        'isDeliveredSyncedAction',
         'generateResult',
         'isResultForPeer',
         'isSynquxAction',

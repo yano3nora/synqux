@@ -76,7 +76,7 @@ client                      firebase                     host
 
 ### 不変条件 (これが破れたらバグ)
 
-1. game state を書き換える action は、必ず request → response → dispatch の経路を通る (`meta.requestedBy` 付与済み action のみ素通し)
+1. game state を書き換える action は、必ず request → response → dispatch の経路を通る (`meta.requestedBy` 付与済み action のみ素通し)。response 後の action には envelope と同じ `responsedBy / responsed / epoch / seq` を載せ、host の試し実行にも同値を注入する
 2. 各 request は全端末で**高々 1 回**適用される
 3. 適用順序は全端末で host の採番した seq 順に一致する
 4. snapshot 封筒の `ordering` (appliedSeq / 直近適用窓) はその時点の適用履歴と一致する

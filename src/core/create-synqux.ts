@@ -60,6 +60,26 @@ const HEALTH_CHECK_INTERVAL_MS = 1000
 /** automation 評価で取得済みの serverNow を request 化へ引き渡す端末内 marker */
 const AUTOMATION_REQUESTED_AT = Symbol('synqux.automationRequestedAt')
 
+type DeliveryMeta = Required<
+  Pick<
+    SynquxActionMeta,
+    'requestedBy' | 'dispatched' | 'responsedBy' | 'responsed' | 'epoch' | 'seq'
+  >
+>
+
+/** envelope を正として、host 試し実行と実配達へ同じ同期情報を載せる構築点。 */
+const withDeliveryMeta = <TAction extends Action>(
+  action: TAction,
+  delivery: DeliveryMeta,
+): TAction =>
+  ({
+    ...action,
+    meta: {
+      ...((action as UnknownAction).meta as SynquxActionMeta | undefined),
+      ...delivery,
+    },
+  }) as TAction
+
 const OK_HEALTH: SynquxHealth = {
   phase: 'ok',
   expectedSeq: null,
@@ -1096,9 +1116,22 @@ export const createSynqux = <
             Parameters<SynquxTransport['respondRequest']>[1]
           >
 
+          const delivery = {
+            requestedBy: entity.requestedBy,
+            dispatched: entity.requested,
+            epoch,
+            seq,
+            responsedBy,
+            responsed,
+          }
+          const adjudicatedAction = withDeliveryMeta(
+            entity.action as TAction,
+            delivery,
+          )
+
           try {
             // reducer が唯一の判定器: rootReducer の試し実行で成否を判定する
-            const next = config.rootReducer(current, entity.action as TAction)
+            const next = config.rootReducer(current, adjudicatedAction)
             const result = config.selectSynced(next).result
 
             // snapshot へ載せる順序状態を ack await の「前」に評価固定する
@@ -1136,7 +1169,7 @@ export const createSynqux = <
               responsedBy,
               responsed,
               result: serializeResult({
-                action: entity.action as TAction,
+                action: adjudicatedAction,
                 type: 'error',
                 targets: [entity.requestedBy],
                 // message なし = log 専用の拒否として dispatch を省略させる
@@ -1340,7 +1373,15 @@ export const createSynqux = <
           ordering.beginProcessing(id)
 
           try {
-            listener.dispatch(entity.action as TAction)
+            const deliveredAction = withDeliveryMeta(entity.action as TAction, {
+              requestedBy: entity.requestedBy,
+              dispatched: entity.requested,
+              responsedBy: entity.responsedBy!,
+              responsed: entity.responsed!,
+              epoch: entity.epoch!,
+              seq: entity.seq!,
+            })
+            listener.dispatch(deliveredAction)
 
             // 決定性検出網: 実適用後の synced を host の試し実行結果と照合する。
             // dispatch は同期のため、await を挟まないここでの getState() だけが

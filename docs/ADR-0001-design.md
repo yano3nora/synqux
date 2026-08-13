@@ -79,7 +79,7 @@ connections / requests は core に含めた上で（host 判定は「全端末�
 
 同期状態と端末ローカル状態の管理方法（移植元の serial rootReducer + `meta.root` イディオム）は、同期ソリューションの How の一部としてライブラリが提供する。
 
-- **synced reducer の契約**: `(synced state, action)` の純粋関数。読んでよいのは payload と、request 封筒由来の決定的な meta（`requestedBy` / サーバ採番 timestamp）のみ。**synced reducer に `meta.root` は渡されない** — host の試し実行と各端末での適用が同一結果になること（決定性）が構成上保証され、端末ローカル state 参照による同期分岐も構造的に不可能になる（防止は目的ではなく副産物）
+- **synced reducer の契約**: `(synced state, action)` の純粋関数。ゲーム判定で読んでよい meta は request 由来の `requestedBy / dispatched` のみ。response 由来の `responsedBy / responsed / epoch / seq` は host の試し実行と実配達へ同値を注入するが、dual-host 窓では裁定候補ごとに異なり得るため middleware / listener / DevTools / log での診断専用とし、synced state の分岐には使わない。**synced reducer に `meta.root` は渡されない** — host の試し実行と各端末での適用が同一結果になること（決定性）を構成上保証する
 - **local slice 向けに `createSynquxRootReducer`（仮）を同梱**:
     - 実行順は「synqux 内部 slice → synced（meta.root なし）→ locals（**宣言順**、meta.root 付き）」
     - `meta.root` は直列進行に応じて更新される。locals は「適用後の synced state」と「自分より前に実行された local state」を読める — 移植元 store.ts と同一セマンティクス

@@ -171,6 +171,10 @@ describe('devDeterminismCheck', () => {
       hash: expect.any(String),
       requestedBy: expect.any(String),
       dispatched: expect.any(Number),
+      responsedBy: expect.any(String),
+      responsed: expect.any(Number),
+      epoch: expect.any(Number),
+      seq: expect.any(Number),
     })
     expect(consoleError).not.toHaveBeenCalled()
 

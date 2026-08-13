@@ -86,13 +86,22 @@ export type SynquxPhase = 'idle' | 'subscribing' | 'live'
 
 /**
  * synqux が action に載せる meta の契約
- * synced reducer が読んでよいのは requestedBy / dispatched のみ (Decision 8)
+ * synced reducer がゲーム判定に使ってよいのは requestedBy / dispatched のみ。
+ * response 系は dual-host 窓で候補ごとに異なり得るため診断専用
  */
 export type SynquxActionMeta = {
   /** request 経路を通った action に付与。actionRequest middleware の素通し判定を兼ねる */
   requestedBy?: Peer['id']
-  /** transport サーバ基準の登録時刻 */
+  /** transport サーバ基準の request 登録時刻 (RequestEnvelope.requested と同値) */
   dispatched?: number
+  /** 裁定した host */
+  responsedBy?: Peer['id']
+  /** transport サーバ基準の裁定時刻 */
+  responsed?: number
+  /** 裁定した host 世代番号 */
+  epoch?: number
+  /** host が採番した適用順連番 */
+  seq?: number
   /** 端末内での action 一意性。内部 entities 破棄・result 通知の重複判定に使う */
   hash?: string
   /** locals reducer にのみ付与される直前実行結果 (createSynquxRootReducer)。synced には渡らない */
@@ -402,6 +411,25 @@ export function createSyncedActionMatchers<
 /** prefix を consumer に露出せず、listener / middleware から内部 action を除外する */
 export function isSynquxAction(action: Action): boolean
 
+// host 裁定後に request 経路から配達された action の判定。
+// response 系 meta は診断専用で、synced reducer のゲーム判定には使わない
+// synced domain の判定は consumer の isSyncedAction と組み合わせる
+export function isDeliveredSyncedAction(
+  action: Action,
+): action is Action & {
+  meta: SynquxActionMeta & Required<
+    Pick<
+      SynquxActionMeta,
+      | 'requestedBy'
+      | 'dispatched'
+      | 'responsedBy'
+      | 'responsed'
+      | 'epoch'
+      | 'seq'
+    >
+  >
+}
+
 /** Result.targets の [] = 全員、それ以外 = peer id 宛て、という意味論を一元化する */
 export function isResultForPeer(
   result: Pick<Result, 'targets'> | null | undefined,
@@ -677,7 +705,7 @@ type SnapshotEnvelope<TSynced> = {
 
 | subpath | 主な export | 対象 |
 | --- | --- | --- |
-| `synqux` | `createSynqux` / `createSynquxRootReducer` / `synquxReducer` / `synquxRestored` / reducer helpers / `createSyncedActionMatchers` / `isSynquxAction` / `isResultForPeer` / peer・phase・health selectors / `localStorageSnapshotStore` / 契約型 | セットアップ層 + reducer ヘルパー |
+| `synqux` | `createSynqux` / `createSynquxRootReducer` / `synquxReducer` / `synquxRestored` / reducer helpers / `createSyncedActionMatchers` / `isDeliveredSyncedAction` / `isSynquxAction` / `isResultForPeer` / peer・phase・health selectors / `localStorageSnapshotStore` / 契約型 | セットアップ層 + reducer ヘルパー |
 | `synqux/react` | `SynquxProvider` / `useSynquxSubscription` / peer・phase・health hooks / `useLatestResult` / `useMyLatestResult` | ゲーム開発者層 |
 | `synqux/testing` | `createMemoryHub` / `verifyActionIdempotency` / `assertActionIdempotency` | consumer CI / 本 repo の simulation test |
 | `synqux/firebase` | `firebaseTransport(db, options?: { archivePrunedRequests?: boolean })` | Phase 2 で実装 |

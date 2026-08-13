@@ -207,7 +207,7 @@ case 'game/harvest': {
 **Behavior.**
 
 - On the sync path, `meta.dispatched` is overwritten at request time with the transport's server-based clock (`serverNow()`).
-- The only meta fields a reducer may read are `requestedBy` and `dispatched` (SPEC-0002).
+- Reducers may use `requestedBy` / `dispatched` for game decisions. Response fields (`responsedBy`, `responsed`, `epoch`, `seq`) are diagnostics for middleware, listeners, DevTools, and logs; do not branch synced state on them because dual-host candidates may differ (SPEC-0002).
 - Performance: the firebase transport subscribes to `.info/serverTimeOffset` once at connection and caches it, so `serverNow()` is `Date.now() + offset` — O(1), no round trip per request.
 - Caveat: in standalone mode, `dispatched` falls back to the device clock. A single device can't disagree with itself, but "server-based" is only guaranteed on the sync path.
 
@@ -383,6 +383,7 @@ Reducer helpers (game-developer layer; identical with or without sync):
 | export | description |
 | --- | --- |
 | `createSyncedActionMatchers({ isSyncedAction, selectSynced })` | Returns type guards (`isSucceededAction` / `isMySucceededAction`) for locals reducers to check "did the applied action succeed / was it my request". Accepts the return value of `createSynquxRootReducer` as-is. Forbidden inside synced reducers |
+| `isDeliveredSyncedAction(action)` | Checks whether an action carries the complete request/response delivery metadata. Combine with the consumer's synced-domain matcher when needed |
 | `isSynquxAction(action)` | Excludes synqux-internal actions in listeners / middleware. Avoids direct prefix checks |
 | `isResultForPeer(result, peerId)` | Checks whether a result targets everyone or the given peer, per the `targets` contract |
 | `stateWithError(state, action, option?)` | Declares a validation failure: stacks an error result without changing state. Without `message`, the rejection is log-only (no dispatch to the requester) |
@@ -409,7 +410,7 @@ Types (all contract types are exported from the main entry):
 | --- | --- |
 | `SynquxSynced<TAction, TMessage>` | Type contract for the synced slice (carries `result`) |
 | `Result` / `ResultMessage` | The verdict a reducer writes and the host reads, and its UI display data |
-| `SynquxActionMeta` | Meta synqux attaches to actions (reducers may read only `requestedBy` / `dispatched`) |
+| `SynquxActionMeta` | Request/response metadata attached to actions. Response fields are diagnostics only; synced reducers must not branch game state on them |
 | `Peer` / `PeerRole` | Connected device and role (`player` / `dedicated` / `guest`). Guests can also issue requests |
 | `SynquxHealth` / `SynquxPhase` | Sync health / subscription phase |
 | `Synqux` / `CreateSynquxConfig` / `SynquxSubscribeOptions` | `createSynqux` return value / config / `subscribe` options |

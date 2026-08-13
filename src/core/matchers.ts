@@ -11,6 +11,40 @@ export const isSynquxAction = (action: Action): boolean =>
   action.type.startsWith('synqux/')
 
 /**
+ * request 経路を通り、host の裁定後に全端末へ配達された action の判定。
+ * consumer が dispatch 前の action と配達済み action を区別するために使う。
+ *
+ * synced domain の判定は consumer の責務。この matcher 単体では action type を
+ * 判定しないため、必要なら consumer の isSyncedAction と組み合わせること。
+ */
+export const isDeliveredSyncedAction = (
+  action: Action,
+): action is Action & {
+  meta: SynquxActionMeta &
+    Required<
+      Pick<
+        SynquxActionMeta,
+        | 'requestedBy'
+        | 'dispatched'
+        | 'responsedBy'
+        | 'responsed'
+        | 'epoch'
+        | 'seq'
+      >
+    >
+} => {
+  const meta = (action as UnknownAction).meta as SynquxActionMeta | undefined
+  return (
+    typeof meta?.requestedBy === 'string' &&
+    typeof meta.dispatched === 'number' &&
+    typeof meta.responsedBy === 'string' &&
+    typeof meta.responsed === 'number' &&
+    typeof meta.epoch === 'number' &&
+    typeof meta.seq === 'number'
+  )
+}
+
+/**
  * locals reducer から、直前に適用された synced action の成功と依頼元を判定する。
  * createSynquxRootReducer の返り値をそのまま config に渡せる。
  *
