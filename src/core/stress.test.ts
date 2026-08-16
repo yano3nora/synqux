@@ -121,7 +121,13 @@ const addClient = async (harness: Harness): Promise<TrackedClient> => {
     stallAfterMs: STALL_AFTER_MS,
     devDeterminismCheck: false,
   })
-  await client.sync.subscribe({ store: client.store, groupId: harness.groupId })
+  // 初回購読 barrier (ADR-0021) は backlog の適用完了を待つため settle を併走させる
+  const subscribing = client.sync.subscribe({
+    store: client.store,
+    groupId: harness.groupId,
+  })
+  await settle()
+  await subscribing
   const peerId = selectSelfId(client.store.getState())
   if (peerId === null) {
     throw new Error('Subscribed client has no peer id')

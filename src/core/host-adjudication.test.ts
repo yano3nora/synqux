@@ -2,7 +2,12 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { createMemoryHub } from '../testing/memory-hub.js'
 import { selectIsHost } from './selectors.js'
 import { synquxActions } from './slice.js'
-import { createClient, createHubClient, settle } from './test-fixtures.js'
+import {
+  createClient,
+  createHubClient,
+  settle,
+  subscribeSettled,
+} from './test-fixtures.js'
 import type { RequestEnvelope } from './types.js'
 
 const GROUP_ID = 'group-host-adjudication'
@@ -154,7 +159,7 @@ describe('host 裁定 lifecycle', () => {
     expect(hub.inspect.requests(GROUP_ID)[0]?.seq).toBeUndefined()
 
     const c = createHubClient(hub)
-    await c.sync.subscribe({ store: c.store, groupId: GROUP_ID })
+    await subscribeSettled(c, { groupId: GROUP_ID })
     await settle(50)
 
     expect(selectIsHost(b.store.getState())).toBe(false)

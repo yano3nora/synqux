@@ -7,6 +7,7 @@ import {
   createClient,
   createHubClient,
   settle,
+  subscribeSettled,
   type GameState,
 } from './test-fixtures.js'
 import type { SnapshotStore } from './types.js'
@@ -197,7 +198,7 @@ describe('createSynqux (end-to-end)', () => {
 
     // 2 request 処理済みの状態で c が途中参加する
     const c = createHubClient(hub)
-    await c.sync.subscribe({ store: c.store, groupId: GROUP_ID })
+    await subscribeSettled(c, { groupId: GROUP_ID })
     await settle()
 
     expect(c.store.getState().game.count).toBe(11)

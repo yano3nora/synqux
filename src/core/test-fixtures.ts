@@ -198,9 +198,42 @@ export const createHubClient = (
   options?: ClientOptions,
 ) => createClient(hub.createTransport(), options)
 
+/**
+ * onReady (契約 12) を呼ばない旧世代 adapter を模す wrapper。
+ * 初回購読 barrier の timeout 縮退 (ADR-0021 Decision 1) の検証用
+ */
+export const withoutOnReady = (
+  transport: SynquxTransport,
+): SynquxTransport => ({
+  ...transport,
+  subscribeRequests: (options, handlers) =>
+    transport.subscribeRequests(options, {
+      onAdded: handlers.onAdded,
+      onChanged: handlers.onChanged,
+      onError: handlers.onError,
+    }),
+})
+
 /** fork の待機 loop と hub の配送を進めて滞留がなくなるまで時間を進める */
 export const settle = async (steps = 30): Promise<void> => {
   for (let i = 0; i < steps; i += 1) {
     await vi.advanceTimersByTimeAsync(100)
   }
+}
+
+/**
+ * backlog のある group への subscribe を fake timers 下で完了させる。
+ * 初回購読 barrier (ADR-0021 Decision 1) は backlog の配送・適用を待つため、
+ * settle を併走させないと subscribe の await がデッドロックする
+ */
+export const subscribeSettled = async (
+  client: ReturnType<typeof createClient>,
+  options: Omit<
+    Parameters<ReturnType<typeof createClient>['sync']['subscribe']>[0],
+    'store'
+  >,
+): Promise<() => Promise<void>> => {
+  const pending = client.sync.subscribe({ store: client.store, ...options })
+  await settle()
+  return await pending
 }

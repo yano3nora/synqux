@@ -486,31 +486,100 @@ export const firebaseTransport = (
       // subscribePeers と同じ理由で cancel を onError へ引き渡す (契約 8)
       const onCancel = (error: Error): void => handlers.onError?.(error)
 
+      // 契約 3 強化 (added-before-changed、ADR-0021): SDK の性質に頼らず、
+      // added 未配送の child の changed は buffer して added 配送後に flush する。
+      // attach 済み listener と下の get() backlog 配送が競合しても、core へは
+      // 「同一 child は added が先」の順序で届く
+      let active = true
+      const seenAdded = new Set<string>()
+      const pendingChanged = new Map<string, RequestEnvelope[]>()
+
+      const deliverAdded = (envelope: RequestEnvelope): void => {
+        if (!active) {
+          return
+        }
+
+        seenAdded.add(envelope.id)
+        handlers.onAdded(envelope)
+
+        const buffered = pendingChanged.get(envelope.id)
+        if (buffered !== undefined) {
+          pendingChanged.delete(envelope.id)
+          for (const changed of buffered) {
+            handlers.onChanged(changed)
+          }
+        }
+      }
+
       const unsubs = [
-        // 購読開始時の既存分も onChildAdded で id 順に一括配送される
         onChildAdded(
           target,
           (snap) => {
-            handlers.onAdded(toEnvelope(snap.val(), snap.key))
+            deliverAdded(toEnvelope(snap.val(), snap.key))
           },
           onCancel,
         ),
         onChildChanged(
           target,
           (snap) => {
-            handlers.onChanged(toEnvelope(snap.val(), snap.key))
+            if (!active) {
+              return
+            }
+
+            const envelope = toEnvelope(snap.val(), snap.key)
+            if (!seenAdded.has(envelope.id)) {
+              const buffered = pendingChanged.get(envelope.id) ?? []
+              buffered.push(envelope)
+              pendingChanged.set(envelope.id, buffered)
+              return
+            }
+
+            handlers.onChanged(envelope)
           },
           onCancel,
         ),
       ]
 
-      return () => unsubs.forEach((unsub) => unsub())
+      // 初回一括配送の完了通知 (契約 12、ADR-0021): attach 済みと同一 query を
+      // get() し、取得分を onAdded として配送してから onReady を呼ぶ。attach との
+      // 二重配送は core の added dedup が吸収し、get() は裁定済みの最新値を含む
+      // ため attach と get の間の changed 取り逃しは起きない。unsubscribe 後は
+      // get 結果・onReady とも配送しない (cancellation guard)
+      void get(target)
+        .then((snapshot) => {
+          if (!active) {
+            return
+          }
+
+          snapshot.forEach((child) => {
+            if (child.key !== null && !seenAdded.has(child.key)) {
+              deliverAdded(toEnvelope(child.val(), child.key))
+            }
+          })
+
+          if (active) {
+            handlers.onReady?.()
+          }
+        })
+        .catch((error: unknown) => {
+          // 一括取得の失敗は契約 8 と同じ扱いで onError へ (onReady は呼ばない)
+          if (active) {
+            handlers.onError?.(error)
+          }
+        })
+
+      return () => {
+        active = false
+        unsubs.forEach((unsub) => unsub())
+      }
     },
 
     async saveSnapshot(key, payload, fence) {
       requireSession()
       // payload は core が直列化済みの不透明文字列。adapter は parse せず、
       // fence だけを transaction 内で原子的に比較する (ADR-0011)。
+      // applyLocally: false は fence 購読 (契約 13) へ楽観 local echo を流さない
+      // ための指定 — 購読イベントを server 確定値のみに限定する (ADR-0021)
       const result = await runTransaction(
         ref(db, snapshotPath(key)),
         (current: unknown) => {
@@ -522,6 +591,7 @@ export const firebaseTransport = (
           }
           return { fence, payload }
         },
+        { applyLocally: false },
       )
       return result.committed
     },
@@ -531,6 +601,31 @@ export const firebaseTransport = (
       const snap = await get(ref(db, snapshotPath(key)))
       const stored: unknown = snap.exists() ? snap.val() : null
       return isStoredSnapshot(stored) ? stored.payload : null
+    },
+
+    subscribeSnapshotFence(key, handler) {
+      requireSession()
+
+      // snapshot node のうち fence child だけを購読する (payload は重いため
+      // 購読しない。fence は数十 byte)。saveSnapshot が applyLocally: false の
+      // ため、届く値は server 確定値のみ (契約 13、ADR-0021)
+      return onValue(
+        ref(db, `${snapshotPath(key)}/fence`),
+        (snap) => {
+          const value = snap.val() as Partial<SnapshotFence> | null
+          if (
+            typeof value?.epoch === 'number' &&
+            typeof value.appliedSeq === 'number'
+          ) {
+            handler({ epoch: value.epoch, appliedSeq: value.appliedSeq })
+          }
+        },
+        (error) => {
+          // fence 購読の喪失は sync 自体を止めない (persisted rule が timeout
+          // drop に縮退するだけ) ため、onError 契約には載せず診断ログに留める
+          console.error(error)
+        },
+      )
     },
   }
 }

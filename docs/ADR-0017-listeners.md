@@ -70,6 +70,20 @@ runtime の `setEnabled(false)` は ADR-0018 で廃止され、tutorial は stan
 setEnabled 言及は standalone session に読み替える (standalone は host 常時 true のまま)。
 本文は当時の記録のまま残す。
 
+## Amendment (2026-08-16): replay 非発火の正の移動と `fire` option (ADR-0021)
+
+Decision 3 の「live 配信のみ発火する (`synqux.phase === 'live'` のときだけ評価)」は、
+初回購読では live 遷移が transport の初回一括配送より先に完了するため構造的に
+成立していなかった (reset reload 無限ループのインシデント)。ADR-0021 により
+
+- replay 非発火の正は「**既裁定のまま added で届いた envelope の適用 (replay 印)
+  では発火しない**」(ADR-0021 Decision 2) へ移り、phase ゲートは防衛線に格下げ
+- live の意味論自体も初回購読 barrier (ADR-0021 Decision 1) が復元
+- rule ごとの `fire?: 'applied' | 'persisted'` (ADR-0021 Decision 3) が追加され、
+  スレッドを止める UI / navigation を含む effect は `'persisted'` が必須
+
+と読み替える。
+
 ## Amendment (2026-08-13): local action の監視 (ADR-0020)
 
 Decision 6 の「local action の反応は consumer の RTK listener に残す」という境界は、

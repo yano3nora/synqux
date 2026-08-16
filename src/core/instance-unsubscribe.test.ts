@@ -1,6 +1,11 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { createMemoryHub } from '../testing/memory-hub.js'
-import { createClient, createHubClient, settle } from './test-fixtures.js'
+import {
+  createClient,
+  createHubClient,
+  settle,
+  subscribeSettled,
+} from './test-fixtures.js'
 import type { SynquxTransport } from './types.js'
 
 const GROUP_ID = 'group-instance-unsubscribe'
@@ -222,7 +227,7 @@ describe('instance unsubscribe', () => {
     expect(hub.inspect.requests(GROUP_ID)).toHaveLength(1)
 
     await a.sync.unsubscribe()
-    await a.sync.subscribe({ store: a.store, groupId: GROUP_ID })
+    await subscribeSettled(a, { groupId: GROUP_ID })
     await settle()
 
     expect(a.store.getState().game.count).toBe(10)

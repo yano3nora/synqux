@@ -39,6 +39,7 @@ import {
   type PeerRole,
   type RequestEnvelope,
   type Result,
+  type SnapshotFence,
   type SnapshotStore,
   type SynquxActionMeta,
   type SynquxSynced,
@@ -57,6 +58,30 @@ const WAKE_FALLBACK_MS = 1000
 /** gap の継続時間を評価する heartbeat 間隔。correctness には使わない */
 const HEALTH_CHECK_INTERVAL_MS = 1000
 
+/**
+ * 初回購読 barrier (ADR-0021 Decision 1) の待機上限。onReady を呼ばない旧 adapter
+ * はこの timeout 経由で従来挙動 (即 live) へ縮退する — そのぶん subscribe の完了が
+ * 遅くなる。timeout 後の gap は既存の health / recovery 機構が治す
+ */
+const INITIAL_BACKLOG_TIMEOUT_MS = 10_000
+
+/**
+ * `fire: 'persisted'` の watermark 未達 effect を warn + drop するまでの上限
+ * (ADR-0021 Decision 3)。timeout で発火してしまうと reload 型 effect が保存を
+ * 再び kill し得るため「発火しない」に倒す。fallback が欲しい rule は 'applied' を使う
+ */
+const PERSISTED_FIRE_TIMEOUT_MS = 30_000
+
+/**
+ * checkpoint 保存失敗の backoff retry (ADR-0021 Decision 4)。有限回で諦める —
+ * 無限 retry は transport 障害時の帯域消費にしかならない (health 機構と同型の判断)
+ */
+const CHECKPOINT_RETRY_DELAYS_MS = [1_000, 2_000, 4_000]
+
+/** (epoch, appliedSeq) の辞書順比較。fencing (ADR-0011) と同一の順序 */
+const compareFence = (a: SnapshotFence, b: SnapshotFence): number =>
+  a.epoch !== b.epoch ? a.epoch - b.epoch : a.appliedSeq - b.appliedSeq
+
 /** automation 評価で取得済みの serverNow を request 化へ引き渡す端末内 marker */
 const AUTOMATION_REQUESTED_AT = Symbol('synqux.automationRequestedAt')
 
@@ -65,7 +90,8 @@ type DeliveryMeta = Required<
     SynquxActionMeta,
     'requestedBy' | 'dispatched' | 'responsedBy' | 'responsed' | 'epoch' | 'seq'
   >
->
+> &
+  Pick<SynquxActionMeta, 'replay'>
 
 /** envelope を正として、host 試し実行と実配達へ同じ同期情報を載せる構築点。 */
 const withDeliveryMeta = <TAction extends Action>(
@@ -238,6 +264,26 @@ type SynquxListenerBase = {
 
   /** host 端末だけで発火するか、適用した全端末で発火するか */
   mode: 'host-only' | 'everyone'
+
+  /**
+   * effect の実行タイミング (ADR-0021 Decision 3)。既定 'applied' は適用直後。
+   * 'persisted' は「永続化水位 (persisted watermark) がこの適用の裁定印
+   * (epoch, seq) 以上に達してから」実行する。
+   *
+   * 【docs 契約 (ADR-0021 Decision 5)】スレッドを止める UI (alert / confirm) や
+   * navigation (location.reload) を含む effect は 'persisted' の宣言を必須とし、
+   * rule 配列の最後に置き、「以後の進行が止まってよい終端イベント」(reset 等) に
+   * 限ること — 'applied' のまま宣言すると effect が host の snapshot 永続化を
+   * kill し、リロード後の全量再配送と合わさって無限リロードを作り得る。
+   *
+   * 'persisted' が保証するのは「その fence の snapshot が耐久化された」ことだけで、
+   * 正史確定・自 request の包含・cross-device の同時到達・必ず 1 回の実行は
+   * 保証しない (watermark 未達は有界時間で warn + drop する)。match / host 判定 /
+   * ctx は適用直後に評価・捕捉され、遅延するのは effect の実行だけ。
+   * local action (scope: 'all') と localSnapshots 無効の standalone では
+   * 'applied' と同義になる
+   */
+  fire?: 'applied' | 'persisted'
 }
 
 /**
@@ -340,6 +386,8 @@ export type Synqux<
    * standalone 時は transport に触れず localSnapshots から
    * restore だけ行う。初期化中・購読中・teardown 中の再 subscribe は拒否する。
    * 返り値で購読破棄 + presence 解除を行う。
+   * NOTE 同一 instance の**別 groupId** への再 subscribe は非サポート (順序状態が
+   * instance に残るため desync する)。group を跨ぐときは instance を作り直すこと
    */
   subscribe: (
     options: SynquxSubscribeOptions<TRoot>,
@@ -456,6 +504,14 @@ export const createSynqux = <
     ) {
       throw new Error(`Invalid SynquxListener scope: ${String(listener.scope)}`)
     }
+
+    if (
+      listener.fire !== undefined &&
+      listener.fire !== 'applied' &&
+      listener.fire !== 'persisted'
+    ) {
+      throw new Error(`Invalid SynquxListener fire: ${String(listener.fire)}`)
+    }
   }
 
   const hostLiveness =
@@ -485,6 +541,111 @@ export const createSynqux = <
   // 処理済みリスト等の同期状態はすべてインスタンス内部に持つ (Decision 3)
   const ordering = createOrdering()
   let lastPrunedBeforeSeq = 0
+
+  /**
+   * 「既裁定のまま added で届いた」envelope の端末ローカルな replay 印
+   * (ADR-0021 Decision 2)。restore・途中参加・再購読の再配送 = その端末にとっての
+   * 歴史であり、この印のある適用では listener を発火しない。同一 id の changed
+   * 受信 (契約 3 強化により added より後 = 購読後の新裁定) で印を外す
+   */
+  const replayDeliveredIds = new Set<RequestEnvelope['id']>()
+
+  /**
+   * 初回購読 barrier (ADR-0021 Decision 1) の通過済みフラグ。checkpoint
+   * (Decision 4) の適格条件 — barrier 前の昇格で保存すると初期 state で正しい
+   * 旧 snapshot を上書きし得るため、通過前は checkpoint を一切実行しない
+   */
+  let subscriptionBarrierPassed = false
+
+  /**
+   * この session で「同期対象 group の証拠」(snapshot load 成功 or envelope 受信)
+   * を観測済みか。checkpoint のもう 1 つの適格条件 — ordering は instance 状態の
+   * ため、同一 instance を別 group へ再 subscribe した場合に前 group の進行を
+   * 「local fence の追い越し」と誤認して無関係な group へ書き込むのを防ぐ
+   * (そもそも instance の別 group 再利用は非サポートだが、壊れ方を書き込みなしに
+   * 限定する)
+   */
+  let sessionObservedSyncEvidence = false
+
+  /**
+   * 永続化水位 (ADR-0021 Decision 3): 「(epoch, appliedSeq) がここまでの snapshot
+   * は耐久化済み」の辞書順単調 max。情報源は (a) 自端末 persistSnapshot の
+   * committed resolve、(b) transport.subscribeSnapshotFence、(c) load した
+   * snapshot の fence (load できた = 耐久化済みの事実)
+   */
+  let persistedWatermark: SnapshotFence = { epoch: 0, appliedSeq: 0 }
+
+  type PendingPersistedEffect = {
+    fence: SnapshotFence
+    fire: () => void
+    timer: ReturnType<typeof setTimeout>
+  }
+  const pendingPersistedEffects = new Set<PendingPersistedEffect>()
+
+  /** standalone の persisted effect (persistLocalSnapshot の save settle 後に実行) */
+  const pendingStandalonePersisted: (() => void)[] = []
+
+  /**
+   * checkpoint の走行中ガード。boolean ではなく走行主の session を持つ —
+   * 旧 session の保存が resolve しないまま残っても、新 session の checkpoint は
+   * 「自 session の走行中」でない限りブロックされない (識別子の不一致で素通り)
+   */
+  let checkpointTaskSession: object | null = null
+
+  const updatePersistedWatermark = (fence: SnapshotFence): void => {
+    if (compareFence(fence, persistedWatermark) <= 0) {
+      return
+    }
+
+    persistedWatermark = { epoch: fence.epoch, appliedSeq: fence.appliedSeq }
+    // 重複・逆順の fence イベントは上の単調 max が吸収する。到達済み entry だけを
+    // queue 順 (= 適用順) に実行する。iteration 中の delete は現在要素のみで安全
+    for (const entry of pendingPersistedEffects) {
+      if (compareFence(entry.fence, persistedWatermark) <= 0) {
+        clearTimeout(entry.timer)
+        pendingPersistedEffects.delete(entry)
+        entry.fire()
+      }
+    }
+  }
+
+  const enqueuePersistedEffect = (
+    fence: SnapshotFence,
+    fire: () => void,
+  ): void => {
+    // 既達 (dual-host / checkpoint 先行で watermark が先に進んでいた) なら即実行
+    if (compareFence(fence, persistedWatermark) <= 0) {
+      fire()
+      return
+    }
+
+    const entry: PendingPersistedEffect = {
+      fence,
+      fire,
+      timer: setTimeout(() => {
+        // 発火してしまうと 'persisted' の契約の嘘になる (reload 型 effect が保存を
+        // 再び kill し得る) ため、warn + drop に倒す (ADR-0021 Decision 3)
+        pendingPersistedEffects.delete(entry)
+        console.warn(
+          `[synqux] Dropped a "fire: 'persisted'" listener effect: the persisted watermark did not reach (epoch=${String(fence.epoch)}, seq=${String(fence.appliedSeq)}) within ${String(PERSISTED_FIRE_TIMEOUT_MS)}ms.`,
+        )
+      }, PERSISTED_FIRE_TIMEOUT_MS),
+    }
+    pendingPersistedEffects.add(entry)
+  }
+
+  /** session 破棄時に replay 印・watermark・遅延 effect をすべて破棄する */
+  const resetListenerDeliveryState = (): void => {
+    for (const entry of pendingPersistedEffects) {
+      clearTimeout(entry.timer)
+    }
+    pendingPersistedEffects.clear()
+    pendingStandalonePersisted.length = 0
+    persistedWatermark = { epoch: 0, appliedSeq: 0 }
+    replayDeliveredIds.clear()
+    subscriptionBarrierPassed = false
+    sessionObservedSyncEvidence = false
+  }
 
   // 待機 fork をイベントで起こすシグナル。notify 点は「state 変化 = 再評価に
   // 値する事象」に限る: peer 増減 / request 受信 / 適用完了
@@ -638,10 +799,22 @@ export const createSynqux = <
     return !!selfId && deriveHostId(Object.values(entities)) === selfId
   }
 
-  /** 実適用後の rule を失敗隔離して fire-and-forget で起動する。 */
-  const fireListener = <TListenerAction extends Action>(
+  /** rule の match を失敗隔離して評価する (throw は不一致扱い)。 */
+  const matchesListener = <TListenerAction extends Action>(
+    listener: { match: (action: TListenerAction) => boolean },
+    action: TListenerAction,
+  ): boolean => {
+    try {
+      return listener.match(action)
+    } catch (error) {
+      console.error(error)
+      return false
+    }
+  }
+
+  /** effect を失敗隔離して fire-and-forget で起動する。 */
+  const runListenerEffect = <TListenerAction extends Action>(
     listener: {
-      match: (action: TListenerAction) => boolean
       effect: (
         action: TListenerAction,
         ctx: SynquxListenerContext<TSynced>,
@@ -650,18 +823,6 @@ export const createSynqux = <
     action: TListenerAction,
     ctx: SynquxListenerContext<TSynced>,
   ): void => {
-    let matched: boolean
-    try {
-      matched = listener.match(action)
-    } catch (error) {
-      console.error(error)
-      return
-    }
-
-    if (!matched) {
-      return
-    }
-
     try {
       void Promise.resolve(listener.effect(action, ctx)).catch(
         (error: unknown) => console.error(error),
@@ -674,14 +835,19 @@ export const createSynqux = <
   /**
    * 実適用後かつ live の action だけを配列順に評価する。local action は opt-in
    * rule だけへ渡し、内部 action は consumer の matcher へ公開しない。
+   * replay 印のある適用 (既裁定のまま added で届いた envelope) では発火しない —
+   * これが replay 非発火の正であり、phase ゲートは防衛線 (ADR-0021 Decision 2)
    */
   const fireListenersAfterApply = (
     root: TRoot,
     action: Action,
     isSynced: boolean,
   ): void => {
+    const meta = (action as UnknownAction).meta as SynquxActionMeta | undefined
+
     if (
       listeners.length === 0 ||
+      meta?.replay === true ||
       root.synqux.phase !== 'live' ||
       (!isSynced && !hasAllScopeListeners) ||
       (!isSynced && isSynquxAction(action))
@@ -690,10 +856,13 @@ export const createSynqux = <
     }
 
     // 1 発火点につき ctx の導出は 1 回だけ行い、全 rule で適用後 state を共有する。
+    // fire: 'persisted' でも match / host 判定 / ctx はここ (適用直後) で評価・
+    // 捕捉し、遅延するのは effect の実行だけ (ADR-0021 Decision 3)
     const ctx: SynquxListenerContext<TSynced> = {
       synced: config.selectSynced(root),
       self: selectSelf(root),
     }
+    const isStandalone = root.synqux.mode === 'standalone'
 
     for (const listener of listeners) {
       if (!isSynced && listener.scope !== 'all') {
@@ -704,13 +873,134 @@ export const createSynqux = <
         continue
       }
 
+      let matched: boolean
+      let fire: () => void
       if (listener.scope === 'all') {
-        fireListener(listener, action, ctx)
+        matched = matchesListener(listener, action)
+        fire = () => runListenerEffect(listener, action, ctx)
       } else {
         // isSyncedAction が保証した境界でだけ domain action へ戻す。
-        fireListener(listener, action as TAction, ctx)
+        const syncedAction = action as TAction
+        matched = matchesListener(listener, syncedAction)
+        fire = () => runListenerEffect(listener, syncedAction, ctx)
+      }
+
+      if (!matched) {
+        continue
+      }
+
+      // local action (scope 'all') は seq も persist も存在しないため
+      // 'persisted' でも 'applied' と同義で適用直後に実行する
+      if ((listener.fire ?? 'applied') === 'applied' || !isSynced) {
+        fire()
+        continue
+      }
+
+      if (isStandalone) {
+        // standalone は persistLocalSnapshot の save 試行 settle 後に実行する。
+        // localSnapshots 無効の session は永続化対象がなく適用直後に実行する
+        if (session?.localSnapshots) {
+          pendingStandalonePersisted.push(fire)
+        } else {
+          fire()
+        }
+        continue
+      }
+
+      if (meta?.epoch !== undefined && meta.seq !== undefined) {
+        enqueuePersistedEffect(
+          { epoch: meta.epoch, appliedSeq: meta.seq },
+          fire,
+        )
+      } else {
+        // 裁定印なしの synced 適用は synced session では発生しない想定の防御
+        fire()
       }
     }
+  }
+
+  /**
+   * snapshot checkpoint (ADR-0021 Decision 4): 「裁定時に persist」だけでは host が
+   * persist 前に死んだとき誰も snapshot を進める者がいない (reset reload ループの
+   * 持続条件)。host は barrier 通過後、自分の local fence が durable watermark を
+   * 辞書順で追い越しているとき checkpoint として persistSnapshot を試みる。
+   * 到達性は best-effort — 有限回の backoff retry で諦める
+   */
+  const maybeCheckpoint = (root: TRoot): void => {
+    if (
+      !session ||
+      session.mode !== 'synced' ||
+      !subscriptionBarrierPassed ||
+      !sessionObservedSyncEvidence ||
+      checkpointTaskSession === session ||
+      !isSelfHost(root)
+    ) {
+      return
+    }
+
+    const local = ordering.state()
+    // 同値 fence では保存しない (epoch インフレと無駄 write の抑止)。fencing の
+    // 同値受理により、追い越しがあるときだけ保存すれば保存地点の単調性は保たれる。
+    // appliedSeq 単独比較にしないこと — 旧 epoch の分岐 (appliedSeq だけ先行) で
+    // 正史 snapshot を上書きしないため
+    if (
+      compareFence(
+        { epoch: local.epoch, appliedSeq: local.appliedSeq },
+        persistedWatermark,
+      ) <= 0
+    ) {
+      return
+    }
+
+    const subscriptionSession = session
+    checkpointTaskSession = subscriptionSession
+    void (async () => {
+      try {
+        // barrier 通過後に hosting epoch を確立してから保存する (Decision 4)。
+        // 保存内容は評価固定し、retry でも同じ (state, fence) を書く
+        ordering.beginHosting()
+        const orderingState = ordering.state()
+        const synced = config.selectSynced(subscriptionSession.store.getState())
+
+        for (let attempt = 0; ; attempt += 1) {
+          if (
+            session !== subscriptionSession ||
+            !isSelfHost(subscriptionSession.store.getState())
+          ) {
+            return
+          }
+
+          try {
+            const saved = await persistSnapshot(synced, orderingState)
+            // await 中に session が替わっていたら、旧 session の結果を新 session の
+            // watermark へ反映しない (別 group へ再接続した場合の汚染防止)
+            if (session !== subscriptionSession) {
+              return
+            }
+            if (saved) {
+              updatePersistedWatermark({
+                epoch: orderingState.epoch,
+                appliedSeq: orderingState.appliedSeq,
+              })
+            }
+            // false = fenced-out (他所でより新しい保存が確定済み) も終了でよい
+            return
+          } catch (error) {
+            console.error(error)
+            const delay = CHECKPOINT_RETRY_DELAYS_MS[attempt]
+            if (delay === undefined) {
+              return
+            }
+            await new Promise<void>((resolve) => setTimeout(resolve, delay))
+          }
+        }
+      } finally {
+        // 新 session の走行中スロットを、遅れて終わった旧 task が消さない
+        if (checkpointTaskSession === subscriptionSession) {
+          checkpointTaskSession = null
+        }
+      }
+    })()
   }
 
   type SubscribeCleanup = () => void | Promise<void>
@@ -805,6 +1095,11 @@ export const createSynqux = <
       return
     }
 
+    // この適用で queue された persisted effect は save 試行の settle 後に実行する
+    // (ADR-0021 Decision 3)。effect 同期実行のままでは navigation する effect が
+    // save より先に走り、standalone でも保存を kill できてしまうため
+    const deferredEffects = pendingStandalonePersisted.splice(0)
+
     const orderingState = ordering.state()
     // 移植元 saveGameState 踏襲で失敗は握りつぶす (standalone 永続化は best effort)
     void Promise.resolve(
@@ -819,7 +1114,13 @@ export const createSynqux = <
           appliedSeq: orderingState.appliedSeq,
         },
       ),
-    ).catch((e: unknown) => console.error(e))
+    )
+      .catch((e: unknown) => console.error(e))
+      .then(() => {
+        for (const fire of deferredEffects) {
+          fire()
+        }
+      })
   }
 
   // ---------------------------------------------------------------
@@ -1062,6 +1363,11 @@ export const createSynqux = <
           const entity = current.synqux.requests.entities[id]
           const responsedBy = current.synqux.connections.selfId
 
+          // 裁定の土台 state と同期的に session を捕捉する。respondRequest の
+          // await 中に unsubscribe → 再 subscribe されても、この裁定の後処理
+          // (persistSnapshot / watermark) を別 session の group へ持ち込まない
+          const adjudicationSession = session
+
           // entity 消滅 = 適用直後 (hash matcher が破棄済み)。接続切れも同様に離脱
           if (!entity || !responsedBy) {
             break
@@ -1211,7 +1517,10 @@ export const createSynqux = <
             continue
           }
 
-          if (successfulAdjudication) {
+          // 裁定元 session が生きているときだけ後処理へ進む。respondRequest の
+          // await 中に session が替わっていたら、旧 state の保存 (persistSnapshot は
+          // 現在の session.groupId へ書く) も watermark 反映も行わない
+          if (successfulAdjudication && session === adjudicationSession) {
             try {
               const { next, orderingState } = successfulAdjudication
               const snapshotSaved = await persistSnapshot(
@@ -1223,7 +1532,16 @@ export const createSynqux = <
               // 失敗した場合は同じ try 内の prune まで進めない。fenced-out 時も
               // 自分の prune 線は保存済み snapshot と無関係に先行し得るため、
               // 進むと stale snapshot + 封筒削除の復元不能を自ら作ってしまう。
-              if (snapshotSaved) {
+              // 保存 await 中に session が替わった場合も進めない — pruneRequests は
+              // 現在の transport 接続 (= 新 session の group) に束縛されるため、
+              // 旧裁定の閾値で無関係な group の requests を削ってしまう
+              if (snapshotSaved && session === adjudicationSession) {
+                // persisted watermark の情報源 (a): 自端末の committed resolve
+                // (ADR-0021 Decision 3)
+                updatePersistedWatermark({
+                  epoch: orderingState.epoch,
+                  appliedSeq: orderingState.appliedSeq,
+                })
                 const beforeSeq = orderingState.appliedSeq - APPLIED_WINDOW_SIZE
                 if (
                   beforeSeq > 1 &&
@@ -1268,14 +1586,24 @@ export const createSynqux = <
     },
   })
   // peer 増減で host が変わり得るため、昇格待機中の fork を起こす
-  // (migration 回復の主経路。1000ms ポーリングは安全網に格下げ)
+  // (migration 回復の主経路。1000ms ポーリングは安全網に格下げ)。
+  // live 中の host 昇格でも stale snapshot を解消できるよう、checkpoint も
+  // ここで再評価する — 「旧 host が persist 前に死に、live 適用済みの端末が
+  // 昇格する」migration では replay 適用が発生しないため、peer 変化が
+  // 唯一の評価機会になる (ADR-0021 Decision 4 の Codex レビュー指摘)
   requestListener.startListening({
     actionCreator: synquxActions.peerUpserted,
-    effect: () => waker.notify(),
+    effect: (_action, listener) => {
+      waker.notify()
+      maybeCheckpoint(listener.getState() as TRoot)
+    },
   })
   requestListener.startListening({
     actionCreator: synquxActions.peerRemoved,
-    effect: () => waker.notify(),
+    effect: (_action, listener) => {
+      waker.notify()
+      maybeCheckpoint(listener.getState() as TRoot)
+    },
   })
 
   /**
@@ -1358,13 +1686,22 @@ export const createSynqux = <
             continue
           }
 
+          // 既裁定のまま added で届いた envelope (= この端末にとっての歴史) か。
+          // 印は dispatch する action の delivery meta に載せ、listener の
+          // replay 非発火判定に使う (ADR-0021 Decision 2)
+          const isReplayDelivery = replayDeliveredIds.has(id)
+
           // log 専用の error (message なし) は UI に出すデータがなく、
           // 負荷軽減のため dispatch せず console へ直接出力する (ADR-0008)
           if (entity.result?.type === 'error' && !entity.result.message) {
             emitLog(current, entity.result)
             ordering.markApplied(seq, id)
+            replayDeliveredIds.delete(id)
             waker.notify() // 適用完了: 次の seq を待つ fork を起こす
             resolvePendingDispatch(entity.result)
+            if (isReplayDelivery) {
+              maybeCheckpoint(listener.getState() as TRoot)
+            }
             break
           }
 
@@ -1380,6 +1717,8 @@ export const createSynqux = <
               responsed: entity.responsed!,
               epoch: entity.epoch!,
               seq: entity.seq!,
+              // 印は封筒には書かない端末ローカルの配送経路判定 (ADR-0021)
+              ...(isReplayDelivery ? { replay: true } : {}),
             })
             listener.dispatch(deliveredAction)
 
@@ -1399,10 +1738,18 @@ export const createSynqux = <
             // 他 fork が rival 消失を「自分が勝者」と誤認し得る。
             // NOTE dispatch **前**への前倒しは不可 (失敗時に seq が永久欠番になる)
             ordering.markApplied(seq, id)
+            replayDeliveredIds.delete(id)
             waker.notify() // 適用完了: 次の seq を待つ fork を起こす
             resolvePendingDispatch(
               config.selectSynced(listener.getState() as TRoot).result,
             )
+
+            // checkpoint トリガー (b): host 在任中の replay (既裁定 added 由来)
+            // 適用直後 (ADR-0021 Decision 4)。barrier の timeout 縮退後に届く
+            // backlog にもここで効く
+            if (isReplayDelivery) {
+              maybeCheckpoint(listener.getState() as TRoot)
+            }
 
             // 内部 entities からの破棄 (同 hash の action 通過) を確認してから
             // fork を終える。通常は dispatch 内で同期完了しており即座に通る
@@ -1804,6 +2151,7 @@ export const createSynqux = <
     store.dispatch(synquxActions.sessionStarted({ selfId, mode: sessionMode }))
     cleanups.push(() => {
       expectedSyncedByRequest.clear()
+      resetListenerDeliveryState()
       store.dispatch(synquxActions.sessionEnded())
     })
 
@@ -1819,7 +2167,20 @@ export const createSynqux = <
       store.dispatch(
         synquxRestored({ synced: clearRestoredResult(envelope.synced) }),
       )
+      // persisted watermark の情報源 (c): load できた snapshot の fence は
+      // 耐久化済みの事実 (ADR-0021 Decision 3)
+      updatePersistedWatermark({
+        epoch: envelope.ordering.epoch,
+        appliedSeq: envelope.ordering.appliedSeq,
+      })
+      sessionObservedSyncEvidence = true
     }
+
+    // 初回購読 barrier (ADR-0021 Decision 1) の進行状態。onReady 到達と
+    // 「配送済み裁定列の適用完了」の両方を待ってから live へ遷移する
+    let initialBacklogReady = false
+    let initialBacklogTargetSeq = 0
+    let initialOnReadyConsumed = false
 
     const rejectUnknownSchema = (envelope: RequestEnvelope): boolean => {
       if (envelope.v === SYNQUX_SCHEMA_VERSION) {
@@ -1844,6 +2205,10 @@ export const createSynqux = <
             return
           }
 
+          // この group の envelope を観測した = checkpoint の適格証拠
+          // (dedup で破棄される再配送でも証拠にはなる)
+          sessionObservedSyncEvidence = true
+
           // 同一 request の added 重複配送 (遅延ののち重複) を破棄する
           if (!ordering.acceptAdded(envelope.id)) {
             return
@@ -1853,8 +2218,12 @@ export const createSynqux = <
           ordering.observe({ epoch: request.epoch, seq: request.seq })
 
           // restore タイミング次第で裁定済み request が added で届く。
-          // 裁定済みのものは changed 相当として適用側の待機 loop に回す
+          // 裁定済みのものは changed 相当として適用側の待機 loop に回す。
+          // 契約 3 強化 (added-before-changed) により「既裁定のまま added で
+          // 届いた」= restore・途中参加・再購読の再配送のいずれか (= この端末に
+          // とっての歴史) と確定するため、replay と印す (ADR-0021 Decision 2)
           if (request.responsedBy) {
+            replayDeliveredIds.add(request.id)
             store.dispatch(synquxActions.requestChanged({ request }))
             return
           }
@@ -1867,6 +2236,8 @@ export const createSynqux = <
             return
           }
 
+          sessionObservedSyncEvidence = true
+
           const request = parseEnvelope(envelope)
 
           // host により裁定されたものだけ受け取る
@@ -1874,11 +2245,30 @@ export const createSynqux = <
             return
           }
 
+          // 契約 3 強化により added より後の changed = 購読後の新裁定
+          // (敗者の再裁定など)。replay 印を外して live の発火対象へ戻す
+          replayDeliveredIds.delete(request.id)
+
           ordering.observe({ epoch: request.epoch, seq: request.seq })
           store.dispatch(synquxActions.requestChanged({ request }))
         },
 
         onError: handleTransportError,
+
+        onReady: () => {
+          // barrier (ADR-0021 Decision 1) は初回購読のみ対象。recovery の再購読
+          // (openRequestsSubscription 再呼び出し) の onReady は消費しない
+          if (initialOnReadyConsumed) {
+            return
+          }
+
+          initialOnReadyConsumed = true
+          initialBacklogReady = true
+          // 「backlog として配送済みの裁定列を適用し終えたか」の到達目標。
+          // onReady は buffer flush 後 (契約 12) のためここで観測最大を固定できる
+          initialBacklogTargetSeq = ordering.maxSeenSeq()
+          waker.notify()
+        },
       }
 
     // 再購読ではこの関数から同じ routing を開き直す。unsubscribe closure も
@@ -1888,6 +2278,17 @@ export const createSynqux = <
 
     let unsubscribeRequests = openRequestsSubscription()
     cleanups.push(() => unsubscribeRequests())
+
+    // persisted watermark の情報源 (b): fence の変更購読 (ADR-0021 Decision 3)。
+    // optional — 未実装 adapter では (a)(c) のみが情報源になり、非 host 端末の
+    // 'persisted' rule は実質 timeout drop になる (契約 13 に明記済みの縮退)
+    if (transport.subscribeSnapshotFence) {
+      const unsubscribeFence = transport.subscribeSnapshotFence(
+        groupId,
+        (fence) => updatePersistedWatermark(fence),
+      )
+      cleanups.push(unsubscribeFence)
+    }
 
     let gapStartedAt: number | null = null
     let lastAppliedSeq = ordering.appliedSeq()
@@ -1953,6 +2354,14 @@ export const createSynqux = <
 
         if (latestPayload) {
           const envelope = parseSnapshotPayload(latestPayload)
+
+          // load できた fence は restore 採否と無関係に耐久化済みの事実
+          // (persisted watermark の情報源 (c)、ADR-0021 Decision 3)
+          updatePersistedWatermark({
+            epoch: envelope.ordering.epoch,
+            appliedSeq: envelope.ordering.appliedSeq,
+          })
+          sessionObservedSyncEvidence = true
 
           // fencing により同値 snapshot も正史として信頼できる。同値受理は
           // dual-host 早期適用の同 seq 分岐を正史へ引き戻す唯一の手段であり、
@@ -2092,10 +2501,30 @@ export const createSynqux = <
       torndown = true
     })
 
+    // 初回購読 barrier (ADR-0021 Decision 1): onReady 到達と backlog の適用完了を
+    // 有界に待つ。live の意味論を「barrier までに観測した裁定列を適用済み」へ復元し、
+    // automations / host-liveness が catch-up 途中の state を評価しないよう engine
+    // 起動も live 遷移の後ろに置く。timeout 縮退後の gap は health / recovery が治す
+    const barrierDeadline = Date.now() + INITIAL_BACKLOG_TIMEOUT_MS
+    while (
+      !(initialBacklogReady && ordering.appliedSeq() >= initialBacklogTargetSeq)
+    ) {
+      const remaining = barrierDeadline - Date.now()
+      if (remaining <= 0) {
+        break
+      }
+      await waker.wait(Math.min(remaining, WAKE_FALLBACK_MS))
+      signal?.throwIfAborted()
+    }
+    subscriptionBarrierPassed = true
+
+    changePhase(store, 'live')
     startAutomationEngine(subscriptionSession)
     startHostLivenessEngine(subscriptionSession)
 
-    changePhase(store, 'live')
+    // checkpoint トリガー (a): barrier 通過時点で host なら、stale snapshot を
+    // 追いつき済みの自分の state で解消する (ADR-0021 Decision 4)
+    maybeCheckpoint(store.getState())
 
     return subscriptionSession.teardown
   }

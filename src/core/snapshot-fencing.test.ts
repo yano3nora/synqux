@@ -1,7 +1,12 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { createMemoryHub } from '../testing/memory-hub.js'
 import { buildSnapshotPayload } from './snapshot.js'
-import { createClient, createHubClient, settle } from './test-fixtures.js'
+import {
+  createClient,
+  createHubClient,
+  settle,
+  subscribeSettled,
+} from './test-fixtures.js'
 import type { SnapshotEnvelope } from './types.js'
 import type { GameState } from './test-fixtures.js'
 
@@ -60,7 +65,7 @@ describe('snapshot fencing', () => {
     expect(afterDelayedWrite.ordering.epoch).toBe(afterMigration.ordering.epoch)
 
     const d = createHubClient(hub)
-    await d.sync.subscribe({ store: d.store, groupId: GROUP_ID })
+    await subscribeSettled(d, { groupId: GROUP_ID })
     await settle(20)
     expect(d.store.getState().game).toMatchObject({
       count: c.store.getState().game.count,

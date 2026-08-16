@@ -3,7 +3,12 @@ import { createMemoryHub } from '../testing/memory-hub.js'
 import { APPLIED_WINDOW_SIZE } from './ordering.js'
 import { selectSyncHealth } from './selectors.js'
 import { parseSnapshotPayload } from './snapshot.js'
-import { createHubClient, settle, type GameState } from './test-fixtures.js'
+import {
+  createHubClient,
+  settle,
+  subscribeSettled,
+  type GameState,
+} from './test-fixtures.js'
 
 const GROUP_ID = 'group-retention'
 const STALL_AFTER_MS = 5_000
@@ -75,7 +80,7 @@ describe('requests retention', () => {
       devDeterminismCheck: false,
     })
 
-    await c.sync.subscribe({ store: c.store, groupId: GROUP_ID })
+    await subscribeSettled(c, { groupId: GROUP_ID })
     await settle(30)
 
     for (const client of [a, b, c]) {

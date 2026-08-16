@@ -133,6 +133,13 @@ export type SynquxActionMeta = {
   /** 端末内での action 一意性 (適用完了の検知・result 通知の重複判定に使う) */
   hash?: string
 
+  /**
+   * 既裁定のまま added で届いた envelope の適用 (= restore・途中参加・再購読の
+   * 再配送。その端末にとっての歴史)。listener の replay 非発火判定に使う
+   * 端末ローカルの配送経路判定で、封筒には書かない (ADR-0021 Decision 2)
+   */
+  replay?: boolean
+
   /** 直前 reducer 通過後の root state (createSynquxRootReducer が locals にのみ付与) */
   root?: unknown
 }
@@ -253,7 +260,13 @@ export type SnapshotStore = {
  * 2. respondRequest は永続化 ack で resolve すること (楽観 resolve 禁止)。
  *    なお変更イベント (onChanged) が ack より先に届くこと (local echo) は許容される
  * 3. 配送は at-least-once でよい。重複・遅延・順序入れ替えは core が吸収するので
- *    adapter 側で直列化を頑張らなくてよい (観測したまま素朴に流す)
+ *    adapter 側で直列化を頑張らなくてよい (観測したまま素朴に流す)。
+ *    ただし 1 点だけ強化 (ADR-0021): 【added-before-changed】同一購読内では、
+ *    同一 child について added が changed より先に配送されること。adapter は
+ *    SDK の性質に頼らず能動的に保証する (added 未配送の child の changed は
+ *    buffer し、added 配送後に flush する)。これにより「既裁定のまま added で
+ *    届いた envelope = その端末にとっての歴史 (restore / 途中参加 / 再配送)」が
+ *    契約上確定し、core の restore replay 非発火判定の根拠になる
  * 4. 【retention】最新 snapshot 地点より新しい requests を保持しなければならない。
  *    requests を prune する transport (TTL 等) はこの線より過去のみ削除できる
  * 5. connect した peer の切断時 (プロセス死・ネットワーク断を含む)、全端末で
@@ -279,6 +292,19 @@ export type SnapshotStore = {
  *    前提 (ADR-0009) の範囲で stale host の降格 (ADR-0016) にのみ使う。
  *    対象 peer が既に存在しない場合は throw せず no-op で resolve すること
  *    (複数 observer の同時 demote / 切断との競合を冪等に収束させる)
+ * 12.【onReady (ADR-0021)】subscribeRequests は、購読開始時の既存 requests の
+ *    一括配送 (契約 3 の buffer flush を含む) を完了したら handlers の onReady を
+ *    呼ぶこと。1 購読につき高々 1 回。unsubscribe 後は初回配送・onReady とも
+ *    発火しない。一括取得の失敗は onError へ転送する (契約 8 と同じ扱い)。
+ *    onReady を呼ばない旧 adapter でも動作するが、core の初回購読 barrier が
+ *    timeout (有界) まで待つぶん subscribe の完了が遅くなる
+ * 13.【subscribeSnapshotFence (ADR-0021)】optional。snapshot の fence だけを
+ *    購読し、変更を handler へ配送する。配送してよいのは server 確定値のみ
+ *    (楽観 local echo の配送は禁止。firebase は saveSnapshot の transaction を
+ *    applyLocally: false で実行して echo 自体を作らない)。購読開始時に保存済み
+ *    fence があれば初期値として配送してよい。重複・逆順配送は core が単調 max で
+ *    吸収する。未実装の adapter では、非 host 端末の listener `fire: 'persisted'`
+ *    が実質 timeout drop になる (縮退挙動)
  */
 export type SynquxTransport = SnapshotStore & {
   /** presence 登録。selfId は transport が採番する */
@@ -362,6 +388,17 @@ export type SynquxTransport = SnapshotStore & {
       onChanged(envelope: RequestEnvelope): void
       /** 購読の回復不能な打ち切り (permission denied 等) の通知 (契約 8) */
       onError?(error: unknown): void
+      /** 購読開始時の既存 requests の一括配送完了の通知 (契約 12、ADR-0021) */
+      onReady?(): void
     },
+  ): Unsubscribe
+
+  /**
+   * snapshot fence の変更購読 (契約 13、ADR-0021)。optional —
+   * listener `fire: 'persisted'` の watermark 情報源で、correctness には使わない
+   */
+  subscribeSnapshotFence?(
+    key: string,
+    handler: (fence: SnapshotFence) => void,
   ): Unsubscribe
 }

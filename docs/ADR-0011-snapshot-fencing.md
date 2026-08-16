@@ -63,3 +63,13 @@
 - transport 契約の breaking change (`saveSnapshot` の引数・戻り値・保存形状)。semver 上の扱いは BACKLOG「公開前 gate」の version 判断に含める
 - MemoryHub に snapshot 書き込みの保留 fault (`holdSnapshot`) を追加し、「旧 host の遅延書き込み」を決定的に再現する
 - Firebase adapter の runTransaction 化は SDK mock で単体検証し、emulator 実機確認は BACKLOG P1「conformance gate」に委ねる
+
+## Amendment (2026-08-16): `applyLocally: false` (ADR-0021)
+
+fence 購読 (`subscribeSnapshotFence`、transport 契約 13) へ楽観 local echo を
+流さないため、firebase adapter の `runTransaction` は `applyLocally: false` で
+実行するようになった。Performance notes の「初回試行がそのまま通って実質 `set` と
+同等」という説明は書き込み往復については引き続き成立するが、**購読側の可視性**
+(自端末の local event が即時に発火すること) については成立しない — fence 購読
+イベントは server 確定後にのみ届く。これは `fire: 'persisted'` の「耐久化済み
+だけを観測する」契約のための意図的な変更 (ADR-0021 Decision 3)。

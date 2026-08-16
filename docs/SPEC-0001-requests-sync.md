@@ -50,6 +50,8 @@ synqux は、consumer が認証・認可した**協調的な非敵対クライ�
     - snapshot 保存は `(epoch, appliedSeq)` の辞書順 fence で原子的に条件書き込みし、旧 host の遅延書き込みを棄却して保存地点の単調性を保証する (ADR-0011)
     - restore は ordering の適用窓・適用済み id 集合を snapshot の内容で完全置換し、残存する未適用の裁定済み envelope を再評価する
     - subscribe 初期化は transactional に行う。途中失敗時は開始済みの presence・購読・Redux session を逆順に cleanup して元の error を rethrow し、同じ instance で再 subscribe できる状態へ戻す。並行初期化は最初の await 前に拒否する
+    - **初回購読 barrier** (ADR-0021 Decision 1): transport の初回一括配送完了 (`onReady`、契約 12) と backlog の適用完了を有界に待ってから `'live'` へ遷移し、automations / host-liveness もその後に起動する。live の意味論は「barrier までに観測した裁定列を適用済み」(耐久化済み・正史確定までは主張しない)。onReady 未対応 adapter は timeout で従来挙動へ縮退する
+    - **snapshot checkpoint** (ADR-0021 Decision 4): 「裁定時に persist」だけでは host が persist 前に死ぬと誰も snapshot を進める者がいないため、barrier 通過後の host は「自分の local fence が耐久化済み fence を辞書順で追い越しているとき」(barrier 通過時・replay 適用直後・peer 変化 = host 昇格観測時に評価) に checkpoint として persistSnapshot を試みる。失敗は有限回 backoff retry で諦める best-effort
     - → 途中参加・リロード・host migration をまたいでも状態と順序保証が継続し、requests の保存量はセッション長に比例しない
 
 ## 同期の仕組み
@@ -116,6 +118,7 @@ tutorial は instance の `synqux.unsubscribe()` で現在の購読を破棄し�
 | 購読の黙殺死 (permission denied 等で transport 購読が打ち切られても core が正常と誤認する) | transport 契約 8 の `onError` で検知し `unrecoverable` を提示。自動リトライせず unsubscribe → 再 subscribe の判断を consumer に委ねる (ADR-0012) | `src/core/create-synqux.ts` / transport adapter、再現テスト: `src/core/transport-failure.test.ts` |
 | offline 起動で `subscribe()` が無期限ハングする | `subscribe` / transport `connect` の `signal?: AbortSignal` で consumer が中断できる (省略時は無期限待機 = 復帰時に無操作で接続)。abort は presence を残さず rollback (ADR-0012) | `src/core/create-synqux.ts` / `src/firebase/index.ts`、再現テスト: `src/core/transport-failure.test.ts` |
 | host の tab freeze 等で「presence は生きているが裁定が止まる」(room 全体の停止) | host liveness heartbeat + observer demote (ADR-0016)。閾値超で沈黙した host を他端末が guest へ降格し、既存 migration で自動回復する | `src/core/create-synqux.ts` (`startHostLivenessEngine`) / transport adapter、再現テスト: `src/core/host-liveness.test.ts` |
+| reset reload 無限ループ: reload する listener effect が snapshot 永続化を kill → stale snapshot からの再購読で reset envelope が再適用され、初回購読では live 遷移が一括配送より先のため listener が再発火 → reload が繰り返される | 4 防衛線 (ADR-0021): ①初回購読 barrier (backlog 適用完了後に live・engine 起動)、②既裁定のまま added で届いた envelope の適用を replay と印し listener を発火しない (これが正、phase ゲートは防衛線)、③`fire: 'persisted'` (effect 実行を耐久化水位まで遅延)、④host の snapshot checkpoint | `src/core/create-synqux.ts` / transport adapter (契約 3 強化・12・13)、再現テスト: `src/core/replay-suppression.test.ts` / `src/core/subscribe-barrier.test.ts` / `src/core/persisted-fire.test.ts` / `src/core/checkpoint.test.ts` |
 
 ### 既知トレードオフ (仕様として明文化)
 
@@ -136,6 +139,7 @@ NOTE: `markApplied` を dispatch **前**へ前倒しする案は不可 (dispatch
 5. **result は synced action ごとに再生成する** (ADR-0013): `createSynquxRootReducer` なら自動。primitive 方式では synced reducer の前段で `stateWithDefaultResult` を必ず呼ぶ。これを省くと過去の error が次の request を誤って拒否する
 6. **UI からの自動 dispatch を作らない** (ADR-0015): ユーザー起点操作は即時 dispatch し、付随効果は reducer 内で同一 request として原子的に適用する (content へ action オブジェクトを埋め込んで UI の setTimeout で dispatch する形は、cleanup 漏れ・全端末 fan-out・複数 request 化の温床)。演出は state を読む render 制御のみで表現し、端末ローカルな演出タイマーをロジックのゲートにしない。表示と同時の自動実行が必要なら automations の汎用ルールで行う
 7. **action への fire-and-forget な反応は listeners で書く** (ADR-0017 / ADR-0020): 外部通知・演出・記録は listeners に集約する。既定 scope は synced action のみで、local action も監視する rule は `scope: 'all'` を指定する。synqux middleware 後段の手書き listener や React hook での自作は、配置順序・restore replay の再送・host ゲート漏れの温床になるため禁止する。synced action に追従する local state は locals reducer の `extraReducers` で決定的に表現し、local action の dispatch を伴う反応だけは consumer の RTK listener に残す
+8. **graceful でない effect は process を止めるな** (ADR-0021 Decision 5): スレッドを止める UI (alert / confirm) や navigation (location.reload) を含む effect は `fire: 'persisted'` の宣言を**必須**とし、rule 配列の最後に置き、「以後の進行が止まってよい終端イベント」(reset 等) に限る。`'applied'` のままだと effect が host の snapshot 永続化を kill し、リロード後の全量再配送と合わさって無限リロードを作る (既知の問題の同名行を参照)。`'persisted'` でも解決しないことも自覚する: alert は発火時点以降の裁定・適用・他 rule の effect を凍らせる。並走する他 rule の in-flight effect は reload に殺され得る。cross-device の同時到達も「必ず 1 回実行される」ことも保証されない (watermark 未達は有界時間で warn + drop)
 
 ## 改善ロードマップ
 
@@ -159,3 +163,11 @@ requests / game state の export があれば、端末ログなしで大半を�
 3. **封筒の `seq` を実適用順の正として使う**: push id 順や export の並びは信頼しない。seq 順で action を replay し、最終 state と一致するか確認する (一致すれば「記録された action が記録された順に 1 回ずつ適用された」ことが確定する)
 4. **異常データの照合**: 同一 seq の複数 request (→dual-host 窓。epoch/responsedBy で勝者を判定)、responsedBy が無い request (→host 不在で滞留)、`result.type` を確認する
 5. **ユーザ報告と突き合わせる**: UI は controlled で楽観更新なしのため、「画面に見えていた state」=「その端末の同期済み state」。request の payload は「ユーザが物理的に操作した対象」そのものなので、操作列から意図を復元できる
+
+### 事例: reset reload 無限ループ (2026-08 消費 repo、ADR-0021)
+
+「ゲームデータ reset で全端末を alert + reload する `mode: 'everyone'` listener」が無限リロードに陥った事故。症状は「特定 group の全端末がリロードを繰り返し、操作不能」。
+
+- **機構**: reset の裁定後、host 上では local echo の changed → 適用 → listener effect (alert でスレッド全停止 → reload) が `persistSnapshot` より先に走り、snapshot が reset 前のまま残る。リロード後の再購読は stale snapshot を restore し、全量購読 (ADR-0002 Decision 5) が reset envelope を再配達、当時の実装では live 遷移が一括配送より先だったため listener が再発火してループが確定した
+- **調査の当たり**: snapshot (`games/{groupId}`) の fence と requests export の最大 seq を比べる。**fence の appliedSeq が封筒の seq より恒常的に古い**なら「post-adjudication の保存が殺されている」サイン。listener の effect に navigation / blocking UI がないかを見る
+- **対策後の確認**: ADR-0021 の 4 防衛線 (初回購読 barrier / replay 印 / `fire: 'persisted'` / checkpoint) 導入後は、stale snapshot が残っても再購読 host の checkpoint が fence を進め、replay では listener が発火しない。reset 系 listener は `fire: 'persisted'` を宣言していること (設計ガイドライン 8)

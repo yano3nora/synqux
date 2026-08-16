@@ -193,9 +193,11 @@ export type SynquxAutomation<TSynced, TAction extends Action> = {
 }
 
 /**
- * 適用済み action に反応する live 配信専用 listener (ADR-0017 / ADR-0020)。
+ * 適用済み action に反応する live 配信専用 listener (ADR-0017 / ADR-0020 / ADR-0021)。
  * scope 'all' は local action でも発火するが synqux 内部 action では発火しない。
- * scope によらず live / host gate を適用し、throw / rejection は握りつぶす。
+ * restore replay (既裁定のまま added で届いた envelope の適用) では発火しない —
+ * replay 印 (ADR-0021 Decision 2) が正で、phase (live) gate は防衛線。
+ * scope によらず replay / live / host gate を適用し、throw / rejection は握りつぶす。
  * exactly-once は保証しないため effect は冪等にし、effect から dispatch しないこと
  */
 type SynquxListenerBase = {
@@ -203,6 +205,13 @@ type SynquxListenerBase = {
   id: string
   /** host 端末だけで発火するか、適用した全端末で発火するか */
   mode: 'host-only' | 'everyone'
+  /**
+   * effect の実行タイミング (ADR-0021)。既定 'applied' は適用直後。'persisted' は
+   * 「この適用の裁定印 (epoch, seq) 以上の snapshot 耐久化」を観測してから実行する。
+   * alert / location.reload 等スレッドを止める effect は 'persisted' が必須
+   * (詳細な契約と保証の範囲は SynquxListener の JSDoc / SPEC-0001 を参照)
+   */
+  fire?: 'applied' | 'persisted'
 }
 
 /** effect が読める適用後 context。dispatch と locals は渡さない */

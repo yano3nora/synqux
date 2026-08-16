@@ -152,6 +152,8 @@ describe('listeners', () => {
     expect(everyone).not.toHaveBeenCalled()
 
     releaseLoad()
+    // 初回購読 barrier (ADR-0021) は backlog 適用を待つため settle を併走させる
+    await settle()
     await subscribing
     await settle()
 

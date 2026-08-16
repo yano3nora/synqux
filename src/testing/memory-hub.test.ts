@@ -748,4 +748,97 @@ describe('createMemoryHub', () => {
     ).rejects.toThrow('not connected')
     await expect(transport.loadSnapshot('key')).rejects.toThrow('not connected')
   })
+
+  it('onReady: backlog が空なら同期に、あれば一括配送の後に呼ぶ (契約 12)', async () => {
+    const { a, b, aId } = await connectTwo()
+
+    // 空 backlog: subscribeRequests の呼び出し中に同期発火する
+    const emptyEvents: string[] = []
+    a.subscribeRequests(
+      {},
+      {
+        onAdded: () => emptyEvents.push('added'),
+        onChanged: () => emptyEvents.push('changed'),
+        onReady: () => emptyEvents.push('ready'),
+      },
+    )
+    expect(emptyEvents).toEqual(['ready'])
+
+    await a.pushRequest(createEnvelope({ requestedBy: aId }))
+    await a.pushRequest(createEnvelope({ requestedBy: aId }))
+    await flushDeliveries()
+
+    // backlog あり: 既存分の onAdded がすべて配送された後に 1 回だけ発火する
+    const events: string[] = []
+    b.subscribeRequests(
+      {},
+      {
+        onAdded: (envelope) => events.push(`added:${envelope.id}`),
+        onChanged: () => events.push('changed'),
+        onReady: () => events.push('ready'),
+      },
+    )
+    expect(events).toEqual([])
+    await flushDeliveries()
+
+    expect(events).toEqual([
+      'added:000000000001',
+      'added:000000000002',
+      'ready',
+    ])
+  })
+
+  it('subscribeSnapshotFence: server 確定値だけを配送し、hold 中は配送しない (契約 13)', async () => {
+    const { hub, a, b, aId } = await connectTwo()
+    const fences: { epoch: number; appliedSeq: number }[] = []
+
+    const unsubscribe = b.subscribeSnapshotFence!('key', (fence) =>
+      fences.push(fence),
+    )
+    await flushDeliveries()
+    expect(fences).toEqual([])
+
+    await a.saveSnapshot('key', 'p1', { epoch: 1, appliedSeq: 1 })
+    await flushDeliveries()
+    expect(fences).toEqual([{ epoch: 1, appliedSeq: 1 }])
+
+    // 保存が保留されている間は「server 確定」していないため配送されない
+    const held = hub.faults.holdSnapshot(aId)
+    const saving = a.saveSnapshot('key', 'p2', { epoch: 1, appliedSeq: 2 })
+    await flushDeliveries()
+    expect(fences).toHaveLength(1)
+
+    held.release()
+    await expect(saving).resolves.toBe(true)
+    await flushDeliveries()
+    expect(fences).toEqual([
+      { epoch: 1, appliedSeq: 1 },
+      { epoch: 1, appliedSeq: 2 },
+    ])
+
+    // fence 後退の棄却 (false) では配送しない
+    await expect(
+      a.saveSnapshot('key', 'stale', { epoch: 1, appliedSeq: 1 }),
+    ).resolves.toBe(false)
+    await flushDeliveries()
+    expect(fences).toHaveLength(2)
+
+    unsubscribe()
+    await a.saveSnapshot('key', 'p3', { epoch: 1, appliedSeq: 3 })
+    await flushDeliveries()
+    expect(fences).toHaveLength(2)
+  })
+
+  it('subscribeSnapshotFence: 購読開始時に保存済み fence を初期値として配送する', async () => {
+    const { a, b } = await connectTwo()
+    await a.saveSnapshot('key', 'p1', { epoch: 2, appliedSeq: 5 })
+    await flushDeliveries()
+
+    const fences: { epoch: number; appliedSeq: number }[] = []
+    b.subscribeSnapshotFence!('key', (fence) => fences.push(fence))
+    expect(fences).toEqual([])
+    await flushDeliveries()
+
+    expect(fences).toEqual([{ epoch: 2, appliedSeq: 5 }])
+  })
 })

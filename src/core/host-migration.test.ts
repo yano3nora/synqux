@@ -3,7 +3,7 @@ import { createMemoryHub } from '../testing/memory-hub.js'
 import { selectIsHost } from './selectors.js'
 import { parseSnapshotPayload } from './snapshot.js'
 import { synquxActions } from './slice.js'
-import { createHubClient, settle } from './test-fixtures.js'
+import { createHubClient, settle, subscribeSettled } from './test-fixtures.js'
 
 /**
  * host migration 境界の必須カバレッジ (ADR-0001 Decision 4)
@@ -114,11 +114,7 @@ describe('host migration 境界', () => {
     // dedicated (常駐プロセス) が参加すると host になり、
     // 購読開始時の一括配送で滞留 request を受け取って処理する
     const dedicated = createHubClient(hub)
-    await dedicated.sync.subscribe({
-      store: dedicated.store,
-      groupId: GROUP_ID,
-      role: 'dedicated',
-    })
+    await subscribeSettled(dedicated, { groupId: GROUP_ID, role: 'dedicated' })
     await settle(30)
 
     expect(selectIsHost(dedicated.store.getState())).toBe(true)

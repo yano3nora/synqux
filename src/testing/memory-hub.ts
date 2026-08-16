@@ -9,7 +9,13 @@ export type FaultTarget = {
   requestId: RequestEnvelope['id']
   /** 対象端末の peer id。省略時は 1 fan-out の全端末配送へ適用して消費 */
   to?: Peer['id']
-  /** 対象イベント種別。省略時は added / changed の両方が対象 */
+  /**
+   * 対象イベント種別。省略時は added / changed の両方が対象。
+   * NOTE: added の drop / delay は transport 契約 3 の added-before-changed
+   * 保証を意図的に破る注入になる (MemoryHub の自然配送は購読単位 FIFO のため
+   * 契約を構造的に満たしており、buffer は実装しない — faults は「契約外の
+   * 敵対的注入に対する core の頑健性検証」として従来挙動を維持する。ADR-0021)
+   */
   event?: 'added' | 'changed'
 }
 
@@ -48,6 +54,7 @@ export type MemoryHub = {
     requests(groupId: string): RequestEnvelope[]
     peers(groupId: string): Peer[]
     snapshot(key: string): string | null
+    snapshotFence(key: string): SnapshotFence | null
   }
 }
 
@@ -109,6 +116,12 @@ type SnapshotHold = {
 
 type StoredSnapshot = { fence: SnapshotFence; payload: string }
 
+type FenceSubscriber = {
+  key: string
+  handler: (fence: SnapshotFence) => void
+  active: boolean
+}
+
 type CountedFailure = {
   remaining: number
 }
@@ -146,6 +159,21 @@ export function createMemoryHub(): MemoryHub {
   const lostAcks = new Set<RequestEnvelope['id']>()
   const snapshotFailure: CountedFailure = { remaining: 0 }
   const snapshotHolds = new Map<Peer['id'], SnapshotHold>()
+  const fenceSubscribers: FenceSubscriber[] = []
+
+  /** fence 購読へ server 確定値だけを非同期配送する (契約 13。楽観 echo は作らない) */
+  const notifyFenceSubscribers = (key: string, fence: SnapshotFence): void => {
+    for (const subscriber of fenceSubscribers) {
+      if (subscriber.key !== key || !subscriber.active) {
+        continue
+      }
+      setTimeout(() => {
+        if (subscriber.active) {
+          subscriber.handler(clone(fence))
+        }
+      }, 0)
+    }
+  }
 
   const consumeFailure = (failure: CountedFailure | undefined): boolean => {
     if (failure === undefined || failure.remaining <= 0) {
@@ -175,6 +203,7 @@ export function createMemoryHub(): MemoryHub {
     }
 
     snapshots.set(key, { fence: clone(fence), payload })
+    notifyFenceSubscribers(key, fence)
     return true
   }
 
@@ -564,6 +593,14 @@ export function createMemoryHub(): MemoryHub {
           })
         })
 
+        // 初回一括配送の完了通知 (契約 12)。backlog が空なら同期に呼び、
+        // fake timers 下でも「空 group への subscribe」が待機なしで完了する
+        if (existing.length === 0) {
+          subscriber.handlers.onReady?.()
+        } else {
+          enqueue(subscriber, () => subscriber.handlers.onReady?.())
+        }
+
         return () => {
           subscriber.active = false
           subscriber.queue = []
@@ -598,6 +635,31 @@ export function createMemoryHub(): MemoryHub {
       async loadSnapshot(key) {
         assertConnected()
         return snapshots.get(key)?.payload ?? null
+      },
+
+      subscribeSnapshotFence(key, handler) {
+        assertConnected()
+        const subscriber: FenceSubscriber = { key, handler, active: true }
+        fenceSubscribers.push(subscriber)
+
+        // 保存済み fence があれば初期値として配送する (契約 13)
+        const stored = snapshots.get(key)
+        if (stored !== undefined) {
+          const initialFence = clone(stored.fence)
+          setTimeout(() => {
+            if (subscriber.active) {
+              subscriber.handler(clone(initialFence))
+            }
+          }, 0)
+        }
+
+        return () => {
+          subscriber.active = false
+          const index = fenceSubscribers.indexOf(subscriber)
+          if (index !== -1) {
+            fenceSubscribers.splice(index, 1)
+          }
+        }
       },
     }
   }
@@ -732,6 +794,11 @@ export function createMemoryHub(): MemoryHub {
 
       snapshot(key) {
         return snapshots.get(key)?.payload ?? null
+      },
+
+      snapshotFence(key) {
+        const stored = snapshots.get(key)
+        return stored === undefined ? null : clone(stored.fence)
       },
     },
   }

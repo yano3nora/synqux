@@ -34,7 +34,11 @@ const noopTransport: SynquxTransport = {
   subscribePeers: () => () => undefined,
   pushRequest: async () => ({ id: 'req-1' }),
   respondRequest: async () => undefined,
-  subscribeRequests: () => () => undefined,
+  // backlog なしの一括配送完了を同期通知する (契約 12。barrier を待たせない)
+  subscribeRequests: (_options, handlers) => {
+    handlers.onReady?.()
+    return () => undefined
+  },
   saveSnapshot: () => true,
   loadSnapshot: () => null,
 }

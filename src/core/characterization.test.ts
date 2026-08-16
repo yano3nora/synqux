@@ -61,7 +61,11 @@ const createStubTransport = () => {
     subscribePeers: () => () => undefined,
     pushRequest,
     respondRequest,
-    subscribeRequests: () => () => undefined,
+    // backlog なしの一括配送完了を同期通知する (契約 12。barrier を待たせない)
+    subscribeRequests: (_options, handlers) => {
+      handlers.onReady?.()
+      return () => undefined
+    },
     saveSnapshot,
     loadSnapshot: () => null,
   }

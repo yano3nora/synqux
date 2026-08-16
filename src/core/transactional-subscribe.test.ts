@@ -7,6 +7,7 @@ import {
   createHubClient,
   gameInitialState,
   settle,
+  subscribeSettled,
 } from './test-fixtures.js'
 import type { SnapshotStore, SynquxTransport } from './types.js'
 
@@ -246,7 +247,7 @@ describe('subscribe initialization transaction', () => {
     expect(client.store.getState().game.count).toBe(0)
     expect(client.store.getState().synqux.connections.selfId).toBeNull()
 
-    await client.sync.subscribe({ store: client.store, groupId: GROUP_ID })
+    await subscribeSettled(client, { groupId: GROUP_ID })
     await settle()
     expect(client.store.getState().game.count).toBe(10)
   })

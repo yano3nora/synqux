@@ -48,9 +48,19 @@ const h = vi.hoisted(() => {
     getMock: vi.fn(
       async (
         _target: unknown,
-      ): Promise<{ exists: () => boolean; val: () => unknown }> => ({
+      ): Promise<{
+        exists: () => boolean
+        val: () => unknown
+        forEach?: (
+          callback: (child: {
+            key: string | null
+            val: () => unknown
+          }) => boolean | void,
+        ) => boolean
+      }> => ({
         exists: () => false,
         val: () => null,
+        forEach: () => false,
       }),
     ),
     onValueMock: vi.fn(
@@ -640,6 +650,200 @@ describe('firebaseTransport', () => {
     })
     await expect(transport.loadSnapshot(GROUP_ID)).resolves.toBeNull()
     await expect(transport.loadSnapshot(GROUP_ID)).resolves.toBeNull()
+  })
+
+  it('subscribeRequests: attach → get() → 取得分の onAdded → onReady の順で配送する (契約 12)', async () => {
+    h.pushKeys.push('conn-1')
+    const { transport } = await connect()
+    const events: string[] = []
+    h.getMock.mockResolvedValueOnce({
+      exists: () => true,
+      val: () => null,
+      forEach: (
+        callback: (child: { key: string; val: () => unknown }) => void,
+      ) => {
+        callback({ key: 'req-1', val: () => ({ v: SYNQUX_SCHEMA_VERSION }) })
+        return false
+      },
+    } as never)
+
+    transport.subscribeRequests(
+      {},
+      {
+        onAdded: (envelope) => events.push(`added:${envelope.id}`),
+        onChanged: (envelope) => events.push(`changed:${envelope.id}`),
+        onReady: () => events.push('ready'),
+      },
+    )
+
+    // child listener の attach が get() より先
+    expect(h.onChildAddedMock).toHaveBeenCalledTimes(1)
+    expect(h.onChildAddedMock.mock.invocationCallOrder[0]!).toBeLessThan(
+      h.getMock.mock.invocationCallOrder.at(-1)!,
+    )
+    // get() は attach 済みと同一 query を読む
+    expect(h.getMock.mock.calls.at(-1)?.[0]).toBe(
+      h.onChildAddedMock.mock.calls.at(-1)?.[0],
+    )
+
+    await vi.waitFor(() => expect(events).toContain('ready'))
+    expect(events).toEqual(['added:req-1', 'ready'])
+  })
+
+  it('subscribeRequests: attach 側で配送済みの child は get() から再配送しない', async () => {
+    h.pushKeys.push('conn-1')
+    const { transport } = await connect()
+    const onAdded = vi.fn()
+    const onReady = vi.fn()
+    let resolveGet!: (value: unknown) => void
+    h.getMock.mockReturnValueOnce(
+      new Promise((resolve) => {
+        resolveGet = resolve
+      }) as never,
+    )
+
+    transport.subscribeRequests({}, { onAdded, onChanged: vi.fn(), onReady })
+    const addedCallback = h.onChildAddedMock.mock.calls.at(-1)?.[1] as (snap: {
+      key: string
+      val: () => unknown
+    }) => void
+    addedCallback({ key: 'req-1', val: () => ({ v: SYNQUX_SCHEMA_VERSION }) })
+
+    resolveGet({
+      exists: () => true,
+      val: () => null,
+      forEach: (
+        callback: (child: { key: string; val: () => unknown }) => void,
+      ) => {
+        callback({ key: 'req-1', val: () => ({ v: SYNQUX_SCHEMA_VERSION }) })
+        return false
+      },
+    })
+    await vi.waitFor(() => expect(onReady).toHaveBeenCalledTimes(1))
+
+    expect(onAdded).toHaveBeenCalledTimes(1)
+  })
+
+  it('subscribeRequests: added 未配送の child の changed は buffer し、added 後に flush する (契約 3)', async () => {
+    h.pushKeys.push('conn-1')
+    const { transport } = await connect()
+    const onAdded = vi.fn()
+    const onChanged = vi.fn()
+
+    transport.subscribeRequests({}, { onAdded, onChanged })
+    const addedCallback = h.onChildAddedMock.mock.calls.at(-1)?.[1] as (snap: {
+      key: string
+      val: () => unknown
+    }) => void
+    const changedCallback = h.onChildChangedMock.mock.calls.at(
+      -1,
+    )?.[1] as (snap: { key: string; val: () => unknown }) => void
+
+    changedCallback({ key: 'req-9', val: () => ({ seq: 1 }) })
+    expect(onChanged).not.toHaveBeenCalled()
+
+    addedCallback({ key: 'req-9', val: () => ({ seq: 1 }) })
+    expect(onAdded).toHaveBeenCalledTimes(1)
+    expect(onChanged).toHaveBeenCalledTimes(1)
+    expect(onAdded.mock.invocationCallOrder[0]!).toBeLessThan(
+      onChanged.mock.invocationCallOrder[0]!,
+    )
+
+    // added 配送済みの child の changed は素通しになる
+    changedCallback({ key: 'req-9', val: () => ({ seq: 2 }) })
+    expect(onChanged).toHaveBeenCalledTimes(2)
+  })
+
+  it('subscribeRequests: unsubscribe 後は get() の結果も onReady も配送しない', async () => {
+    h.pushKeys.push('conn-1')
+    const { transport } = await connect()
+    const onAdded = vi.fn()
+    const onReady = vi.fn()
+    let resolveGet!: (value: unknown) => void
+    h.getMock.mockReturnValueOnce(
+      new Promise((resolve) => {
+        resolveGet = resolve
+      }) as never,
+    )
+
+    const unsubscribe = transport.subscribeRequests(
+      {},
+      { onAdded, onChanged: vi.fn(), onReady },
+    )
+    unsubscribe()
+    resolveGet({
+      exists: () => true,
+      val: () => null,
+      forEach: (
+        callback: (child: { key: string; val: () => unknown }) => void,
+      ) => {
+        callback({ key: 'req-1', val: () => ({ v: SYNQUX_SCHEMA_VERSION }) })
+        return false
+      },
+    })
+    await Promise.resolve()
+    await Promise.resolve()
+
+    expect(onAdded).not.toHaveBeenCalled()
+    expect(onReady).not.toHaveBeenCalled()
+  })
+
+  it('subscribeRequests: get() の失敗は onError へ転送し、onReady は呼ばない', async () => {
+    h.pushKeys.push('conn-1')
+    const { transport } = await connect()
+    const onError = vi.fn()
+    const onReady = vi.fn()
+    h.getMock.mockRejectedValueOnce(new Error('backlog get failed'))
+
+    transport.subscribeRequests(
+      {},
+      { onAdded: vi.fn(), onChanged: vi.fn(), onError, onReady },
+    )
+
+    await vi.waitFor(() => expect(onError).toHaveBeenCalledTimes(1))
+    expect(onError).toHaveBeenCalledWith(
+      expect.objectContaining({ message: 'backlog get failed' }),
+    )
+    expect(onReady).not.toHaveBeenCalled()
+  })
+
+  it('saveSnapshot: applyLocally: false で楽観 local event を発生させない (契約 13)', async () => {
+    h.pushKeys.push('conn-1')
+    const { transport } = await connect()
+
+    await transport.saveSnapshot(GROUP_ID, '{"v":1}', {
+      epoch: 1,
+      appliedSeq: 1,
+    })
+
+    expect(h.runTransactionMock).toHaveBeenCalledWith(
+      expect.objectContaining({ path: `games/${GROUP_ID}` }),
+      expect.any(Function),
+      { applyLocally: false },
+    )
+  })
+
+  it('subscribeSnapshotFence: fence child を onValue 購読し、形の valid な値だけを配送する', async () => {
+    h.pushKeys.push('conn-1')
+    const { transport } = await connect()
+    const handler = vi.fn()
+
+    transport.subscribeSnapshotFence!(GROUP_ID, handler)
+
+    const fenceCall = h.onValueMock.mock.calls.find(
+      ([target]) =>
+        (target as { path?: string }).path === `games/${GROUP_ID}/fence`,
+    )
+    expect(fenceCall).toBeDefined()
+    const callback = fenceCall![1]
+
+    callback({ val: () => ({ epoch: 2, appliedSeq: 3 }) })
+    expect(handler).toHaveBeenCalledWith({ epoch: 2, appliedSeq: 3 })
+
+    // 未保存 (null) や壊れた形は配送しない
+    callback({ val: () => null })
+    callback({ val: () => ({ epoch: 'broken' }) })
+    expect(handler).toHaveBeenCalledTimes(1)
   })
 
   it('disconnect: presence record を削除して onDisconnect を解除する', async () => {
