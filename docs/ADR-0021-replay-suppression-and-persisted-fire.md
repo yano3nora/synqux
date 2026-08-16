@@ -268,6 +268,10 @@ reload → 新しい裁定が起きないため snapshot は永遠に進まず�
   in-flight フラグだと、resolve しない保存が session を跨いで新 session の
   checkpoint を永久にブロックする。走行主 session の識別子でガードし、await 後の
   watermark 反映も session 一致を検査する
+  (その後 TASK-260816-provider-removal-and-state-ownership で session 寿命の状態を
+  `SessionSyncState` (session オブジェクト所有) へ集約し、識別子ガード方式は
+  「旧 task は自分が捕捉した session の state にしか触れない」構造へ置換された。
+  分類の正は SPEC-0001「engine 状態の所有権」)
 - **裁定 fork の後処理は「裁定の土台 state を読んだ時点の session」でゲートする**
   (同レビュー第 2 ラウンド指摘): respondRequest の ack await 中に unsubscribe →
   再 subscribe されると、persistSnapshot が現在の session.groupId へ書くため、

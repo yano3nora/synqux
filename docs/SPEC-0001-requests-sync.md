@@ -128,6 +128,21 @@ tutorial は instance の `synqux.unsubscribe()` で現在の購読を破棄し�
 
 NOTE: `markApplied` を dispatch **前**へ前倒しする案は不可 (dispatch 失敗時にその seq が永久欠番となり全端末が停止する)。dispatch 直後 (同期) に行うのが正しい位置 — これにより「entity は消えたが appliedSeq が進んでいない」観測窓も消える。①′の処理中ガードは seq 待機ループの途中で立ててはいけない (待機中に fork が死ぬと誰もその request を処理できなくなる)。
 
+## engine 状態の所有権
+
+`createSynqux` の engine 状態は寿命の異なる 3 種に分類され、**どの分類に属するかを決めずに状態を追加してはならない**。分類が曖昧なまま instance に置いて手動リセットで凌ぐ方式は、「リセット振り付けの書き忘れ」という同型バグを繰り返し生んだ (ADR-0021 Implementation Notes の 3 件が実例)。session 寿命の状態は `SessionSyncState` (session オブジェクトが所有) に置く。session を跨いで生き残る非同期 task の扱いは 2 通りで、どちらかを明示的に選ぶ:
+
+- **session に束縛される task** (checkpoint / host 裁定の後処理 / persisted watermark 反映): 開始時に session を捕捉し、**自分が捕捉した session の syncState にしか触れない**。session が替わっていたら書き込みを放棄する
+- **request に束縛される worker** (responseListener の適用 fork): entity (`state.synqux.requests`) を所有する**現在の** session の syncState を適用時点で読むのが正 — 同一 group の再購読で残存 fork が新 session の配送を代行しても、印 (replay) と決定性控えは「その配送」を記述するものなので意味論が一致する。**session 不在 (teardown の逆順 cleanup で session は消えたが entities / phase の破棄が済んでいない微小窓を含む) では適用せず退場する** — session なしで適用すると replay 印なしの配送になり、抑止すべき listener が発火し得るため
+
+| 分類 | 寿命・リセット | 現在の該当 (create-synqux.ts) |
+| --- | --- | --- |
+| **instance 寿命** | `createSynqux()` から破棄まで。リセットしない | `waker` / `hostForkActive` / `hashSequence` / `lastNotifiedPhase` (phase 通知 dedup) / `session` 参照・`subscribing`・`teardownInFlight` (subscribe 排他) / `evaluateAutomationsAfterApply` (session 開始時に差し替え) |
+| **group 進行** | session を**跨いで持ち越す** (`ordering` は snapshot restore で置換、`lastPrunedBeforeSeq` は単調に持ち越すのみ) | `ordering` (appliedSeq / epoch / 適用窓 / added dedup) / `lastPrunedBeforeSeq`。同一 group への再 subscribe で「どこまで適用済みか」を保持するために必須 — この持ち越しゆえに**同一 instance の別 groupId 再 subscribe は非サポート** (subscribe の JSDoc、checkpoint は `observedSyncEvidence` ガードで書き込み事故だけを防ぐ) |
+| **session 寿命** | `SubscriptionSession.syncState` が所有し、session 破棄と同時に不可達 | `SessionSyncState`: replay 印 / barrier 通過フラグ / 同期証拠 / persisted watermark / persisted effect queue (timer だけ teardown で資源解放) / standalone persisted queue / checkpoint 走行中フラグ / 決定性検出の試し実行控え |
+
+判定基準: 「次の session に持ち越すと嘘になる情報」は session 寿命 (再導出可能なキャッシュ・配送経路の印・in-flight ガード)。「持ち越さないと二重適用・再送を起こす情報」は group 進行。「どちらでもない機構部品」だけが instance 寿命。
+
 ## 設計ガイドライン
 
 同期基盤の性質から導かれる、game action / reducer 設計のルール。

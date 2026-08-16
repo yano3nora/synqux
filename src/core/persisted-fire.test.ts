@@ -115,6 +115,32 @@ describe("fire: 'persisted' (ADR-0021 Decision 3)", () => {
     )
   })
 
+  it('unsubscribe は待機中の persisted effect と timeout timer を破棄する', async () => {
+    vi.spyOn(console, 'error').mockImplementation(() => undefined)
+    const consoleWarn = vi
+      .spyOn(console, 'warn')
+      .mockImplementation(() => undefined)
+    const hub = createMemoryHub()
+    const effect = vi.fn()
+    const host = createHubClient(hub, {
+      listeners: [persistedListener('reset', effect)],
+    })
+    await host.sync.subscribe({ store: host.store, groupId: GROUP_ID })
+
+    hub.faults.failSnapshot({ times: Number.POSITIVE_INFINITY })
+    host.store.dispatch({ type: 'game/increment', payload: 1 })
+    await settle()
+    expect(effect).not.toHaveBeenCalled()
+
+    // session 破棄後は effect も timeout warn も発生しない (queue は session と
+    // 運命を共にし、timer は teardown で資源として畳まれる)
+    await host.sync.unsubscribe()
+    await vi.advanceTimersByTimeAsync(31_000)
+
+    expect(effect).not.toHaveBeenCalled()
+    expect(consoleWarn).not.toHaveBeenCalled()
+  })
+
   it('match / ctx の評価は適用直後に固定され、遅延するのは effect の実行だけ', async () => {
     const hub = createMemoryHub()
     const effect = vi.fn()

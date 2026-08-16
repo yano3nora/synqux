@@ -4,16 +4,13 @@ import { createElement, type ReactNode } from 'react'
 import { Provider } from 'react-redux'
 import { describe, expect, it, vi } from 'vitest'
 import { synquxActions } from '../core/slice.js'
-import { createClient, type GameAction } from '../core/test-fixtures.js'
+import { createClient } from '../core/test-fixtures.js'
 import type { SynquxTransport } from '../core/types.js'
 import {
-  SynquxProvider,
   useIsHost,
   useIsLive,
   useIsSyncStalled,
   useIsSyncUnrecoverable,
-  useLatestResult,
-  useMyLatestResult,
   usePeers,
   useSelf,
   useSelfId,
@@ -49,11 +46,9 @@ const setup = (
 ) => {
   const { sync, store } = createClient(transport, options)
 
+  // SynquxProvider は廃止 (ADR-0022)。redux の Provider だけで全 hooks が動く
   const wrapper = ({ children }: { children: ReactNode }) =>
-    createElement(Provider, {
-      store,
-      children: createElement(SynquxProvider, { sync, children }),
-    })
+    createElement(Provider, { store, children })
 
   return { sync, store, wrapper }
 }
@@ -98,46 +93,6 @@ describe('synqux/react hooks', () => {
     expect(renderHook(() => useIsLive(), { wrapper }).result.current).toBe(true)
   })
 
-  it('useLatestResult は Provider 経由で synced の位置を解決して result を読む', () => {
-    const { store, wrapper } = setup()
-
-    // 素通し経路 (requestedBy 付き) で validation エラーを発生させ result を積む
-    store.dispatch({
-      type: 'game/forbidden',
-      meta: { requestedBy: 'peer-1', hash: 'h-1', dispatched: 1 },
-    })
-
-    const { result } = renderHook(() => useLatestResult<GameAction>(), {
-      wrapper,
-    })
-    expect(result.current?.type).toBe('error')
-    expect(result.current?.log).toBe('forbidden')
-  })
-
-  it('useMyLatestResult は自端末宛てだけを返す', () => {
-    const { store, wrapper } = setup()
-    store.dispatch(
-      synquxActions.sessionStarted({ selfId: 'peer-1', mode: 'synced' }),
-    )
-    store.dispatch({
-      type: 'game/message-forbidden',
-      meta: { requestedBy: 'peer-1', hash: 'h-self', dispatched: 1 },
-    })
-    expect(
-      renderHook(() => useMyLatestResult<GameAction>(), { wrapper }).result
-        .current?.type,
-    ).toBe('error')
-
-    store.dispatch({
-      type: 'game/message-forbidden',
-      meta: { requestedBy: 'peer-2', hash: 'h-other', dispatched: 2 },
-    })
-    expect(
-      renderHook(() => useMyLatestResult<GameAction>(), { wrapper }).result
-        .current,
-    ).toBeNull()
-  })
-
   it('sync health hooks は Provider 追加なしで health を読める', () => {
     const { store, wrapper } = setup()
     store.dispatch(
@@ -170,12 +125,6 @@ describe('synqux/react hooks', () => {
     expect(
       renderHook(() => useIsSyncUnrecoverable(), { wrapper }).result.current,
     ).toBe(true)
-  })
-
-  it('useLatestResult は Provider がないと throw する', () => {
-    expect(() => renderHook(() => useLatestResult())).toThrow(
-      'within <SynquxProvider>',
-    )
   })
 
   it('useSynquxSubscription は groupId 指定時に購読し live を返す', async () => {

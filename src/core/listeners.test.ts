@@ -142,12 +142,13 @@ describe('listeners', () => {
           ? undefined
           : (JSON.parse(envelope.result) as Result),
     }
-    // snapshot load 中は phase=subscribing。残存 envelope の responseListener 再適用を
-    // 注入し、live へ移る前の replay では listener が沈黙することを固定する。
+    // snapshot load 中 (session 確定前) の注入は適用自体を行わない — 適用は
+    // 「entity を所有する session が存在する」ことを前提とする (SPEC-0001
+    // 「engine 状態の所有権」。teardown / 初期化窓での listener 誤発火の防止)
     late.store.dispatch(synquxActions.requestChanged({ request: replay }))
     await settle()
 
-    expect(late.store.getState().game.count).toBe(1)
+    expect(late.store.getState().game.count).toBe(0)
     expect(hostOnly).not.toHaveBeenCalled()
     expect(everyone).not.toHaveBeenCalled()
 
@@ -157,9 +158,15 @@ describe('listeners', () => {
     await subscribing
     await settle()
 
+    // 残存 envelope は購読の全量再配送 (replay 印つき) で適用され、発火しない
+    expect(late.store.getState().game.count).toBe(1)
+    expect(hostOnly).not.toHaveBeenCalled()
+    expect(everyone).not.toHaveBeenCalled()
+
     late.store.dispatch({ type: 'game/increment', payload: 1 })
     await settle()
 
+    expect(late.store.getState().game.count).toBe(2)
     expect(hostOnly).toHaveBeenCalledTimes(1)
     expect(everyone).toHaveBeenCalledTimes(1)
   })

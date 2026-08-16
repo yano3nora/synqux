@@ -1,15 +1,6 @@
-import type { Action } from '@reduxjs/toolkit'
-import {
-  createContext,
-  createElement,
-  useContext,
-  useEffect,
-  useRef,
-  type ReactNode,
-} from 'react'
+import { useEffect, useRef } from 'react'
 import { shallowEqual, useSelector, useStore } from 'react-redux'
 import type { Synqux, SynquxSubscribeOptions } from '../core/create-synqux.js'
-import { isResultForPeer } from '../core/results.js'
 import {
   selectIsHost,
   selectIsLive,
@@ -23,45 +14,18 @@ import {
   selectSyncPhase,
 } from '../core/selectors.js'
 import type { SynquxHealth, SynquxPhase, SynquxState } from '../core/slice.js'
-import type {
-  Peer,
-  PeerRole,
-  Result,
-  ResultMessage,
-  SynquxSynced,
-} from '../core/types.js'
+import type { Peer, PeerRole } from '../core/types.js'
 
 /**
- * synqux/react — ゲーム開発者層の読み取り hooks (ADR-0001 Decision 7)
+ * synqux/react — ゲーム開発者層の購読開始と読み取り hooks (ADR-0001 Decision 7)
  *
- * setup 層が redux の Provider と並べて SynquxProvider を配線し、
- * ゲーム開発者は hooks だけを使う。requests / prev / revisions の語彙は
- * ここには一切出てこない
+ * Provider は不要 (ADR-0022 で廃止)。購読開始は useSynquxSubscription、読み取りは
+ * selector hooks を使う。result は consumer 自身の synced state から typed selector で
+ * 直読みする (`isResultForPeer` + `selectSelfId` の組み合わせ。SPEC-0002 参照)。
+ * requests / prev / revisions の語彙はここには一切出てこない
  */
 
 type WithSynqux = { synqux: SynquxState }
-
-// instance の synced 位置解決だけを Provider で運ぶ。
-// (root: never) => は「どんな TRoot の Synqux でも代入できる」ための逆変位置の型
-type SynquxContextValue = {
-  selectSynced: (root: never) => SynquxSynced
-}
-
-const SynquxContext = createContext<SynquxContextValue | null>(null)
-
-export const SynquxProvider = (props: {
-  /**
-   * createSynqux の返り値。TRoot の具体型はここでは不要なため、逆変位置の
-   * 構造型で受けて「どの TRoot の Synqux でもそのまま渡せる」ようにしている
-   */
-  sync: Pick<Synqux<never>, 'selectSynced'>
-  children: ReactNode
-}): ReactNode =>
-  createElement(
-    SynquxContext.Provider,
-    { value: { selectSynced: props.sync.selectSynced } },
-    props.children,
-  )
 
 /** 自端末が host か。standalone 時は常に true */
 export const useIsHost = (): boolean =>
@@ -99,44 +63,6 @@ export const useIsSyncStalled = (): boolean =>
 /** 自動回復を 1 巡しても同期停止が解消せず、リロード案内が必要か */
 export const useIsSyncUnrecoverable = (): boolean =>
   useSelector((state) => selectIsSyncUnrecoverable(state as WithSynqux))
-
-/**
- * 直近の判定結果 (reducer が積んだ result) を読む
- * 通知 UI (toast 等) は consumer 側の責務で、重複表示の判定には
- * result.action.meta.hash を使う
- */
-export const useLatestResult = <
-  TAction extends Action = Action,
-  TMessage extends ResultMessage = ResultMessage,
->(): Result<TAction, TMessage> | null => {
-  const context = useContext(SynquxContext)
-
-  if (!context) {
-    throw new Error('useLatestResult must be used within <SynquxProvider>')
-  }
-
-  return useSelector(
-    (state) => context.selectSynced(state as never).result,
-  ) as Result<TAction, TMessage> | null
-}
-
-/** 直近 result が standalone / 全員宛てまたは自端末宛ての場合だけ返す */
-export const useMyLatestResult = <
-  TAction extends Action = Action,
-  TMessage extends ResultMessage = ResultMessage,
->(): Result<TAction, TMessage> | null => {
-  const context = useContext(SynquxContext)
-
-  if (!context) {
-    throw new Error('useMyLatestResult must be used within <SynquxProvider>')
-  }
-
-  return useSelector((state) => {
-    const root = state as WithSynqux
-    const result = context.selectSynced(state as never).result
-    return isResultForPeer(result, selectSelfId(root)) ? result : null
-  }) as Result<TAction, TMessage> | null
-}
 
 /**
  * react consumer の購読開始の canonical な入口。mount 時に一度だけ購読を開始し、

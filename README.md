@@ -130,7 +130,14 @@ The instance-level `synqux.unsubscribe()` tears down the current session even wh
     }
     ```
 
-3. **Read "am I host?" and "who is here?" through selectors / hooks** — `selectIsHost` / `selectPeers` / `selectSelfId`, or with React, `useIsHost` / `usePeers` / `useLatestResult` from `synqux/react`. Reading the result off your own synced state (`state.game.result`) is also fine.
+3. **Read "am I host?" and "who is here?" through selectors / hooks** — `selectIsHost` / `selectPeers` / `selectSelfId`, or with React, `useIsHost` / `usePeers` from `synqux/react`. Read the latest result off your own synced state with a typed selector (see below).
+
+    ```ts
+    // Canonical way to read "the latest result addressed to me" (no Provider needed).
+    // `state.counter` is the synced slice from the Quick start above — adjust to your key.
+    const selectMyLatestResult = (state: RootState) =>
+      isResultForPeer(state.counter.result, selectSelfId(state)) ? state.counter.result : null
+    ```
 
 ## Usage
 
@@ -353,7 +360,7 @@ export const useAppDispatch = useDispatch.withTypes<AppDispatch>()
 const count = useAppSelector((s) => s.counter.count)
 ```
 
-The `synqux/react` hooks (`useIsHost` / `useLatestResult` etc.) resolve types through the Provider and work without this wiring.
+The `synqux/react` hooks (`useIsHost` etc.) read the reserved `state.synqux` subtree directly and work without this wiring. No provider component is required (ADR-0022).
 
 ### Test your consumer (`synqux/testing`)
 
@@ -425,14 +432,13 @@ Types (all contract types are exported from the main entry):
 
 | export | description |
 | --- | --- |
-| `SynquxProvider` | Resolution context for the hooks. Pass the `createSynqux` return value as the `sync` prop |
 | `useIsHost()` / `usePeers()` / `useSelfId()` | Hook versions of the selectors |
 | `useSelf()` / `useSelfRole()` | This device's Peer / normalized role |
 | `useSyncPhase()` / `useIsLive()` | Distinguish initial restore from live streaming / live check |
 | `useSyncHealth()` / `useIsSyncStalled()` / `useIsSyncUnrecoverable()` | Hook versions of sync health |
-| `useLatestResult()` | Reads the latest result (for toasts etc.; reading synced state directly is also fine) |
-| `useMyLatestResult()` | Returns the latest result only if it targets everyone or this device |
 | `useSynquxSubscription(synqux, options)` | Canonical subscription entry for React consumers. Gets the store from `useStore()` and prevents double subscription via phase |
+
+No provider component is required. For the latest result, write a typed selector over your own synced state (`isResultForPeer` + `selectSelfId`, see Quick start) — `SynquxProvider` / `useLatestResult` / `useMyLatestResult` were removed in ADR-0022.
 
 ### `synqux/testing`
 

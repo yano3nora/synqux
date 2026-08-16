@@ -121,6 +121,70 @@ describe('replay suppression (ADR-0021 Decision 2)', () => {
     expect(effect).toHaveBeenCalledTimes(2)
   })
 
+  it('session 終了後は、teardown の微小窓 (entities / phase 残存) に届いた裁定でも適用も発火もしない', async () => {
+    const hub = createMemoryHub()
+    const effect = vi.fn()
+
+    // requests 購読の解除 cleanup を gate で止め、逆順 cleanup の
+    // 「session は消えたが entities / phase の破棄が済んでいない」窓を決定的に開く
+    const transport = hub.createTransport()
+    let releaseUnsubscribe!: () => void
+    const unsubscribeGate = new Promise<void>((resolve) => {
+      releaseUnsubscribe = resolve
+    })
+    const gated: typeof transport = {
+      ...transport,
+      subscribeRequests: (options, handlers) => {
+        const unsubscribe = transport.subscribeRequests(options, handlers)
+        return () => unsubscribeGate.then(unsubscribe)
+      },
+    }
+
+    // b (peer-1) を先に接続し、後続接続の a (peer-2) を host にする
+    const b = createClient(gated, {
+      listeners: [incrementListener('render', 'everyone', effect)],
+    })
+    const a = createHubClient(hub)
+    await b.sync.subscribe({ store: b.store, groupId: GROUP_ID })
+    await a.sync.subscribe({ store: a.store, groupId: GROUP_ID })
+    await settle(5)
+
+    // b は seq 1 の added を取り逃し、changed は保留。seq 2 は届くが seq 1 待ちで
+    // 適用できず、entity と fork が残ったままになる
+    hub.faults.drop({ requestId: '000000000001', to: 'peer-1', event: 'added' })
+    const delayedSeq1 = hub.faults.delay({
+      requestId: '000000000001',
+      to: 'peer-1',
+      event: 'changed',
+    })
+    a.store.dispatch({ type: 'game/increment', payload: 1 })
+    await settle(5)
+    a.store.dispatch({ type: 'game/increment', payload: 10 })
+    await settle(5)
+    expect(b.store.getState().game.count).toBe(0)
+
+    // teardown を開始し、gate で「session = null・entities / phase 残存」の窓を開く
+    const closing = b.sync.unsubscribe()
+    await settle(2)
+    expect(b.store.getState().synqux.phase).toBe('live')
+    expect(
+      Object.keys(b.store.getState().synqux.requests.entities),
+    ).not.toEqual([])
+
+    // 窓の中へ seq 1 の裁定を届ける。ガードがなければ live 扱いで適用され、
+    // listener (reload 型 effect 相当) が発火してしまう
+    delayedSeq1.release()
+    await settle(20)
+
+    expect(b.store.getState().game.count).toBe(0)
+    expect(effect).not.toHaveBeenCalled()
+
+    releaseUnsubscribe()
+    await settle(5)
+    await closing
+    expect(effect).not.toHaveBeenCalled()
+  })
+
   it('onReady を呼ばない旧 adapter で barrier が timeout 縮退しても、live 中の replay 適用では発火しない', async () => {
     const hub = createMemoryHub()
     const first = createHubClient(hub)

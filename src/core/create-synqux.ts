@@ -82,6 +82,131 @@ const CHECKPOINT_RETRY_DELAYS_MS = [1_000, 2_000, 4_000]
 const compareFence = (a: SnapshotFence, b: SnapshotFence): number =>
   a.epoch !== b.epoch ? a.epoch - b.epoch : a.appliedSeq - b.appliedSeq
 
+type PendingPersistedEffect = {
+  fence: SnapshotFence
+  fire: () => void
+  timer: ReturnType<typeof setTimeout>
+}
+
+/**
+ * session 寿命の同期状態 (SPEC-0001「engine 状態の所有権」)。
+ *
+ * SubscriptionSession が所有し、session の破棄と同時に不可達になる — instance に
+ * 置いて手動リセットする方式は「リセット振り付けの書き忘れ」という同型バグを
+ * 繰り返し生んだ (ADR-0021 Implementation Notes) ため、session を跨いではならない
+ * 状態はすべてここへ集約する。stale な非同期 task (旧 session の fork / checkpoint)
+ * は自分が捕捉した session の state だけに触れるため、新 session を汚染できない
+ */
+type SessionSyncState = {
+  /**
+   * 「既裁定のまま added で届いた」envelope の replay 印 (ADR-0021 Decision 2)。
+   * この印のある適用では listener を発火しない。同一 id の changed 受信
+   * (契約 3 強化により added より後 = 購読後の新裁定) で印を外す
+   */
+  replayDeliveredIds: Set<RequestEnvelope['id']>
+
+  /**
+   * 初回購読 barrier (ADR-0021 Decision 1) の通過済みフラグ。checkpoint の
+   * 適格条件 — barrier 前の昇格で保存すると初期 state で正しい旧 snapshot を
+   * 上書きし得るため、通過前は checkpoint を一切実行しない
+   */
+  barrierPassed: boolean
+
+  /**
+   * この session で「同期対象 group の証拠」(snapshot load 成功 or envelope 受信)
+   * を観測済みか。checkpoint のもう 1 つの適格条件 — ordering は group 進行として
+   * instance に残るため、同一 instance を別 group へ再 subscribe した場合 (非サポート)
+   * に前 group の進行を fence 追い越しと誤認して書き込む事故を防ぐ
+   */
+  observedSyncEvidence: boolean
+
+  /**
+   * 永続化水位 (ADR-0021 Decision 3): 「(epoch, appliedSeq) がここまでの snapshot
+   * は耐久化済み」の辞書順単調 max。情報源は (a) 自端末 persistSnapshot の
+   * committed resolve、(b) transport.subscribeSnapshotFence、(c) load した
+   * snapshot の fence (load できた = 耐久化済みの事実)
+   */
+  persistedWatermark: SnapshotFence
+
+  /** watermark 待ちの `fire: 'persisted'` effect queue */
+  pendingPersistedEffects: Set<PendingPersistedEffect>
+
+  /** standalone の persisted effect (persistLocalSnapshot の save settle 後に実行) */
+  pendingStandalonePersisted: (() => void)[]
+
+  /**
+   * checkpoint の走行中ガード。session ごとに独立するため、旧 session の
+   * 宙吊り task が新 session の checkpoint をブロックする構造が存在しない
+   */
+  checkpointRunning: boolean
+
+  /**
+   * 決定性検出網: host が試し実行した synced (canonical JSON) の request id 控え。
+   * 全量 restore で古い土台の控えを破棄する
+   */
+  expectedSyncedByRequest: Map<RequestEnvelope['id'], string>
+}
+
+const createSessionSyncState = (): SessionSyncState => ({
+  replayDeliveredIds: new Set(),
+  barrierPassed: false,
+  observedSyncEvidence: false,
+  persistedWatermark: { epoch: 0, appliedSeq: 0 },
+  pendingPersistedEffects: new Set(),
+  pendingStandalonePersisted: [],
+  checkpointRunning: false,
+  expectedSyncedByRequest: new Map(),
+})
+
+const updatePersistedWatermark = (
+  syncState: SessionSyncState,
+  fence: SnapshotFence,
+): void => {
+  if (compareFence(fence, syncState.persistedWatermark) <= 0) {
+    return
+  }
+
+  syncState.persistedWatermark = {
+    epoch: fence.epoch,
+    appliedSeq: fence.appliedSeq,
+  }
+  // 重複・逆順の fence イベントは上の単調 max が吸収する。到達済み entry だけを
+  // queue 順 (= 適用順) に実行する。iteration 中の delete は現在要素のみで安全
+  for (const entry of syncState.pendingPersistedEffects) {
+    if (compareFence(entry.fence, syncState.persistedWatermark) <= 0) {
+      clearTimeout(entry.timer)
+      syncState.pendingPersistedEffects.delete(entry)
+      entry.fire()
+    }
+  }
+}
+
+const enqueuePersistedEffect = (
+  syncState: SessionSyncState,
+  fence: SnapshotFence,
+  fire: () => void,
+): void => {
+  // 既達 (dual-host / checkpoint 先行で watermark が先に進んでいた) なら即実行
+  if (compareFence(fence, syncState.persistedWatermark) <= 0) {
+    fire()
+    return
+  }
+
+  const entry: PendingPersistedEffect = {
+    fence,
+    fire,
+    timer: setTimeout(() => {
+      // 発火してしまうと 'persisted' の契約の嘘になる (reload 型 effect が保存を
+      // 再び kill し得る) ため、warn + drop に倒す (ADR-0021 Decision 3)
+      syncState.pendingPersistedEffects.delete(entry)
+      console.warn(
+        `[synqux] Dropped a "fire: 'persisted'" listener effect: the persisted watermark did not reach (epoch=${String(fence.epoch)}, seq=${String(fence.appliedSeq)}) within ${String(PERSISTED_FIRE_TIMEOUT_MS)}ms.`,
+      )
+    }, PERSISTED_FIRE_TIMEOUT_MS),
+  }
+  syncState.pendingPersistedEffects.add(entry)
+}
+
 /** automation 評価で取得済みの serverNow を request 化へ引き渡す端末内 marker */
 const AUTOMATION_REQUESTED_AT = Symbol('synqux.automationRequestedAt')
 
@@ -415,13 +540,6 @@ export type Synqux<
     action: TAction,
     options?: { signal?: AbortSignal },
   ) => Promise<Result<TAction>>
-
-  /**
-   * synqux/react の useLatestResult が synced の位置を解決するための内部 field。
-   * ゲーム開発者はこれを直接使わず、result は自分の synced state から
-   * `(s) => s.game.result` のように直接読むこと (SPEC-0002-public-api.md)
-   */
-  selectSynced: (root: TRoot) => SynquxSynced
 }
 
 export const createSynqux = <
@@ -538,114 +656,17 @@ export const createSynqux = <
     }
   }
 
-  // 処理済みリスト等の同期状態はすべてインスタンス内部に持つ (Decision 3)
+  // ---------------------------------------------------------------
+  // engine 状態の所有権 (SPEC-0001「engine 状態の所有権」を正とする)
+  // - instance 寿命: waker / hostForkActive / phase 通知 dedup 等の機構部品
+  // - group 進行: ordering / lastPrunedBeforeSeq (session を跨いで持ち越す。
+  //   同一 instance の別 group 再利用は非サポート — subscribe の JSDoc 参照)
+  // - session 寿命: SessionSyncState (SubscriptionSession が所有)
+  // ---------------------------------------------------------------
+
+  // 処理済みリスト等の順序状態は group 進行としてインスタンス内部に持つ (Decision 3)
   const ordering = createOrdering()
   let lastPrunedBeforeSeq = 0
-
-  /**
-   * 「既裁定のまま added で届いた」envelope の端末ローカルな replay 印
-   * (ADR-0021 Decision 2)。restore・途中参加・再購読の再配送 = その端末にとっての
-   * 歴史であり、この印のある適用では listener を発火しない。同一 id の changed
-   * 受信 (契約 3 強化により added より後 = 購読後の新裁定) で印を外す
-   */
-  const replayDeliveredIds = new Set<RequestEnvelope['id']>()
-
-  /**
-   * 初回購読 barrier (ADR-0021 Decision 1) の通過済みフラグ。checkpoint
-   * (Decision 4) の適格条件 — barrier 前の昇格で保存すると初期 state で正しい
-   * 旧 snapshot を上書きし得るため、通過前は checkpoint を一切実行しない
-   */
-  let subscriptionBarrierPassed = false
-
-  /**
-   * この session で「同期対象 group の証拠」(snapshot load 成功 or envelope 受信)
-   * を観測済みか。checkpoint のもう 1 つの適格条件 — ordering は instance 状態の
-   * ため、同一 instance を別 group へ再 subscribe した場合に前 group の進行を
-   * 「local fence の追い越し」と誤認して無関係な group へ書き込むのを防ぐ
-   * (そもそも instance の別 group 再利用は非サポートだが、壊れ方を書き込みなしに
-   * 限定する)
-   */
-  let sessionObservedSyncEvidence = false
-
-  /**
-   * 永続化水位 (ADR-0021 Decision 3): 「(epoch, appliedSeq) がここまでの snapshot
-   * は耐久化済み」の辞書順単調 max。情報源は (a) 自端末 persistSnapshot の
-   * committed resolve、(b) transport.subscribeSnapshotFence、(c) load した
-   * snapshot の fence (load できた = 耐久化済みの事実)
-   */
-  let persistedWatermark: SnapshotFence = { epoch: 0, appliedSeq: 0 }
-
-  type PendingPersistedEffect = {
-    fence: SnapshotFence
-    fire: () => void
-    timer: ReturnType<typeof setTimeout>
-  }
-  const pendingPersistedEffects = new Set<PendingPersistedEffect>()
-
-  /** standalone の persisted effect (persistLocalSnapshot の save settle 後に実行) */
-  const pendingStandalonePersisted: (() => void)[] = []
-
-  /**
-   * checkpoint の走行中ガード。boolean ではなく走行主の session を持つ —
-   * 旧 session の保存が resolve しないまま残っても、新 session の checkpoint は
-   * 「自 session の走行中」でない限りブロックされない (識別子の不一致で素通り)
-   */
-  let checkpointTaskSession: object | null = null
-
-  const updatePersistedWatermark = (fence: SnapshotFence): void => {
-    if (compareFence(fence, persistedWatermark) <= 0) {
-      return
-    }
-
-    persistedWatermark = { epoch: fence.epoch, appliedSeq: fence.appliedSeq }
-    // 重複・逆順の fence イベントは上の単調 max が吸収する。到達済み entry だけを
-    // queue 順 (= 適用順) に実行する。iteration 中の delete は現在要素のみで安全
-    for (const entry of pendingPersistedEffects) {
-      if (compareFence(entry.fence, persistedWatermark) <= 0) {
-        clearTimeout(entry.timer)
-        pendingPersistedEffects.delete(entry)
-        entry.fire()
-      }
-    }
-  }
-
-  const enqueuePersistedEffect = (
-    fence: SnapshotFence,
-    fire: () => void,
-  ): void => {
-    // 既達 (dual-host / checkpoint 先行で watermark が先に進んでいた) なら即実行
-    if (compareFence(fence, persistedWatermark) <= 0) {
-      fire()
-      return
-    }
-
-    const entry: PendingPersistedEffect = {
-      fence,
-      fire,
-      timer: setTimeout(() => {
-        // 発火してしまうと 'persisted' の契約の嘘になる (reload 型 effect が保存を
-        // 再び kill し得る) ため、warn + drop に倒す (ADR-0021 Decision 3)
-        pendingPersistedEffects.delete(entry)
-        console.warn(
-          `[synqux] Dropped a "fire: 'persisted'" listener effect: the persisted watermark did not reach (epoch=${String(fence.epoch)}, seq=${String(fence.appliedSeq)}) within ${String(PERSISTED_FIRE_TIMEOUT_MS)}ms.`,
-        )
-      }, PERSISTED_FIRE_TIMEOUT_MS),
-    }
-    pendingPersistedEffects.add(entry)
-  }
-
-  /** session 破棄時に replay 印・watermark・遅延 effect をすべて破棄する */
-  const resetListenerDeliveryState = (): void => {
-    for (const entry of pendingPersistedEffects) {
-      clearTimeout(entry.timer)
-    }
-    pendingPersistedEffects.clear()
-    pendingStandalonePersisted.length = 0
-    persistedWatermark = { epoch: 0, appliedSeq: 0 }
-    replayDeliveredIds.clear()
-    subscriptionBarrierPassed = false
-    sessionObservedSyncEvidence = false
-  }
 
   // 待機 fork をイベントで起こすシグナル。notify 点は「state 変化 = 再評価に
   // 値する事象」に限る: peer 増減 / request 受信 / 適用完了
@@ -655,31 +676,29 @@ export const createSynqux = <
     config.devDeterminismCheck ??
     (typeof process !== 'undefined' && process.env.NODE_ENV !== 'production')
 
-  /**
-   * 決定性検出網: host が試し実行した synced (canonical JSON) を request id で
-   * 控えておき、実適用後の synced と比較する。差分 = reducer が非決定
-   * (Date.now / Math.random 等を読んでいる) 疑い。自端末が host のときのみ働く
-   * best-effort な検出であり、同期の正しさ自体はこの検査に依存しない
-   */
-  const expectedSyncedByRequest = new Map<RequestEnvelope['id'], string>()
-
   const formatDivergedValue = (value: unknown): string => {
     const json = JSON.stringify(value)
     const rendered = json === undefined ? 'undefined' : json
     return rendered.length > 200 ? `${rendered.slice(0, 200)}...` : rendered
   }
 
+  /**
+   * 決定性検出網: host が試し実行した synced (canonical JSON) を session の控えと
+   * 比較する。差分 = reducer が非決定 (Date.now / Math.random 等を読んでいる) 疑い。
+   * 自端末が host のときのみ働く best-effort な検出であり、
+   * 同期の正しさ自体はこの検査に依存しない
+   */
   const verifyDeterminism = (
     id: RequestEnvelope['id'],
     actual: TSynced,
   ): void => {
-    const expected = expectedSyncedByRequest.get(id)
+    const expected = session?.syncState.expectedSyncedByRequest.get(id)
 
     if (expected === undefined) {
       return
     }
 
-    expectedSyncedByRequest.delete(id)
+    session?.syncState.expectedSyncedByRequest.delete(id)
 
     const canonicalActual = canonicalStringify(actual)
 
@@ -712,6 +731,8 @@ export const createSynqux = <
     mode: SynquxMode
     localSnapshots: SnapshotStore | undefined
     pendingDispatches: Map<string, PendingDispatch>
+    /** session 寿命の同期状態。session と共に生まれ、破棄と同時に不可達になる */
+    syncState: SessionSyncState
     /** instance method と subscribe の返り値 closure が共有する session 固有 teardown */
     teardown: () => Promise<void>
   }
@@ -900,15 +921,16 @@ export const createSynqux = <
         // standalone は persistLocalSnapshot の save 試行 settle 後に実行する。
         // localSnapshots 無効の session は永続化対象がなく適用直後に実行する
         if (session?.localSnapshots) {
-          pendingStandalonePersisted.push(fire)
+          session.syncState.pendingStandalonePersisted.push(fire)
         } else {
           fire()
         }
         continue
       }
 
-      if (meta?.epoch !== undefined && meta.seq !== undefined) {
+      if (session && meta?.epoch !== undefined && meta.seq !== undefined) {
         enqueuePersistedEffect(
+          session.syncState,
           { epoch: meta.epoch, appliedSeq: meta.seq },
           fire,
         )
@@ -927,12 +949,13 @@ export const createSynqux = <
    * 到達性は best-effort — 有限回の backoff retry で諦める
    */
   const maybeCheckpoint = (root: TRoot): void => {
+    const subscriptionSession = session
     if (
-      !session ||
-      session.mode !== 'synced' ||
-      !subscriptionBarrierPassed ||
-      !sessionObservedSyncEvidence ||
-      checkpointTaskSession === session ||
+      !subscriptionSession ||
+      subscriptionSession.mode !== 'synced' ||
+      !subscriptionSession.syncState.barrierPassed ||
+      !subscriptionSession.syncState.observedSyncEvidence ||
+      subscriptionSession.syncState.checkpointRunning ||
       !isSelfHost(root)
     ) {
       return
@@ -946,14 +969,13 @@ export const createSynqux = <
     if (
       compareFence(
         { epoch: local.epoch, appliedSeq: local.appliedSeq },
-        persistedWatermark,
+        subscriptionSession.syncState.persistedWatermark,
       ) <= 0
     ) {
       return
     }
 
-    const subscriptionSession = session
-    checkpointTaskSession = subscriptionSession
+    subscriptionSession.syncState.checkpointRunning = true
     void (async () => {
       try {
         // barrier 通過後に hosting epoch を確立してから保存する (Decision 4)。
@@ -972,13 +994,10 @@ export const createSynqux = <
 
           try {
             const saved = await persistSnapshot(synced, orderingState)
-            // await 中に session が替わっていたら、旧 session の結果を新 session の
-            // watermark へ反映しない (別 group へ再接続した場合の汚染防止)
-            if (session !== subscriptionSession) {
-              return
-            }
             if (saved) {
-              updatePersistedWatermark({
+              // watermark は自 session の state にのみ反映する (旧 task が
+              // 新 session を汚染できない構造)
+              updatePersistedWatermark(subscriptionSession.syncState, {
                 epoch: orderingState.epoch,
                 appliedSeq: orderingState.appliedSeq,
               })
@@ -995,10 +1014,8 @@ export const createSynqux = <
           }
         }
       } finally {
-        // 新 session の走行中スロットを、遅れて終わった旧 task が消さない
-        if (checkpointTaskSession === subscriptionSession) {
-          checkpointTaskSession = null
-        }
+        // 自分が捕捉した session の flag だけを畳む (session 独立で越境しない)
+        subscriptionSession.syncState.checkpointRunning = false
       }
     })()
   }
@@ -1098,7 +1115,8 @@ export const createSynqux = <
     // この適用で queue された persisted effect は save 試行の settle 後に実行する
     // (ADR-0021 Decision 3)。effect 同期実行のままでは navigation する effect が
     // save より先に走り、standalone でも保存を kill できてしまうため
-    const deferredEffects = pendingStandalonePersisted.splice(0)
+    const deferredEffects =
+      session.syncState.pendingStandalonePersisted.splice(0)
 
     const orderingState = ordering.state()
     // 移植元 saveGameState 踏襲で失敗は握りつぶす (standalone 永続化は best effort)
@@ -1444,13 +1462,13 @@ export const createSynqux = <
             // (v1 の既知の問題①と同じ構図の再発防止)
             const orderingState = ordering.stateWith(seq, id)
 
-            // 決定性検出網: 試し実行結果を控える。log 専用の error (message
-            // なし) は dispatch されず実適用が発生しないため対象外
+            // 決定性検出網: 試し実行結果を裁定元 session の控えへ積む。log 専用の
+            // error (message なし) は dispatch されず実適用が発生しないため対象外
             if (
               devDeterminismCheck &&
               !(result?.type === 'error' && !result.message)
             ) {
-              expectedSyncedByRequest.set(
+              adjudicationSession?.syncState.expectedSyncedByRequest.set(
                 id,
                 canonicalStringify(config.selectSynced(next)),
               )
@@ -1520,7 +1538,11 @@ export const createSynqux = <
           // 裁定元 session が生きているときだけ後処理へ進む。respondRequest の
           // await 中に session が替わっていたら、旧 state の保存 (persistSnapshot は
           // 現在の session.groupId へ書く) も watermark 反映も行わない
-          if (successfulAdjudication && session === adjudicationSession) {
+          if (
+            successfulAdjudication &&
+            adjudicationSession !== null &&
+            session === adjudicationSession
+          ) {
             try {
               const { next, orderingState } = successfulAdjudication
               const snapshotSaved = await persistSnapshot(
@@ -1537,8 +1559,8 @@ export const createSynqux = <
               // 旧裁定の閾値で無関係な group の requests を削ってしまう
               if (snapshotSaved && session === adjudicationSession) {
                 // persisted watermark の情報源 (a): 自端末の committed resolve
-                // (ADR-0021 Decision 3)
-                updatePersistedWatermark({
+                // (ADR-0021 Decision 3)。裁定元 session の state にのみ反映する
+                updatePersistedWatermark(adjudicationSession.syncState, {
                   epoch: orderingState.epoch,
                   appliedSeq: orderingState.appliedSeq,
                 })
@@ -1686,17 +1708,30 @@ export const createSynqux = <
             continue
           }
 
+          // この fork は request 単位の worker であり、entity を所有する「現在の」
+          // session の syncState を適用時点で読むのが正 (SPEC-0001「engine 状態の
+          // 所有権」)。同一 group の再購読で残存 fork が新 session の配送を代行
+          // しても、replay 印と決定性控えはその配送を記述するため意味論が一致する
+          // (cross-group は id が別で entity に到達しない)。
+          // teardown の逆順 cleanup には「session は消えたが entities / phase の
+          // 破棄が済んでいない」微小窓があるため、session 不在での適用は行わない —
+          // 適用すると replay 印なしの配送になり、抑止すべき listener が発火し得る
+          const deliverySyncState = session?.syncState
+          if (deliverySyncState === undefined) {
+            break
+          }
+
           // 既裁定のまま added で届いた envelope (= この端末にとっての歴史) か。
           // 印は dispatch する action の delivery meta に載せ、listener の
           // replay 非発火判定に使う (ADR-0021 Decision 2)
-          const isReplayDelivery = replayDeliveredIds.has(id)
+          const isReplayDelivery = deliverySyncState.replayDeliveredIds.has(id)
 
           // log 専用の error (message なし) は UI に出すデータがなく、
           // 負荷軽減のため dispatch せず console へ直接出力する (ADR-0008)
           if (entity.result?.type === 'error' && !entity.result.message) {
             emitLog(current, entity.result)
             ordering.markApplied(seq, id)
-            replayDeliveredIds.delete(id)
+            deliverySyncState.replayDeliveredIds.delete(id)
             waker.notify() // 適用完了: 次の seq を待つ fork を起こす
             resolvePendingDispatch(entity.result)
             if (isReplayDelivery) {
@@ -1738,7 +1773,7 @@ export const createSynqux = <
             // 他 fork が rival 消失を「自分が勝者」と誤認し得る。
             // NOTE dispatch **前**への前倒しは不可 (失敗時に seq が永久欠番になる)
             ordering.markApplied(seq, id)
-            replayDeliveredIds.delete(id)
+            deliverySyncState.replayDeliveredIds.delete(id)
             waker.notify() // 適用完了: 次の seq を待つ fork を起こす
             resolvePendingDispatch(
               config.selectSynced(listener.getState() as TRoot).result,
@@ -2046,6 +2081,7 @@ export const createSynqux = <
               ? undefined
               : instanceLocalSnapshots,
           pendingDispatches: new Map(),
+          syncState: createSessionSyncState(),
         },
         cleanups,
       )
@@ -2055,7 +2091,6 @@ export const createSynqux = <
         synquxActions.sessionStarted({ selfId: null, mode: sessionMode }),
       )
       cleanups.push(() => {
-        expectedSyncedByRequest.clear()
         store.dispatch(synquxActions.sessionEnded())
       })
 
@@ -2066,7 +2101,6 @@ export const createSynqux = <
       if (payload) {
         const envelope = parseSnapshotPayload(payload)
         ordering.restore(envelope.ordering)
-        expectedSyncedByRequest.clear()
         store.dispatch(
           synquxRestored({ synced: clearRestoredResult(envelope.synced) }),
         )
@@ -2150,9 +2184,18 @@ export const createSynqux = <
 
     store.dispatch(synquxActions.sessionStarted({ selfId, mode: sessionMode }))
     cleanups.push(() => {
-      expectedSyncedByRequest.clear()
-      resetListenerDeliveryState()
       store.dispatch(synquxActions.sessionEnded())
+    })
+
+    // session 寿命の同期状態。session オブジェクト確定前の受信 routing / restore も
+    // これを closure で共有し、破棄は session と運命を共にする (手動リセット不要)
+    const syncState = createSessionSyncState()
+    cleanups.push(() => {
+      // state 自体は不可達になるが、待機中の persisted timer だけは資源として畳む
+      for (const entry of syncState.pendingPersistedEffects) {
+        clearTimeout(entry.timer)
+      }
+      syncState.pendingPersistedEffects.clear()
     })
 
     // 復帰端末は snapshot (synced + 順序状態) を復元してから requests を購読する。
@@ -2163,17 +2206,16 @@ export const createSynqux = <
     if (payload) {
       const envelope = parseSnapshotPayload(payload)
       ordering.restore(envelope.ordering)
-      expectedSyncedByRequest.clear()
       store.dispatch(
         synquxRestored({ synced: clearRestoredResult(envelope.synced) }),
       )
       // persisted watermark の情報源 (c): load できた snapshot の fence は
       // 耐久化済みの事実 (ADR-0021 Decision 3)
-      updatePersistedWatermark({
+      updatePersistedWatermark(syncState, {
         epoch: envelope.ordering.epoch,
         appliedSeq: envelope.ordering.appliedSeq,
       })
-      sessionObservedSyncEvidence = true
+      syncState.observedSyncEvidence = true
     }
 
     // 初回購読 barrier (ADR-0021 Decision 1) の進行状態。onReady 到達と
@@ -2207,7 +2249,7 @@ export const createSynqux = <
 
           // この group の envelope を観測した = checkpoint の適格証拠
           // (dedup で破棄される再配送でも証拠にはなる)
-          sessionObservedSyncEvidence = true
+          syncState.observedSyncEvidence = true
 
           // 同一 request の added 重複配送 (遅延ののち重複) を破棄する
           if (!ordering.acceptAdded(envelope.id)) {
@@ -2223,7 +2265,7 @@ export const createSynqux = <
           // 届いた」= restore・途中参加・再購読の再配送のいずれか (= この端末に
           // とっての歴史) と確定するため、replay と印す (ADR-0021 Decision 2)
           if (request.responsedBy) {
-            replayDeliveredIds.add(request.id)
+            syncState.replayDeliveredIds.add(request.id)
             store.dispatch(synquxActions.requestChanged({ request }))
             return
           }
@@ -2236,7 +2278,7 @@ export const createSynqux = <
             return
           }
 
-          sessionObservedSyncEvidence = true
+          syncState.observedSyncEvidence = true
 
           const request = parseEnvelope(envelope)
 
@@ -2247,7 +2289,7 @@ export const createSynqux = <
 
           // 契約 3 強化により added より後の changed = 購読後の新裁定
           // (敗者の再裁定など)。replay 印を外して live の発火対象へ戻す
-          replayDeliveredIds.delete(request.id)
+          syncState.replayDeliveredIds.delete(request.id)
 
           ordering.observe({ epoch: request.epoch, seq: request.seq })
           store.dispatch(synquxActions.requestChanged({ request }))
@@ -2285,7 +2327,7 @@ export const createSynqux = <
     if (transport.subscribeSnapshotFence) {
       const unsubscribeFence = transport.subscribeSnapshotFence(
         groupId,
-        (fence) => updatePersistedWatermark(fence),
+        (fence) => updatePersistedWatermark(syncState, fence),
       )
       cleanups.push(unsubscribeFence)
     }
@@ -2321,6 +2363,7 @@ export const createSynqux = <
         // synced session は local snapshot を一切参照しないが、session shape を固定する。
         localSnapshots: undefined,
         pendingDispatches: new Map(),
+        syncState,
       },
       cleanups,
     )
@@ -2357,11 +2400,11 @@ export const createSynqux = <
 
           // load できた fence は restore 採否と無関係に耐久化済みの事実
           // (persisted watermark の情報源 (c)、ADR-0021 Decision 3)
-          updatePersistedWatermark({
+          updatePersistedWatermark(subscriptionSession.syncState, {
             epoch: envelope.ordering.epoch,
             appliedSeq: envelope.ordering.appliedSeq,
           })
-          sessionObservedSyncEvidence = true
+          subscriptionSession.syncState.observedSyncEvidence = true
 
           // fencing により同値 snapshot も正史として信頼できる。同値受理は
           // dual-host 早期適用の同 seq 分岐を正史へ引き戻す唯一の手段であり、
@@ -2370,7 +2413,7 @@ export const createSynqux = <
             // restore と dispatch は await を挟まない同期ブロックにし、待機 fork の
             // 適用と restore が中途半端な ordering/state の組を観測しないようにする。
             ordering.restore(envelope.ordering)
-            expectedSyncedByRequest.clear()
+            subscriptionSession.syncState.expectedSyncedByRequest.clear()
             store.dispatch(
               synquxRestored({
                 synced: clearRestoredResult(envelope.synced),
@@ -2516,7 +2559,7 @@ export const createSynqux = <
       await waker.wait(Math.min(remaining, WAKE_FALLBACK_MS))
       signal?.throwIfAborted()
     }
-    subscriptionBarrierPassed = true
+    syncState.barrierPassed = true
 
     changePhase(store, 'live')
     startAutomationEngine(subscriptionSession)
@@ -2706,7 +2749,6 @@ export const createSynqux = <
     unsubscribe,
     dispatchAndWait,
     setRole,
-    selectSynced: config.selectSynced,
   }
 }
 

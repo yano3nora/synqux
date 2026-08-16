@@ -463,9 +463,11 @@ export function selectIsSyncUnrecoverable(root: { synqux: SynquxState }): boolea
 
 // NOTE: selectLatestResult は提供しない (レビューで廃止決定)
 // result は consumer 自身の synced state の所有物であり SynquxSynced 契約で型も見えるため
-// `(s) => s.game.result` と直接読めばよい。「情報は隠さない」方針とも整合する
-// react では useLatestResult を提供する (Provider が synced の位置を解決できるため迂回が不要)
-// isResultForPeer / useMyLatestResult は直読み原則を変えず、「自分宛てか」の意味論だけを提供する
+// `(s) => s.game.result` と直接読めばよい。「情報は隠さない」方針とも整合する。
+// react の useLatestResult / useMyLatestResult も ADR-0022 で廃止し、直読み原則へ一本化した —
+// 「自分宛てか」は isResultForPeer + selectSelfId の typed selector で表現する:
+//   const selectMyLatestResult = (state: RootState) =>
+//     isResultForPeer(state.game.result, selectSelfId(state)) ? state.game.result : null
 ```
 
 ### `state.synqux` 内部 state (書き込み禁止・語彙は非公開)
@@ -494,9 +496,8 @@ export type SynquxState = {
 ### `synqux/react` (ゲーム開発者層)
 
 ```ts
-/** setup 層が store の Provider と並べて配線する。ゲーム開発者は hooks だけ覚える */
-export function SynquxProvider(props: { sync: Synqux<any, any, any>; children: ReactNode }): JSX.Element
-
+// Provider は不要 (ADR-0022 で SynquxProvider / useLatestResult / useMyLatestResult を廃止)。
+// hooks は予約 key state.synqux を直接読む。result は typed selector で直読みする (上記 NOTE)
 export function useIsHost(): boolean
 export function usePeers(): Peer[]
 export function useSelfId(): Peer['id'] | null
@@ -507,8 +508,6 @@ export function useIsLive(): boolean
 export function useSyncHealth(): SynquxHealth
 export function useIsSyncStalled(): boolean
 export function useIsSyncUnrecoverable(): boolean
-export function useLatestResult<TAction, TMessage extends ResultMessage = ResultMessage>(): Result<TAction, TMessage> | null  // synced の位置は Provider 経由で解決
-export function useMyLatestResult<TAction, TMessage extends ResultMessage = ResultMessage>(): Result<TAction, TMessage> | null
 /** react consumer の購読開始の canonical な入口。groupId 未確定時は開始しない */
 export function useSynquxSubscription<TRoot extends { synqux: SynquxState }>(
   synqux: Pick<Synqux<TRoot>, 'subscribe'>,
@@ -715,7 +714,7 @@ type SnapshotEnvelope<TSynced> = {
 | subpath | 主な export | 対象 |
 | --- | --- | --- |
 | `synqux` | `createSynqux` / `createSynquxRootReducer` / `synquxReducer` / `synquxRestored` / reducer helpers / `createSyncedActionMatchers` / `isDeliveredSyncedAction` / `isSynquxAction` / `isResultForPeer` / peer・phase・health selectors / `localStorageSnapshotStore` / 契約型 | セットアップ層 + reducer ヘルパー |
-| `synqux/react` | `SynquxProvider` / `useSynquxSubscription` / peer・phase・health hooks / `useLatestResult` / `useMyLatestResult` | ゲーム開発者層 |
+| `synqux/react` | `useSynquxSubscription` / peer・phase・health hooks (Provider 不要、ADR-0022) | ゲーム開発者層 |
 | `synqux/testing` | `createMemoryHub` / `verifyActionIdempotency` / `assertActionIdempotency` | consumer CI / 本 repo の simulation test |
 | `synqux/firebase` | `firebaseTransport(db, options?: { archivePrunedRequests?: boolean })` | Phase 2 で実装 |
 
@@ -728,7 +727,7 @@ type SnapshotEnvelope<TSynced> = {
 | `LAST_RESET` (ゲームデータリセット → 全端末 alert + reload) | v1 core に**含めない**。UI 都合 (alert / reload) と密結合のため。テンプレ置換 (Phase 2) で必要性が確定したら transport のオプションイベントとして追加検討 |
 | `reproduce` (requests JSON replay 復旧ツール) | Phase 1 スコープ外 (合意済み) |
 | `connections.isNotFoundGame` / `getAgentIdFromQuery` | consumer 責務 (エラー画面遷移・query 読み取りはアプリ都合) |
-| result の toast 表示 (`result-notifier`) | consumer 責務。`useLatestResult` + `Result.message` (拡張は TMessage generics) で材料は提供 (ADR-0008) |
+| result の toast 表示 (`result-notifier`) | consumer 責務。synced state の result 直読み (typed selector) + `Result.message` (拡張は TMessage generics) で材料は提供 (ADR-0008 / ADR-0022) |
 | `loadGameState` / `saveGameState` (standalone の localStorage 永続化) | **取り込む** (レビュー決定)。`localSnapshots?: SnapshotStore | false` として一般化し、封筒・直列化・policy 点を transport の snapshot と共有する。browser の省略時は `localStorageSnapshotStore()`、`false` で無効化する。restore 時の result 除去 (移植元 `clearResultFromGameState`) も踏襲 |
 | `@yano3nora/ts-utils` (`sleepTimer` / `waitUntilOrFail`) | **dependencies に含める** (レビュー決定: 作者が同一のため内製化は二重管理になる)。public npm + ライセンス整合が publish (Phase 2) の前提条件 |
 | `debugRevisions` (console.log デバッグ action) | 落とす。simulation test で代替 |
@@ -736,7 +735,7 @@ type SnapshotEnvelope<TSynced> = {
 ## 確定にあたっての判断メモ (2026-07-05 レビュー反映済み)
 
 1. **selector を静的関数にできた**: `state.synqux` が予約 key のため instance なしで `selectIsHost` 等を提供できる。ゲーム開発者が instance に触れない Decision 7 の層分けがそのまま成立する
-2. **`selectLatestResult` は廃止** (レビュー決定): result は consumer 自身の synced state の所有物で直読みできるため、setup 層 re-export の迂回ごと削除。react の `useLatestResult` のみ提供
+2. **`selectLatestResult` は廃止** (レビュー決定): result は consumer 自身の synced state の所有物で直読みできるため、setup 層 re-export の迂回ごと削除。react の `useLatestResult` のみ提供 (その後 ADR-0022 で `useLatestResult` / `useMyLatestResult` / `SynquxProvider` も廃止し、typed selector 直読みへ一本化)
 3. **createSynquxRootReducer の返り値を config へ spread する形**で、ADR が山場と呼んだ「rootReducer × selectSynced × isSyncedAction × consumer State 型」の接続点を 1 箇所に畳んだ。primitive 方式は `synquxReducer` + `synquxRestored` の match + `stateWithDefaultResult` + 手書き rootReducer + 手動 `selectSynced` で成立する (契約の正式化は 2026-07-20、result stamp の追加は ADR-0013。上記「primitive 方式の正式契約」と公開 surface 回帰テスト `src/index.test.ts` を参照)
 4. **synced slice は 1 つに限定 — 仕様として確定 (2026-07-18)**。当初は「v1 暫定・複数対応は必要になってから」だったが、host の成否判定 (result の読み取り位置) と snapshot の単位が単一 subtree に固定されることが同期機構の単純さの源泉であり、複数エントリ対応は判定・復元の分割という複雑さだけを持ち込むため採らない。複数ドメインは consumer が合成 reducer で 1 slice に畳み、直近に実行した対象 reducer の result を top-level へ写す (実例: demo/main.ts の demoReducer)
 5. **`agent` / `guest` → `role: 'player' | 'dedicated' | 'observer'` へ改名** (レビュー決定): 排他 enum にすることで「agent かつ guest」という不正状態を型で排除。dedicated は「常駐プロセスを強制 host にして安定進行・無人進行を担う」ユースケース由来 (dedicated server 文化)。process id は `label` へ分離
