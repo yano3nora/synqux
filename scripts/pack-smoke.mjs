@@ -78,16 +78,17 @@ for (const name of [
 }
 
 const react = await import(entryUrl('react/index.js'))
-for (const name of ['useIsHost', 'useSynquxSubscription']) {
-  assert(typeof react[name] === 'function', `react entry の export ${name} が欠落`)
-}
-// ADR-0022 で削除済みの API が dist に残存していない (stale dist 検出) ことも検証する
-for (const removed of ['SynquxProvider', 'useLatestResult', 'useMyLatestResult']) {
-  assert(
-    !(removed in react),
-    `react entry に廃止済み export ${removed} が残存 (ADR-0022)。dist が stale です`,
-  )
-}
+// react entry は useSynquxSubscription のみ (ADR-0022 / ADR-0023)。完全一致で
+// 検証し、廃止 API (Provider / 読み取り hooks) の残存 = stale dist を検出する
+assert(
+  typeof react.useSynquxSubscription === 'function',
+  'react entry の export useSynquxSubscription が欠落',
+)
+assert(
+  JSON.stringify(Object.keys(react).sort()) ===
+    JSON.stringify(['useSynquxSubscription']),
+  `react entry の export が想定外です (ADR-0022 / ADR-0023 で useSynquxSubscription のみ): ${Object.keys(react).join(', ')}`,
+)
 
 const testing = await import(entryUrl('testing/index.js'))
 assert(
@@ -130,7 +131,7 @@ writeFileSync(
   join(workDir, 'consumer.ts'),
   [
     "import { createSynqux, createSynquxRootReducer, generateResult, type SynquxTransport, type Result } from 'synqux'",
-    "import { useIsHost, useSynquxSubscription } from 'synqux/react'",
+    "import { useSynquxSubscription } from 'synqux/react'",
     "import { createMemoryHub, type MemoryHub } from 'synqux/testing'",
     "import { firebaseTransport } from 'synqux/firebase'",
     '',
@@ -138,7 +139,6 @@ writeFileSync(
     '  createSynqux,',
     '  createSynquxRootReducer,',
     '  generateResult,',
-    '  useIsHost,',
     '  useSynquxSubscription,',
     '  createMemoryHub,',
     '  firebaseTransport,',

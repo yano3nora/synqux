@@ -3,24 +3,14 @@ import { renderHook, waitFor } from '@testing-library/react'
 import { createElement, type ReactNode } from 'react'
 import { Provider } from 'react-redux'
 import { describe, expect, it, vi } from 'vitest'
-import { synquxActions } from '../core/slice.js'
 import { createClient } from '../core/test-fixtures.js'
 import type { SynquxTransport } from '../core/types.js'
-import {
-  useIsHost,
-  useIsLive,
-  useIsSyncStalled,
-  useIsSyncUnrecoverable,
-  usePeers,
-  useSelf,
-  useSelfId,
-  useSelfRole,
-  useSyncHealth,
-  useSyncPhase,
-  useSynquxSubscription,
-} from './index.js'
+import { useSynquxSubscription } from './index.js'
 
-/** hooks は購読と描画の glue のみなので、store 直接操作で読み取り面だけ検証する */
+/**
+ * synqux/react は購読開始 hook のみ (ADR-0023)。読み取りは core selectors を
+ * consumer の typed useAppSelector へ渡す形が canonical で、hook wrapper は無い
+ */
 const noopTransport: SynquxTransport = {
   connect: async () => ({ selfId: 'peer-self' }),
   disconnect: async () => undefined,
@@ -54,79 +44,6 @@ const setup = (
 }
 
 describe('synqux/react hooks', () => {
-  it('peer hooks が state.synqux の自端末情報を読める', () => {
-    const { store, wrapper } = setup()
-
-    store.dispatch(
-      synquxActions.sessionStarted({ selfId: 'peer-1', mode: 'synced' }),
-    )
-    store.dispatch(
-      synquxActions.peerUpserted({ id: 'peer-1', groupId: 'g', connected: 1 }),
-    )
-
-    expect(renderHook(() => useIsHost(), { wrapper }).result.current).toBe(true)
-    expect(
-      renderHook(() => usePeers(), { wrapper }).result.current,
-    ).toHaveLength(1)
-    expect(renderHook(() => useSelfId(), { wrapper }).result.current).toBe(
-      'peer-1',
-    )
-    expect(renderHook(() => useSelf(), { wrapper }).result.current?.id).toBe(
-      'peer-1',
-    )
-    expect(renderHook(() => useSelfRole(), { wrapper }).result.current).toBe(
-      'player',
-    )
-  })
-
-  it('useSyncPhase / useIsLive が購読 phase を読む', () => {
-    const { store, wrapper } = setup()
-    store.dispatch(synquxActions.phaseChanged('subscribing'))
-    expect(renderHook(() => useSyncPhase(), { wrapper }).result.current).toBe(
-      'subscribing',
-    )
-    expect(renderHook(() => useIsLive(), { wrapper }).result.current).toBe(
-      false,
-    )
-
-    store.dispatch(synquxActions.phaseChanged('live'))
-    expect(renderHook(() => useIsLive(), { wrapper }).result.current).toBe(true)
-  })
-
-  it('sync health hooks は Provider 追加なしで health を読める', () => {
-    const { store, wrapper } = setup()
-    store.dispatch(
-      synquxActions.healthChanged({
-        phase: 'stalled',
-        expectedSeq: 2,
-        maxSeenSeq: 3,
-        gapSince: 100,
-      }),
-    )
-
-    expect(
-      renderHook(() => useSyncHealth(), { wrapper }).result.current,
-    ).toMatchObject({ phase: 'stalled', expectedSeq: 2 })
-    expect(
-      renderHook(() => useIsSyncStalled(), { wrapper }).result.current,
-    ).toBe(true)
-    expect(
-      renderHook(() => useIsSyncUnrecoverable(), { wrapper }).result.current,
-    ).toBe(false)
-
-    store.dispatch(
-      synquxActions.healthChanged({
-        phase: 'unrecoverable',
-        expectedSeq: 2,
-        maxSeenSeq: 3,
-        gapSince: 100,
-      }),
-    )
-    expect(
-      renderHook(() => useIsSyncUnrecoverable(), { wrapper }).result.current,
-    ).toBe(true)
-  })
-
   it('useSynquxSubscription は groupId 指定時に購読し live を返す', async () => {
     const { sync, wrapper } = setup()
     const { result } = renderHook(

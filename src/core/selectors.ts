@@ -28,8 +28,23 @@ export const selectIsHost = (root: WithSynqux): boolean => {
   )
 }
 
-export const selectPeers = (root: WithSynqux): Peer[] =>
-  Object.values(root.synqux.connections.entities)
+/**
+ * 同じ entities (state 世代) に対して同一の配列参照を返すための memo。
+ * useSelector へ直接渡す canonical 用法 (ADR-0023) で、毎回新配列だと無関係な
+ * dispatch でも再描画 + react-redux の安定性警告になるため、参照安定を selector
+ * 側で保証する。WeakMap キーは state 内の entities オブジェクトなので leak しない
+ */
+const peersCache = new WeakMap<Record<Peer['id'], Peer>, Peer[]>()
+
+export const selectPeers = (root: WithSynqux): Peer[] => {
+  const entities = root.synqux.connections.entities
+  let peers = peersCache.get(entities)
+  if (peers === undefined) {
+    peers = Object.values(entities)
+    peersCache.set(entities, peers)
+  }
+  return peers
+}
 
 export const selectSelfId = (root: WithSynqux): Peer['id'] | null =>
   root.synqux.connections.selfId

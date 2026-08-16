@@ -496,18 +496,9 @@ export type SynquxState = {
 ### `synqux/react` (ゲーム開発者層)
 
 ```ts
-// Provider は不要 (ADR-0022 で SynquxProvider / useLatestResult / useMyLatestResult を廃止)。
-// hooks は予約 key state.synqux を直接読む。result は typed selector で直読みする (上記 NOTE)
-export function useIsHost(): boolean
-export function usePeers(): Peer[]
-export function useSelfId(): Peer['id'] | null
-export function useSelf(): Peer | null
-export function useSelfRole(): PeerRole | null
-export function useSyncPhase(): SynquxPhase
-export function useIsLive(): boolean
-export function useSyncHealth(): SynquxHealth
-export function useIsSyncStalled(): boolean
-export function useIsSyncUnrecoverable(): boolean
+// Provider・読み取り hooks はなし (ADR-0022 / ADR-0023 で廃止)。読み取りは core
+// selectors を consumer の typed useAppSelector へ渡す (`useAppSelector(selectIsHost)`)。
+// result は typed selector で直読みする (上記 NOTE)
 /** react consumer の購読開始の canonical な入口。groupId 未確定時は開始しない */
 export function useSynquxSubscription<TRoot extends { synqux: SynquxState }>(
   synqux: Pick<Synqux<TRoot>, 'subscribe'>,
@@ -714,7 +705,7 @@ type SnapshotEnvelope<TSynced> = {
 | subpath | 主な export | 対象 |
 | --- | --- | --- |
 | `synqux` | `createSynqux` / `createSynquxRootReducer` / `synquxReducer` / `synquxRestored` / reducer helpers / `createSyncedActionMatchers` / `isDeliveredSyncedAction` / `isSynquxAction` / `isResultForPeer` / peer・phase・health selectors / `localStorageSnapshotStore` / 契約型 | セットアップ層 + reducer ヘルパー |
-| `synqux/react` | `useSynquxSubscription` / peer・phase・health hooks (Provider 不要、ADR-0022) | ゲーム開発者層 |
+| `synqux/react` | `useSynquxSubscription` のみ (読み取りは core selectors を typed useAppSelector へ。ADR-0022 / ADR-0023) | ゲーム開発者層 |
 | `synqux/testing` | `createMemoryHub` / `verifyActionIdempotency` / `assertActionIdempotency` | consumer CI / 本 repo の simulation test |
 | `synqux/firebase` | `firebaseTransport(db, options?: { archivePrunedRequests?: boolean })` | Phase 2 で実装 |
 

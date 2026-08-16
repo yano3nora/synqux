@@ -16,10 +16,7 @@
 - xxx
 
 ### P1 — 本番境界と公開契約
-- コードベース全体の refactoring (残件)
-    - `SynquxProvider` 存廃と engine 状態の所有権整理は [TASK-260816-provider-removal-and-state-ownership](TASK-260816-provider-removal-and-state-ownership.md) で完了 (ADR-0022 で Provider / result hooks / `Synqux.selectSynced` を削除、session 寿命の状態を `SessionSyncState` へ集約、所有権表を SPEC-0001 に明文化)
-    - 公開 API 表面積の棚卸し: 消費者 repo 群での実利用実績と突き合わせ、未使用 export の deprecate 候補を洗い出す (YAGNI 方針の再適用)
-    - `src/react/` の `state as WithSynqux` キャスト前提の整理 (context 前提は ADR-0022 で解消済み)
+- xxx
 
 ### P2 — 文書・consumer 導入・コスト最適化
 - xxx

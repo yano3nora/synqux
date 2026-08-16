@@ -130,7 +130,7 @@ The instance-level `synqux.unsubscribe()` tears down the current session even wh
     }
     ```
 
-3. **Read "am I host?" and "who is here?" through selectors / hooks** — `selectIsHost` / `selectPeers` / `selectSelfId`, or with React, `useIsHost` / `usePeers` from `synqux/react`. Read the latest result off your own synced state with a typed selector (see below).
+3. **Read "am I host?" and "who is here?" through the core selectors** — pass `selectIsHost` / `selectPeers` / `selectSelfId` straight to your typed `useAppSelector` (e.g. `useAppSelector(selectIsHost)`; hook wrappers were removed in ADR-0023). Read the latest result off your own synced state with a typed selector (see below).
 
     ```ts
     // Canonical way to read "the latest result addressed to me" (no Provider needed).
@@ -177,7 +177,7 @@ const synqux = createSynqux({
 **Concept.** When a device detects a gap in applied sequence numbers, synqux recovers on its own: resubscribe to requests, then restore from snapshot. The consumer only owns the last resort — telling the user to reload.
 
 ```tsx
-const unrecoverable = useIsSyncUnrecoverable() // without React: selectIsSyncUnrecoverable(store.getState())
+const unrecoverable = useAppSelector(selectIsSyncUnrecoverable) // without React: selectIsSyncUnrecoverable(store.getState())
 
 useEffect(() => {
   if (
@@ -192,7 +192,7 @@ useEffect(() => {
 **Behavior.**
 
 - `unrecoverable` turns true only after one full recovery cycle fails. Prompt a reload then, and only then.
-- `useIsSyncStalled` covers "stalled, including while recovering" — use it for progress indicators.
+- `selectIsSyncStalled` covers "stalled, including while recovering" — use it for progress indicators.
 - Wording, notification style, and how to trigger the reload are the consumer's choice.
 
 ### Use server time in reducers (`action.meta.dispatched`)
@@ -360,7 +360,7 @@ export const useAppDispatch = useDispatch.withTypes<AppDispatch>()
 const count = useAppSelector((s) => s.counter.count)
 ```
 
-The `synqux/react` hooks (`useIsHost` etc.) read the reserved `state.synqux` subtree directly and work without this wiring. No provider component is required (ADR-0022).
+The core selectors (`selectIsHost` etc.) read the reserved `state.synqux` subtree, so they work through this typed `useAppSelector` as-is. No provider component is required (ADR-0022 / ADR-0023).
 
 ### Test your consumer (`synqux/testing`)
 
@@ -432,13 +432,9 @@ Types (all contract types are exported from the main entry):
 
 | export | description |
 | --- | --- |
-| `useIsHost()` / `usePeers()` / `useSelfId()` | Hook versions of the selectors |
-| `useSelf()` / `useSelfRole()` | This device's Peer / normalized role |
-| `useSyncPhase()` / `useIsLive()` | Distinguish initial restore from live streaming / live check |
-| `useSyncHealth()` / `useIsSyncStalled()` / `useIsSyncUnrecoverable()` | Hook versions of sync health |
 | `useSynquxSubscription(synqux, options)` | Canonical subscription entry for React consumers. Gets the store from `useStore()` and prevents double subscription via phase |
 
-No provider component is required. For the latest result, write a typed selector over your own synced state (`isResultForPeer` + `selectSelfId`, see Quick start) — `SynquxProvider` / `useLatestResult` / `useMyLatestResult` were removed in ADR-0022.
+This is the only export — reading is done by passing the core selectors (`selectIsHost` / `selectPeers` / `selectSyncHealth` ...) to your typed `useAppSelector`, and the latest result comes from a typed selector over your own synced state (`isResultForPeer` + `selectSelfId`, see Quick start). `SynquxProvider` and the read-hook wrappers were removed in ADR-0022 / ADR-0023.
 
 ### `synqux/testing`
 
@@ -465,7 +461,7 @@ No provider component is required. For the latest result, write a typed selector
 ├ src/
 │ ├ core/       … transport-agnostic sync state machine (main entry)
 │ ├ firebase/   … Firebase RTDB adapter (synqux/firebase)
-│ ├ react/      … read-only hooks (synqux/react)
+│ ├ react/      … subscription hook (synqux/react)
 │ └ testing/    … in-memory transport / idempotency harness (synqux/testing)
 ├ demo/         … manual sync check on the firebase emulator (not published; type-checked by npm test)
 ├ docs/         … specs and decision records (SPEC / ADR / TASK)
