@@ -66,6 +66,15 @@ type SyncedActionOf<T extends SynquxKitTypes> =
 type MatchedSyncedActionOf<T extends SynquxKitTypes> = SyncedActionOf<T> &
   SyncedAction<any, T['root']>
 
+/**
+ * T['root'] のうち synced state (T['synced']) が mount されている key の候補。
+ * kit へ渡す syncedKey を「型整合する key」に制限する (typo や別 slice の
+ * key を渡す誤配線をコンパイル時に落とす)
+ */
+type SyncedKeyOf<T extends SynquxKitTypes> = {
+  [K in keyof T['root'] & string]: T['root'][K] extends T['synced'] ? K : never
+}[keyof T['root'] & string]
+
 /** createSyncedSlice の case reducer (RTK 同様 immer draft を受ける) */
 type SyncedSliceCaseReducer<TState> = (
   state: Draft<TState>,
@@ -184,7 +193,8 @@ export type CreateSyncedSlice<TRoot = unknown> = <
  *
  * @example
  * export const {
- *   createSyncedAction, createSyncedSlice, isSyncedAction,
+ *   syncedKey, isSyncedAction,
+ *   createSyncedAction, createSyncedSlice,
  *   isSucceededAction, isMySucceededAction,
  *   generateResult, stateWithError, stateWithResult, stateWithTransaction,
  * } = createSynquxKit<{
@@ -192,18 +202,23 @@ export type CreateSyncedSlice<TRoot = unknown> = <
  *   root: RootState
  *   message: GameResultMessage
  * }>({
- *   selectSynced: (root) => root.game,
+ *   syncedKey: 'game',
  * })
  */
 export const createSynquxKit = <T extends SynquxKitTypes>(config: {
   /**
-   * root 内の synced state の位置。synced key の命名は consumer の領域のため
-   * kit に一度だけ教える (matchers の束縛に使う。createSynquxRootReducer の
-   * synced record key と同じ位置を指すこと)
+   * root 内の synced state の mount key。synced key の命名は consumer の領域の
+   * ため kit に一度だけ教え、createSynquxRootReducer へは kit の戻りの
+   * `syncedKey` をそのまま渡す (供給点はここだけ)。T['root'][K] = T['synced']
+   * を満たす key だけが型で許可される
    */
-  selectSynced: (root: T['root']) => T['synced']
+  syncedKey: SyncedKeyOf<T>
 }) => {
   const registry = new Set<string>()
+
+  // matchers 等の内部束縛用。位置の宣言は syncedKey に一本化したため導出する
+  const selectSynced = (root: T['root']): T['synced'] =>
+    root[config.syncedKey as keyof T['root']] as T['synced']
 
   // narrow 先は T['synced'] から推論した domain action union。RTK の
   // creator.match と同じく、実行時は type 文字列照合のみで meta / payload の
@@ -312,9 +327,15 @@ export const createSynquxKit = <T extends SynquxKitTypes>(config: {
     isSyncedAction,
 
     /**
+     * synced subtree の mount key (config の echo)。createSynquxRootReducer の
+     * `syncedKey` へそのまま渡す
+     */
+    syncedKey: config.syncedKey,
+
+    /**
      * locals reducer 用の成功判定 matcher 群 (isSucceededAction /
      * isMySucceededAction)。isSyncedAction は registry から、selectSynced は
-     * kit config から束縛済みのため、そのまま使える
+     * syncedKey から束縛済みのため、そのまま使える
      */
     ...createSyncedActionMatchers<
       MatchedSyncedActionOf<T>,
@@ -326,7 +347,7 @@ export const createSynquxKit = <T extends SynquxKitTypes>(config: {
       isSyncedAction: isSyncedAction as (
         action: Action,
       ) => action is MatchedSyncedActionOf<T>,
-      selectSynced: config.selectSynced,
+      selectSynced,
     }),
 
     // results 系の action 束縛は SyncedActionOf<T> (state 自身の Result と同じ

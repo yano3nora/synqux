@@ -12,7 +12,7 @@ import {
 import { firebaseTransport } from 'synqux/firebase'
 import { createRig } from './rig'
 import { add, append, demoSlice, set, setLocked } from './slice'
-import { isSyncedAction, type DemoAction } from './synqux'
+import { isSyncedAction, syncedKey, type DemoAction } from './synqux'
 
 /**
  * synqux demo: sync a counter across devices with the Firebase emulator
@@ -48,7 +48,8 @@ const synqux = createSynqux({
   transport: firebaseTransport(db, { archivePrunedRequests: true }),
   ...createSynquxRootReducer({
     isSyncedAction,
-    synced: { demo: demoSlice.reducer },
+    syncedKey,
+    synced: demoSlice.reducer,
     locals: {},
   }),
 })

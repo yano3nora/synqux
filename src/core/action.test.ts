@@ -124,7 +124,7 @@ describe('createSynquxKit', () => {
     root: RootState
     message: GameMessage
   }>({
-    selectSynced: (root) => root.game,
+    syncedKey: 'game',
   })
 
   it('束縛済み stateWithError が domain 型のまま error result を積む', () => {
@@ -153,7 +153,7 @@ describe('createSynquxKit', () => {
 
   it('createSyncedAction が type を registry へ登録し isSyncedAction が判定する', () => {
     const own = createSynquxKit<{ synced: GameState; root: RootState }>({
-      selectSynced: (root) => root.game,
+      syncedKey: 'game',
     })
     const increment = own.createSyncedAction<number>('game/increment')
 
@@ -166,7 +166,7 @@ describe('createSynquxKit', () => {
 
   it('synqux/ 予約 prefix の type は定義時に throw する (内部 action の registry 汚染防止)', () => {
     const own = createSynquxKit<{ synced: GameState; root: RootState }>({
-      selectSynced: (root) => root.game,
+      syncedKey: 'game',
     })
 
     expect(() => own.createSyncedAction('synqux/restored')).toThrow(
@@ -185,7 +185,7 @@ describe('createSynquxKit', () => {
       synced: CountState
       root: { synqux: SynquxState; game: CountState }
     }>({
-      selectSynced: (root) => root.game,
+      syncedKey: 'game',
     })
     const increment = own.createSyncedAction<number>('game/increment')
 
@@ -200,10 +200,10 @@ describe('createSynquxKit', () => {
 
   it('registry は kit ごとに独立する (creator と述語は同じ kit から取る契約)', () => {
     const kitA = createSynquxKit<{ synced: GameState; root: RootState }>({
-      selectSynced: (root) => root.game,
+      syncedKey: 'game',
     })
     const kitB = createSynquxKit<{ synced: GameState; root: RootState }>({
-      selectSynced: (root) => root.game,
+      syncedKey: 'game',
     })
     const fromA = kitA.createSyncedAction('game/from-a')
 
@@ -214,7 +214,7 @@ describe('createSynquxKit', () => {
   it('matchers は registry / kit config から全束縛済みで、そのまま使える', () => {
     type TestRoot = { synqux: SynquxState; game: GameState; local: number }
     const own = createSynquxKit<{ synced: GameState; root: TestRoot }>({
-      selectSynced: (root) => root.game,
+      syncedKey: 'game',
     })
     const increment = own.createSyncedAction<number>('game/increment')
 
@@ -223,12 +223,11 @@ describe('createSynquxKit', () => {
     let seenByLocal: Action = { type: '@@none' }
     const root = createSynquxRootReducer({
       isSyncedAction: own.isSyncedAction,
-      synced: {
-        game: (state: GameState = { result: null, count: 0 }, action) =>
-          own.isSyncedAction(action)
-            ? { ...state, count: state.count + 1 }
-            : state,
-      },
+      syncedKey: own.syncedKey,
+      synced: (state: GameState = { result: null, count: 0 }, action) =>
+        own.isSyncedAction(action)
+          ? { ...state, count: state.count + 1 }
+          : state,
       locals: {
         local: (state: number = 0, action: Action) => {
           seenByLocal = action

@@ -74,7 +74,8 @@ const secondLocalReducer: Reducer<SecondLocal> = (
 const setup = () =>
   createSynquxRootReducer({
     isSyncedAction,
-    synced: { game: syncedReducer },
+    syncedKey: 'game',
+    synced: syncedReducer,
     locals: { first: firstLocalReducer, second: secondLocalReducer },
   })
 
@@ -203,16 +204,14 @@ describe('createSynquxRootReducer', () => {
     expect(selectSynced(state)).toBe(state.game)
   })
 
-  it('synced slice が 1 エントリでなければ throw する (v1 制約)', () => {
+  it('予約 key "synqux" を syncedKey に指定すると throw する', () => {
     expect(() =>
       createSynquxRootReducer({
         isSyncedAction,
-        synced: {
-          a: syncedReducer,
-          b: syncedReducer,
-        } as never,
+        syncedKey: 'synqux',
+        synced: syncedReducer,
         locals: {},
       }),
-    ).toThrow('exactly one synced slice')
+    ).toThrow('reserved root key')
   })
 })

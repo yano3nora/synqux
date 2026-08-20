@@ -28,7 +28,7 @@ type CountState = SynquxSynced<CountAction> & { count: number }
 type RootState = { synqux: SynquxState; game: CountState }
 
 const kit = createSynquxKit<{ synced: CountState; root: RootState }>({
-  selectSynced: (root) => root.game,
+  syncedKey: 'game',
 })
 const increment = kit.createSyncedAction<number>('game/increment')
 
@@ -50,7 +50,8 @@ const createKitClient = (
 ) => {
   const wiring = createSynquxRootReducer({
     isSyncedAction: ownKit.isSyncedAction,
-    synced: { game: countReducer },
+    syncedKey: ownKit.syncedKey,
+    synced: countReducer,
     locals: {},
   })
   const sync = createSynqux({
@@ -128,7 +129,7 @@ describe('createSynquxKit (end-to-end)', () => {
     // (= 同一 bundle の再現) で、封筒から再構築された action が判定できること
     const buildPeer = (hub: ReturnType<typeof createMemoryHub>) => {
       const ownKit = createSynquxKit<{ synced: CountState; root: RootState }>({
-        selectSynced: (root) => root.game,
+        syncedKey: 'game',
       })
       const ownIncrement = ownKit.createSyncedAction<number>('game/increment')
       return { ...createKitClient(hub, ownKit), increment: ownIncrement }

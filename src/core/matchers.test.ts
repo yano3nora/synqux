@@ -47,7 +47,8 @@ const setup = () => {
 
   const root = createSynquxRootReducer({
     isSyncedAction: isGameAction,
-    synced: { game: gameReducer },
+    syncedKey: 'game',
+    synced: gameReducer,
     locals: { local: localReducer },
   })
   const matchers = createSyncedActionMatchers(root)

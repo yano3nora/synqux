@@ -80,12 +80,12 @@ The setup layer is one file in your template; feature developers never touch it 
 // predicate must come from the same kit.
 import { createSynquxKit } from 'synqux'
 
-export const { createSyncedSlice, createSyncedAction, isSyncedAction, stateWithError } =
+export const { createSyncedSlice, createSyncedAction, isSyncedAction, syncedKey, stateWithError } =
   createSynquxKit<{
     synced: CounterState
     root: RootState
   }>({
-    selectSynced: (root) => root.counter, // where your synced slice lives
+    syncedKey: 'counter', // where your synced slice mounts in the root (told once, here)
   })
 ```
 
@@ -96,14 +96,15 @@ import { createSynqux, createSynquxRootReducer } from 'synqux'
 import { firebaseTransport } from 'synqux/firebase'
 import { counterSlice } from './counter'          // synced slice (step 2)
 import { scenesReducer } from './scenes/reducers'  // local slice (not synced)
-import { isSyncedAction } from './synqux'
+import { isSyncedAction, syncedKey } from './synqux'
 
 export const synqux = createSynqux({
   transport: firebaseTransport(db),                // finish auth before creating the transport
   // Returns rootReducer / selectSynced / isSyncedAction — spread as-is into the config.
   ...createSynquxRootReducer({
     isSyncedAction,                                // derived from the kit registry
-    synced: { counter: counterSlice.reducer },
+    syncedKey,                                     // the kit's mount key, passed as-is
+    synced: counterSlice.reducer,
     locals: { scenes: scenesReducer },             // run in declaration order; meta.root exposes earlier stages
   }),
 })
@@ -117,7 +118,7 @@ export const store = configureStore({
 })
 ```
 
-NOTE: `synced` accepts **exactly one** slice (by design; two or more throws). A demo-sized app fits in one `createSyncedSlice` (see [demo/slice.ts](./demo/slice.ts), which holds both a counter and a ledger). Apps with many domains define actions with `createSyncedAction` and fold them into the slice via `extraReducers` (or compose sub-reducers with builder functions), lifting `result` to the top level.
+NOTE: `synced` takes **exactly one** reducer (by design — the API shape allows no more). A demo-sized app fits in one `createSyncedSlice` (see [demo/slice.ts](./demo/slice.ts), which holds both a counter and a ledger). Apps with many domains define actions with `createSyncedAction` and fold them into the slice via `extraReducers` (or compose sub-reducers with builder functions), lifting `result` to the top level.
 
 ### 4. Subscribe and sync
 
@@ -416,10 +417,10 @@ export const {
   root: RootState
   message: GameResultMessage   // your ResultMessage extension (optional)
 }>({
-  // Where the synced state lives in the root. Naming the key is your choice
-  // (synqux only reserves state.synqux), so tell the kit once — matchers and
-  // future helpers come pre-bound instead of asking again.
-  selectSynced: (root) => root.game,
+  // Where the synced state mounts in the root. Naming the key is your choice
+  // (synqux only reserves state.synqux), so tell the kit once — matchers come
+  // pre-bound, and the store wiring takes the kit's syncedKey as-is.
+  syncedKey: 'game',
 })
 
 // Annotation type for locals slices (replaces PayloadAction there).
@@ -457,7 +458,7 @@ Setup layer (touched only by the single setup file in your template):
 | export | description |
 | --- | --- |
 | `createSynqux(config)` | Creates a sync instance. Returns `middlewares` / `rootReducer` / `reducer` / `subscribe` / `unsubscribe` / `setRole` / `dispatchAndWait` / `selectSynced` |
-| `createSynquxRootReducer({ isSyncedAction, synced, locals })` | Serial rootReducer helper ("synced is pure, locals see earlier stages"). Auto-stamps a default success result on synced actions (ADR-0013). Spread the return value (`rootReducer` / `selectSynced` / `isSyncedAction`) into the `createSynqux` config |
+| `createSynquxRootReducer({ isSyncedAction, syncedKey, synced, locals })` | Serial rootReducer helper ("synced is pure, locals see earlier stages"). Takes the kit's `syncedKey` as-is plus a single synced reducer. Auto-stamps a default success result on synced actions (ADR-0013). Spread the return value (`rootReducer` / `selectSynced` / `isSyncedAction`) into the `createSynqux` config |
 | `localStorageSnapshotStore()` | Default browser persistence for standalone mode. Pass to `localSnapshots` to use or replace explicitly |
 | `synquxReducer` | Internal slice reducer mounted at the reserved key `state.synqux` (for the primitive wiring style) |
 | `synquxRestored` | Internal snapshot-restore action. Match it in a primitive-style rootReducer to swap in the full synced state (**never dispatch from a consumer**) |
@@ -467,7 +468,7 @@ Reducer helpers (game-developer layer; identical with or without sync):
 
 | export | description |
 | --- | --- |
-| `createSynquxKit<{ synced, root, message? }>({ selectSynced })` | Binds your domain types once (call once per app; `selectSynced` tells the kit where your synced state lives in the root) and returns typed helpers plus the creator registry: `createSyncedSlice` (a `createSlice` whose actions are all synced actions) and `createSyncedAction` (a `createAction` for standalone / cross-slice actions) — both stamp `hash` (ulid) / `dispatched` at creation time, type `meta` as required, and register the type (the only ways to define synced actions, ADR-0024 / ADR-0025) — plus the registry-derived `isSyncedAction`, pre-bound matchers, and result helpers |
+| `createSynquxKit<{ synced, root, message? }>({ syncedKey })` | Binds your domain types once (call once per app; `syncedKey` tells the kit — once, type-checked against your root — where the synced state mounts) and returns typed helpers plus the creator registry: `createSyncedSlice` (a `createSlice` whose actions are all synced actions) and `createSyncedAction` (a `createAction` for standalone / cross-slice actions) — both stamp `hash` (ulid) / `dispatched` at creation time, type `meta` as required, and register the type (the only ways to define synced actions, ADR-0024 / ADR-0025) — plus the registry-derived `isSyncedAction`, pre-bound matchers, and result helpers |
 | `generateActionHash()` | Issues a synced-action hash (ulid) directly (rarely needed; creators stamp automatically) |
 | `createSyncedActionMatchers({ isSyncedAction, selectSynced })` | Returns type guards (`isSucceededAction` / `isMySucceededAction`) for locals reducers to check "did the applied action succeed / was it my request". The kit returns these guards directly, fully pre-bound. Forbidden inside synced reducers |
 | `isDeliveredSyncedAction(action)` | Checks whether an action carries the complete request/response delivery metadata. Combine with the consumer's synced-domain matcher when needed |

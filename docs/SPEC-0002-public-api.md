@@ -169,14 +169,20 @@ export type LocalAction<P = void, TRoot = unknown, TMeta extends object = object
  *   実行時は type 文字列照合のみ (creator.match と同じ契約): meta の実在は
  *   metaSetter fallback の不変条件が保証し、union との整合は「登録 creator の
  *   action ⊆ union」という synced state 型宣言の既存義務に依存する
+ * - syncedKey: synced subtree の mount key (config の echo)。
+ *   createSynquxRootReducer の syncedKey へそのまま渡す
  * - isSucceededAction / isMySucceededAction: locals reducer 用の成功判定 matcher
- *   (registry の isSyncedAction と factory config の selectSynced で全束縛済み)。
+ *   (registry の isSyncedAction と syncedKey 由来の selectSynced で全束縛済み)。
  *   core の createSyncedActionMatchers は primitive 方式用に残る
  * - generateResult / stateWithResult / stateWithError / stateWithTransaction の束縛済み版
  */
 export const createSynquxKit: <T extends SynquxKitTypes>(config: {
-  /** root 内の synced の位置。synced key の命名は consumer の領域のため kit に一度だけ教える */
-  selectSynced: (root: T['root']) => T['synced']
+  /**
+   * root 内の synced state の mount key。key の命名は consumer の領域のため
+   * kit に一度だけ教える (供給点はここだけ)。型は T['root'][K] = T['synced'] を
+   * 満たす key に制限され、typo や別 slice の key はコンパイル時に落ちる
+   */
+  syncedKey: SyncedKeyOf<T>
 }) => { /* 上記の束縛済み群 */ }
 
 export type SynquxKitTypes = {
@@ -415,11 +421,16 @@ export function createSynquxRootReducer<
   /** synced reducer の前段で default success を stamp する対象 action */
   isSyncedAction: (action: Action) => action is TAction
   /**
-   * 仕様: 同期対象 slice はちょうど 1 つ (それ以外は throw)。複数ドメインを
-   * 同期したい consumer は 1 つの合成 reducer に畳み、result を top-level へ
-   * 写す (実例: demo/main.ts の demoReducer)。判断メモ 4 を参照
+   * synced subtree の mount key。kit (createSynquxKit) の syncedKey を
+   * そのまま渡す。'synqux' は予約 (内部 slice mount) のため throw
    */
-  synced: Record<TSyncedKey, Reducer<TSynced>>
+  syncedKey: TSyncedKey
+  /**
+   * 仕様: 同期対象 reducer は構造上ちょうど 1 つ。複数ドメインを同期したい
+   * consumer は 1 つの合成 reducer / slice に畳み、result を top-level へ写す
+   * (実例: demo/slice.ts)。判断メモ 4 を参照
+   */
+  synced: Reducer<TSynced>
   /** 宣言順に直列実行される端末ローカル slice 群 */
   locals: { [K in keyof TLocals]: Reducer<TLocals[K]> }
 }): {
@@ -826,7 +837,7 @@ type SnapshotEnvelope<TSynced> = {
 1. **selector を静的関数にできた**: `state.synqux` が予約 key のため instance なしで `selectIsHost` 等を提供できる。ゲーム開発者が instance に触れない Decision 7 の層分けがそのまま成立する
 2. **`selectLatestResult` は廃止** (レビュー決定): result は consumer 自身の synced state の所有物で直読みできるため、setup 層 re-export の迂回ごと削除。react の `useLatestResult` のみ提供 (その後 ADR-0022 で `useLatestResult` / `useMyLatestResult` / `SynquxProvider` も廃止し、typed selector 直読みへ一本化)
 3. **createSynquxRootReducer の返り値を config へ spread する形**で、ADR が山場と呼んだ「rootReducer × selectSynced × isSyncedAction × consumer State 型」の接続点を 1 箇所に畳んだ。primitive 方式は `synquxReducer` + `synquxRestored` の match + `stateWithDefaultResult` + 手書き rootReducer + 手動 `selectSynced` で成立する (契約の正式化は 2026-07-20、result stamp の追加は ADR-0013。上記「primitive 方式の正式契約」と公開 surface 回帰テスト `src/index.test.ts` を参照)
-4. **synced slice は 1 つに限定 — 仕様として確定 (2026-07-18)**。当初は「v1 暫定・複数対応は必要になってから」だったが、host の成否判定 (result の読み取り位置) と snapshot の単位が単一 subtree に固定されることが同期機構の単純さの源泉であり、複数エントリ対応は判定・復元の分割という複雑さだけを持ち込むため採らない。複数ドメインは consumer が合成 reducer で 1 slice に畳み、直近に実行した対象 reducer の result を top-level へ写す (実例: demo/main.ts の demoReducer)
+4. **synced slice は 1 つに限定 — 仕様として確定 (2026-07-18)**。当初は「v1 暫定・複数対応は必要になってから」だったが、host の成否判定 (result の読み取り位置) と snapshot の単位が単一 subtree に固定されることが同期機構の単純さの源泉であり、複数エントリ対応は判定・復元の分割という複雑さだけを持ち込むため採らない。複数ドメインは consumer が合成 reducer / 1 slice に畳み、result を top-level へ写す (実例: demo/slice.ts。当初は Record 1 エントリの runtime throw で守っていたが、kit への syncedKey 集約で `syncedKey + synced: Reducer` の構造保証になった)
 5. **`agent` / `guest` → `role: 'player' | 'dedicated' | 'observer'` へ改名** (レビュー決定): 排他 enum にすることで「agent かつ guest」という不正状態を型で排除。dedicated は「常駐プロセスを強制 host にして安定進行・無人進行を担う」ユースケース由来 (dedicated server 文化)。process id は `label` へ分離
    - その後 `observer` → `guest` へ再改名した (TASK-260811 / ADR-0014)。observer は readonly を暗示する一方、role の実際の作用は host 適格性だけであり、request 発行を制限しないため
 6. **`canRequest` hook を追加** (移植元の readonly 端末対応の一般化)。これがないとテンプレ置換 (Phase 2) が成立しないため

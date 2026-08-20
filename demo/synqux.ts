@@ -27,12 +27,13 @@ export type DemoState = SynquxSynced<DemoAction> & {
 
 export type DemoRootState = { synqux: SynquxState; demo: DemoState }
 
-export const { createSyncedSlice, isSyncedAction, stateWithError } =
+export const { createSyncedSlice, isSyncedAction, stateWithError, syncedKey } =
   createSynquxKit<{
     synced: DemoState
     root: DemoRootState
   }>({
-    // Where the synced state lives in the root (naming the key is the
-    // consumer's choice; tell the kit once so matchers come pre-bound).
-    selectSynced: (root) => root.demo,
+    // Where the synced state mounts in the root (naming the key is the
+    // consumer's choice; tell the kit once — matchers come pre-bound and the
+    // store wiring takes the kit's syncedKey as-is).
+    syncedKey: 'demo',
   })

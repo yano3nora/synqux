@@ -24,3 +24,14 @@
 - [x] ADR-0025 Amendment・SPEC-0002・README
 - [x] `npm run fix` / `npm test` (392 tests 全 green)
 - [x] Codex レビュー → Approve (docs 2 箇所の追従指摘のみ、修正済み)
+
+## 追記: syncedKey への進化 (同日)
+
+selectSynced 集約後も rootReducer の `synced: { game: reducer }` record key と
+「game の指定」が重複する指摘 (ユーザ) を受け、key リテラル集約へ倒した:
+
+- kit config は `{ syncedKey: 'game' }` (型は `SyncedKeyOf<T>` で root と整合検証)。
+  kit が selectSynced を導出し、syncedKey を echo する
+- `createSynquxRootReducer({ syncedKey, synced: reducer })` — synced は素の
+  Reducer 1 つになり、「slice はちょうど 1 つ」が構造保証に (runtime throw 廃止。
+  代わりに syncedKey 'synqux' の予約 guard を追加)

@@ -34,8 +34,16 @@ export const createSynquxRootReducer = <
 >(config: {
   /** default result を付与する synced domain action の判定述語 */
   isSyncedAction: (action: Action) => action is TAction
-  /** 同期対象 slice。v1 は 1 エントリのみサポートする (移植元同様) */
-  synced: Record<TSyncedKey, Reducer<TSynced>>
+  /**
+   * synced subtree を mount する root 内の key。kit (createSynquxKit) の
+   * syncedKey をそのまま渡す — 「synced の位置」の供給点は kit の 1 箇所
+   */
+  syncedKey: TSyncedKey
+  /**
+   * 同期対象 reducer。構造上 1 つのみ (仕様。複数ドメインは合成して 1 reducer /
+   * 1 slice に畳み、result を top-level へ写す)
+   */
+  synced: Reducer<TSynced>
   /** 端末ローカル slice 群。ここに書いた順で直列実行される */
   locals: { [K in keyof TLocals]: Reducer<TLocals[K]> }
 }): {
@@ -43,18 +51,14 @@ export const createSynquxRootReducer = <
   selectSynced: (root: SynquxRootState<TSyncedKey, TSynced, TLocals>) => TSynced
   isSyncedAction: (action: Action) => action is TAction
 } => {
-  const syncedEntries = Object.entries(config.synced) as [
-    TSyncedKey,
-    Reducer<TSynced>,
-  ][]
-
-  if (syncedEntries.length !== 1) {
+  // 予約 key state.synqux との衝突を配線時に fail-fast で防ぐ
+  if ((config.syncedKey as string) === 'synqux') {
     throw new Error(
-      `createSynquxRootReducer supports exactly one synced slice (got ${String(syncedEntries.length)})`,
+      'createSynquxRootReducer: "synqux" is a reserved root key (internal slice mount)',
     )
   }
 
-  const [syncedKey, syncedReducer] = syncedEntries[0]!
+  const { syncedKey, synced: syncedReducer } = config
   const localEntries = Object.entries(config.locals) as [
     keyof TLocals & string,
     Reducer<TLocals[keyof TLocals]>,

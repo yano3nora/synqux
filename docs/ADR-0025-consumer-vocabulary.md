@@ -122,19 +122,24 @@ registry 非登録 + meta 非 stamp になる」罠が残っていた。RTK の�
    同じ union)** へ変更。stateWith* は synced reducer 内 (meta.root が存在しない文脈)
    で呼ぶ helper であり、root 型を含める理由がなかった (述語の narrow と同じ整理)
 
-## Amendment (2026-08-21): kit への selectSynced 集約
+## Amendment (2026-08-21): kit への syncedKey 集約 (synced の位置の単一供給点)
 
-導入 consumer の追従作業で「synced の位置 (root.game 等)」を matchers 生成時にも
-供給させられている残債が確認された (registry 化で二重供給を潰した後の最後の 1 箇所)。
+導入 consumer の追従作業で「synced の位置 (root.game 等)」の供給が matchers 生成と
+rootReducer の record key の 2 箇所に残っている残債が確認された (registry 化で
+二重供給を潰した後の最後の 1 箇所)。まず selectSynced を kit factory に集約したが、
+それでも rootReducer の `synced: { game: reducer }` の record key と重複するため、
+**key リテラルの集約**まで倒した:
 
-1. **`createSynquxKit<T>({ selectSynced })` として factory が selectSynced を受ける**。
+1. **`createSynquxKit<T>({ syncedKey })` として factory が mount key を受ける**。
    synced key の命名は consumer の領域 (synqux が予約するのは `state.synqux` のみ) の
-   ため「どこにあるかを教える責任」自体は consumer に残るが、供給点を kit の 1 箇所に
-   畳む
-2. **kit は matchers (isSucceededAction / isMySucceededAction) を束縛済みで直接返す**。
-   kit 版 `createSyncedActionMatchers` factory は廃止 (core 版は primitive 方式用に
-   従来どおり)
-3. `createSynquxRootReducer` の synced record key は state 構成 (shape) の宣言で、
-   kit の selectSynced は読み取り位置の宣言 — 役割が異なるため統合しない。kit は
-   instance 非依存 (循環 import 回避) の構造上、store 側配線から selector を
-   受け取る経路は取れない
+   ため「どこにあるかを教える責任」自体は consumer に残るが、供給点は kit の 1 箇所。
+   型は `SyncedKeyOf<T>` (T['root'][K] extends T['synced'] を満たす K) に制限され、
+   typo や別 slice の key はコンパイル時に落ちる。kit は文字列を持つだけなので
+   instance 非依存 (循環 import 回避) は維持される
+2. **kit は syncedKey を echo し、`createSynquxRootReducer({ syncedKey, synced: reducer })`
+   がそれを受ける**。synced は Record ではなく素の Reducer 1 つになり、「synced slice は
+   ちょうど 1 つ」(SPEC-0002 判断メモ 4) が runtime throw から API 形状の構造保証に
+   変わった。syncedKey 'synqux' (予約 mount) は配線時に throw
+3. **kit は matchers (isSucceededAction / isMySucceededAction) を束縛済みで直接返す**
+   (selectSynced は syncedKey から導出)。kit 版 `createSyncedActionMatchers` factory は
+   廃止 (core 版は primitive 方式用に従来どおり)
