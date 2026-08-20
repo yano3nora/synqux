@@ -140,20 +140,39 @@ export type LocalAction<P = void, TRoot = unknown, TMeta extends object = object
   PayloadAction<P> & { meta?: { root?: TRoot } & TMeta }
 
 /**
- * RTK createAction の主要 2 overload (payload / prepare) 互換の synced 版。
- * 生成時に hash / dispatched を stamp し、戻り型に meta: SyncedActionMeta が乗る。
- * ⚠️ 同一 action オブジェクトの再 dispatch は禁止 (機構は重複排除しない)
+ * consumer の domain 型を一度だけ束縛して型付き語彙を配布する kit factory
+ * (ADR-0025 Amendment)。**1 app 1 回だけ呼ぶ** — kit は creator registry を持ち、
+ * 呼ぶたび独立した registry になるため、creator と isSyncedAction は必ず同じ
+ * kit の戻りから取る。
+ *
+ * - createSyncedSlice: RTK createSlice の synced 版 (`{ name, initialState,
+ *   reducers, extraReducers? }` のサブセット互換)。**slice が定義する (= reducers
+ *   ブロックの) case は全て synced action になる** — 合成 prepare が生成時 stamp を
+ *   行い `${name}/${key}` を registry へ登録する。plain case reducer と
+ *   { prepare, reducer } の 2 記法のみ (RTK 2.x callback creators は非対応)。
+ *   extraReducers は RTK 本来の「他所で定義された action への追従」で保証の対象外
+ *   (synced かどうかは追従先 creator の定義が決める。synced state を変える case を
+ *   synced action にだけ書くのは synced reducer 全般の doc 契約)。
+ *   name 'synqux' (と 'synqux/' 配下) は予約のため throw
+ * - createSyncedAction: RTK createAction の主要 2 overload (payload / prepare)
+ *   互換の synced 版 (slice 外・横断 action 用)。生成時に hash / dispatched を
+ *   stamp し、戻り型に meta: SyncedActionMeta が乗り、type を registry へ登録する
+ *   (定義 = 同期対象の宣言)。synced action の定義経路は createSyncedSlice と
+ *   これのみ (standalone export はない)。
+ *   ⚠️ 同一 action オブジェクトの再 dispatch は禁止 (機構は重複排除しない)
+ *   `synqux/` 予約 prefix の type は定義時に throw で拒否する (内部 action の
+ *   registry 汚染防止)
+ * - isSyncedAction: registry 由来の判定述語。createSynquxRootReducer /
+ *   createSynqux の config へそのまま渡す。登録は creator 定義モジュールの
+ *   import 副作用なので creator の lazy import は禁止 (配達 action の判定漏れ)。
+ *   narrow 先は T['synced'] の Result 束縛から推論した domain action union。
+ *   実行時は type 文字列照合のみ (creator.match と同じ契約): meta の実在は
+ *   metaSetter fallback の不変条件が保証し、union との整合は「登録 creator の
+ *   action ⊆ union」という synced state 型宣言の既存義務に依存する
+ * - createSyncedActionMatchers: isSyncedAction 束縛済み ({ selectSynced } だけ受ける)
+ * - generateResult / stateWithResult / stateWithError / stateWithTransaction の束縛済み版
  */
-export const createSyncedAction: CreateSyncedAction
-
-/**
- * consumer の domain 型を一度だけ束縛して型付き語彙を配布する kit。
- * createSyncedAction / createSyncedActionMatchers / generateResult /
- * stateWithResult / stateWithError / stateWithTransaction の束縛済み版を返す
- */
-export const synquxKit: {
-  withTypes<T extends SynquxKitTypes>(): { /* 上記の束縛済み群 */ }
-}
+export const createSynquxKit: <T extends SynquxKitTypes>() => { /* 上記の束縛済み群 */ }
 
 export type SynquxKitTypes = {
   synced: SynquxSynced<any, any>
@@ -297,7 +316,7 @@ export type SynquxListener<TSynced, TAction extends Action> =
         }
     )
 
-export type SynquxSubscribeOptions<TRoot> = {
+export type SynquxSubscribeOptions<TRoot, TSynced = never> = {
   store: { dispatch: Dispatch; getState: () => TRoot }
   groupId: string
   role?: Peer['role']
@@ -306,11 +325,22 @@ export type SynquxSubscribeOptions<TRoot> = {
   mode?: 'synced' | 'standalone'
   /** この standalone session に限り永続化を無効化 */
   localSnapshots?: false
+  /**
+   * standalone session の初期 synced state (tutorial 等の使い捨て session 用)。
+   * restore 経路で synced subtree を全量差し替える (result は除去)。
+   * standalone 限定 — synced session の正史は transport snapshot のため
+   * mode 'synced' との併用は subscribe を reject する。指定時は localSnapshots を
+   * load しない (明示 > 永続 =「seed 起点の新規セーブ開始」の意味論)。
+   * seed は session-scoped: unsubscribe (teardown) で synced subtree は reducer の
+   * 初期 state へ戻る (残すと snapshot 欠損の synced 復帰で seed が正史へ暗黙
+   * マージされるため。ordering も session 開始時に新規化される)
+   */
+  seedSynced?: TSynced
   /** 初期化の中断。低レベル API では省略時に無期限待機 */
   signal?: AbortSignal
 }
 
-export type Synqux<TRoot, TSynced, TAction> = {
+export type Synqux<TRoot, TAction = Action, TSynced = never> = {
   /**
    * store 構築時に prepend する middleware 群 (順序保証のため配列で提供)
    * [meta setter (hash/dispatched), actionRequest, requestListener, responseListener]
@@ -329,7 +359,7 @@ export type Synqux<TRoot, TSynced, TAction> = {
    * 返り値で購読破棄 + presence 解除。初期化中・購読中・teardown 中の再 subscribe は throw
    * (teardown 中は unsubscribe の完了を await してから再試行する)
    */
-  subscribe: (options: SynquxSubscribeOptions<TRoot>) => Promise<() => Promise<void>>
+  subscribe: (options: SynquxSubscribeOptions<TRoot, TSynced>) => Promise<() => Promise<void>>
 
   /**
    * 現在の session を破棄する。未 subscribe は no-op、初期化中は throw
@@ -355,7 +385,7 @@ export type Synqux<TRoot, TSynced, TAction> = {
 
 export function createSynqux<TRoot, TSynced, TAction>(
   config: CreateSynquxConfig<TRoot, TSynced, TAction>,
-): Synqux<TRoot, TSynced, TAction>
+): Synqux<TRoot, TAction, TSynced>
 
 // ============================================================
 // createSynquxRootReducer (Decision 8)
@@ -560,9 +590,12 @@ export type SynquxState = {
 // selectors を consumer の typed useAppSelector へ渡す (`useAppSelector(selectIsHost)`)。
 // result は typed selector で直読みする (上記 NOTE)
 /** react consumer の購読開始の canonical な入口。groupId 未確定時は開始しない */
-export function useSynquxSubscription<TRoot extends { synqux: SynquxState }>(
-  synqux: Pick<Synqux<TRoot>, 'subscribe'>,
-  options: Omit<SynquxSubscribeOptions<TRoot>, 'store' | 'groupId'> & {
+export function useSynquxSubscription<
+  TRoot extends { synqux: SynquxState },
+  TSynced = never,
+>(
+  synqux: Pick<Synqux<TRoot, never, TSynced>, 'subscribe'>,
+  options: Omit<SynquxSubscribeOptions<TRoot, TSynced>, 'store' | 'groupId'> & {
     groupId?: string
   },
 ): SynquxPhase
@@ -764,7 +797,7 @@ type SnapshotEnvelope<TSynced> = {
 
 | subpath | 主な export | 対象 |
 | --- | --- | --- |
-| `synqux` | `createSynqux` / `createSynquxRootReducer` / `synquxReducer` / `synquxRestored` / reducer helpers / `createSyncedAction` / `generateActionHash` / `synquxKit` (withTypes、ADR-0025) / `createSyncedActionMatchers` / `isDeliveredSyncedAction` / `isSynquxAction` / `isResultForPeer` / peer・phase・health selectors / `localStorageSnapshotStore` / 契約型 (`SyncedActionMeta` / `SyncedAction` / `LocalAction` / `SyncedActionHash` 含む) | セットアップ層 + reducer ヘルパー + consumer 型語彙 |
+| `synqux` | `createSynqux` / `createSynquxRootReducer` / `synquxReducer` / `synquxRestored` / reducer helpers / `generateActionHash` / `createSynquxKit` (creator registry を持つ kit factory。`createSyncedAction` はこの戻りからのみ提供、ADR-0025) / `createSyncedActionMatchers` / `isDeliveredSyncedAction` / `isSynquxAction` / `isResultForPeer` / peer・phase・health selectors / `localStorageSnapshotStore` / 契約型 (`SyncedActionMeta` / `SyncedAction` / `LocalAction` / `SyncedActionHash` 含む) | セットアップ層 + reducer ヘルパー + consumer 型語彙 |
 | `synqux/react` | `useSynquxSubscription` のみ (読み取りは core selectors を typed useAppSelector へ。ADR-0022 / ADR-0023) | ゲーム開発者層 |
 | `synqux/testing` | `createMemoryHub` / `verifyActionIdempotency` / `assertActionIdempotency` / `createTestRootState` | consumer CI / 本 repo の simulation test |
 | `synqux/firebase` | `firebaseTransport(db, options?: { archivePrunedRequests?: boolean })` | Phase 2 で実装 |

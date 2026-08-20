@@ -26,9 +26,12 @@ type WithSynqux = { synqux: SynquxState }
  * phaseChanged('subscribing') は同期 dispatch のため、同一 commit 内でも安全)。
  * 失敗遷移は createSynqux の onSubscribeFailed で設定する
  */
-export const useSynquxSubscription = <TRoot extends { synqux: SynquxState }>(
-  sync: Pick<Synqux<TRoot>, 'subscribe'>,
-  options: Omit<SynquxSubscribeOptions<TRoot>, 'store' | 'groupId'> & {
+export const useSynquxSubscription = <
+  TRoot extends { synqux: SynquxState },
+  TSynced = never,
+>(
+  sync: Pick<Synqux<TRoot, never, TSynced>, 'subscribe'>,
+  options: Omit<SynquxSubscribeOptions<TRoot, TSynced>, 'store' | 'groupId'> & {
     /** 未確定 (undefined) の間は購読を開始しない */
     groupId?: string
   },

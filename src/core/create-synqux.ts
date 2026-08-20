@@ -461,7 +461,7 @@ export type SynquxListener<
       }
   )
 
-export type SynquxSubscribeOptions<TRoot> = {
+export type SynquxSubscribeOptions<TRoot, TSynced = never> = {
   store: {
     dispatch: Dispatch
     getState: () => TRoot
@@ -477,6 +477,18 @@ export type SynquxSubscribeOptions<TRoot> = {
   localSnapshots?: false
 
   /**
+   * standalone session の初期 synced state (tutorial 等の使い捨て session 用)。
+   * restore 経路 (synquxRestored) で synced subtree を全量差し替える。
+   *
+   * - **standalone 限定**: synced session の正史は transport snapshot のため、
+   *   mode 'synced' との併用は subscribe を reject する
+   * - 指定時は localSnapshots の load を行わない (明示 > 永続)。localSnapshots
+   *   有効と併用した場合は「seed を起点にした新規セーブの開始」になる
+   * - result は restore と同じく除去される
+   */
+  seedSynced?: TSynced
+
+  /**
    * subscribe 完了までの初期化 (接続確立・restore) の中断 (ADR-0012)。
    * 省略時は無期限に待つ — offline 起動は transport の自動再接続でそのまま
    * 復帰できるため、打ち切るかどうか・何秒待つかは consumer の UX 判断とする
@@ -489,6 +501,7 @@ export type SynquxSubscribeOptions<TRoot> = {
 export type Synqux<
   TRoot extends { synqux: SynquxState },
   TAction extends Action = Action,
+  TSynced = never,
 > = {
   /**
    * store 構築時に prepend する middleware 群
@@ -516,7 +529,7 @@ export type Synqux<
    * instance に残るため desync する)。group を跨ぐときは instance を作り直すこと
    */
   subscribe: (
-    options: SynquxSubscribeOptions<TRoot>,
+    options: SynquxSubscribeOptions<TRoot, TSynced>,
   ) => Promise<() => Promise<void>>
 
   /**
@@ -549,7 +562,7 @@ export const createSynqux = <
   TAction extends Action,
 >(
   config: CreateSynquxConfig<TRoot, TSynced, TAction>,
-): Synqux<TRoot, TAction> => {
+): Synqux<TRoot, TAction, TSynced> => {
   const { transport } = config
   const instanceMode = config.mode ?? 'synced'
   const canRequest = config.canRequest ?? (() => true)
@@ -1815,12 +1828,19 @@ export const createSynqux = <
       signal,
       mode: sessionMode = instanceMode,
       localSnapshots: sessionLocalSnapshotsOption,
-    }: SynquxSubscribeOptions<TRoot>,
+      seedSynced,
+    }: SynquxSubscribeOptions<TRoot, TSynced>,
     cleanups: SubscribeCleanup[],
   ): Promise<() => Promise<void>> => {
     if (store.getState().synqux === undefined) {
       throw new Error(
         'state.synqux is not mounted. Wire sync.reducer (or createSynquxRootReducer) into your root reducer.',
+      )
+    }
+
+    if (seedSynced !== undefined && sessionMode !== 'standalone') {
+      throw new Error(
+        "seedSynced is standalone-only: a synced session restores from the transport snapshot (the shared truth), so a per-device seed would fork it. Subscribe with mode: 'standalone' to use seedSynced.",
       )
     }
 
@@ -2092,16 +2112,45 @@ export const createSynqux = <
         store.dispatch(synquxActions.sessionEnded())
       })
 
-      const payload =
-        await subscriptionSession.localSnapshots?.loadSnapshot(groupId)
-      signal?.throwIfAborted()
-
-      if (payload) {
-        const envelope = parseSnapshotPayload(payload)
-        ordering.restore(envelope.ordering)
+      if (seedSynced !== undefined) {
+        // seed は「新規 session の初期 state」なので localSnapshots は load せず
+        // (明示 > 永続)、ordering も新規 session として初期化する — 前 session の
+        // 値を引き継ぐと、seed 起点の snapshot に古い ordering が焼かれるほか、
+        // synced 復帰時の backlog replay が added guard で破棄されたり
+        // 発行高水位の残留で host 裁定が詰まる (reset の doc 参照)。
+        // 差し替え自体は通常の restore 経路 (result 除去含む) に合流する
+        ordering.reset()
         store.dispatch(
-          synquxRestored({ synced: clearRestoredResult(envelope.synced) }),
+          synquxRestored({ synced: clearRestoredResult(seedSynced) }),
         )
+
+        // seed は session-scoped: teardown で synced subtree を reducer の初期
+        // state へ戻す。残すと snapshot 欠損の synced 復帰で seed が正史へ暗黙
+        // マージされる (local 分岐のマージは線形化モデルと非互換、ADR-0018)。
+        // 初期化済みなら「initial + backlog replay」が正史の再構築になる。
+        // probe の type は予約 namespace (synqux/) 配下 — kit が同 prefix の
+        // 定義を throw で拒否するため、consumer の case reducer と衝突しない
+        cleanups.push(() => {
+          store.dispatch(
+            synquxRestored({
+              synced: config.selectSynced(
+                config.rootReducer(undefined, { type: 'synqux/seedProbe' }),
+              ),
+            }),
+          )
+        })
+      } else {
+        const payload =
+          await subscriptionSession.localSnapshots?.loadSnapshot(groupId)
+        signal?.throwIfAborted()
+
+        if (payload) {
+          const envelope = parseSnapshotPayload(payload)
+          ordering.restore(envelope.ordering)
+          store.dispatch(
+            synquxRestored({ synced: clearRestoredResult(envelope.synced) }),
+          )
+        }
       }
 
       startAutomationEngine(subscriptionSession)
@@ -2571,7 +2620,7 @@ export const createSynqux = <
   }
 
   const subscribe = async (
-    options: SynquxSubscribeOptions<TRoot>,
+    options: SynquxSubscribeOptions<TRoot, TSynced>,
   ): Promise<() => Promise<void>> => {
     if (teardownInFlight) {
       throw new Error(

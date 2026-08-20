@@ -34,6 +34,16 @@ export type Ordering = {
    */
   restore(state: OrderingState): void
 
+  /**
+   * 新規 session の起点として順序状態を初期化する (subscribe の seedSynced 用)。
+   * restore が同一購読中の snapshot 回復用に維持する transient 群
+   * (seenAddedIds / maxIssuedSeq / myEpoch / processing) も含めて初期値へ戻す —
+   * 引き継ぐと synced 復帰時の backlog replay が added guard で破棄されたり、
+   * 発行高水位の残留 (hasPendingIssue) で host 裁定が詰まる。
+   * maxSeenEpoch だけは維持する (fencing を後退させない)
+   */
+  reset(): void
+
   /** snapshot 封筒へ永続化する状態 */
   state(): OrderingState
 
@@ -151,6 +161,16 @@ export const createOrdering = (): Ordering => {
         appliedWindow.set(Number(seq), id)
         appliedIds.add(id)
       }
+    },
+
+    reset() {
+      appliedSeq = 0
+      myEpoch = null
+      maxIssuedSeq = 0
+      appliedWindow.clear()
+      appliedIds.clear()
+      seenAddedIds.clear()
+      processing.clear()
     },
 
     state() {

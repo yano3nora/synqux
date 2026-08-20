@@ -30,3 +30,34 @@
 - 切替の遷移中、phase は live → idle → subscribing → live と遷移する。この窓で synced action を dispatch しないことは consumer (tutorial 開始 thunk) の責務。in-flight の `dispatchAndWait` は unsubscribe で reject される (既存挙動)。
 - `setEnabled` / `config.enabled` / `SynquxState.enabled` の削除は pre-1.0 の breaking change (0.9.0)。既知の利用は導入 consumer 1 repo の未リリース listener 1 行のみ。
 - standalone session の `connections` は空 (selfId null) になる。peers 表示系 UI は standalone 構成と同じ見え方になる。
+
+## Amendment (2026-08-21): standalone subscribe の seedSynced (初期 synced state 注入)
+
+実装は `TASK-260821-seed-synced.md`。
+
+導入 consumer の tutorial 実装は、Decision 3 の「standalone session への作り直し」までは
+本 ADR 通りに移行できたが、**新 session の初期 state を注入する公式経路がなかった**ため、
+synced slice の `reducers` ブロックに非同期 action (`game/_` prefix の system action) を
+残して standalone live 後に dispatch していた。この抜け穴は「synced reducer が case で
+扱う action は全部 synced action」という認知モデルを歪める。実体は game action ではなく
+**session bootstrap = restore の亜種** (synced subtree の全量差し替え) である。
+
+1. `SynquxSubscribeOptions` に `seedSynced?: TSynced` を追加する。standalone 分岐で
+   既存の restore 経路 (`synquxRestored` + result 除去) に合流し、新しい不変条件を
+   作らない。ordering は「snapshot なし」と同じく新規に始める
+2. **standalone 限定**。synced session の正史は transport snapshot のため、mode
+   'synced' との併用は subscribe を throw で reject する。「tutorial state が裁定
+   経路・snapshot 正史に乗ること自体が構造的に不可能」を維持する (synced action 化
+   + 呼び出し規律で守る代替案は、synced reducer が session mode を読めない (決定性)
+   ため reducer 側で防御できず棄却)
+3. 優先順位: seedSynced 指定時は localSnapshots を load しない (明示 > 永続)。
+   localSnapshots 有効との併用は「seed 起点の新規セーブ開始」の意味論になる
+4. **seed は session-scoped**。session 開始時に ordering を新規化し (restore が維持
+   する transient 群も含む。`Ordering.reset` の doc 参照)、teardown で synced
+   subtree を reducer の初期 state へ戻す。どちらか一方だけだと snapshot 欠損の
+   synced 復帰で「seed state + backlog replay」の暗黙マージ (Decision 4 の
+   マージ非互換に抵触) か「added guard 残留による replay 破棄」が起きる。
+   両方を対にすることで、その縮退でも「initial + backlog replay = 正史」が成立する
+5. tutorial の推奨形は `unsubscribe()` → `subscribe({ mode: 'standalone',
+   localSnapshots: false, seedSynced: buildTutorialState() })`。tutorial 状態は
+   action ではなく pure な builder 関数で表現する

@@ -83,7 +83,7 @@ export type LocalAction<
 }
 
 /** prepare が返した meta から synqux の予約 field を除いた consumer 拡張部分 */
-type PreparedMetaOf<PA extends PrepareAction<any>> =
+export type PreparedMetaOf<PA extends PrepareAction<any>> =
   ReturnType<PA> extends { meta: infer M }
     ? M extends object
       ? Omit<M, keyof SynquxActionMeta>

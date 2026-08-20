@@ -1,4 +1,4 @@
-import { configureStore, type Action, type Reducer } from '@reduxjs/toolkit'
+import { configureStore } from '@reduxjs/toolkit'
 import { initializeApp } from 'firebase/app'
 import { connectDatabaseEmulator, getDatabase } from 'firebase/database'
 import {
@@ -7,26 +7,12 @@ import {
   selectIsHost,
   selectPeers,
   selectSelfId,
-  stateWithDefaultResult,
   type PeerRole,
-  type SynquxSynced,
 } from 'synqux'
 import { firebaseTransport } from 'synqux/firebase'
-import {
-  counterInitialState,
-  counterReducer,
-  isCounterAction,
-  type CounterAction,
-  type CounterState,
-} from './counter'
-import {
-  isLedgerAction,
-  ledgerInitialState,
-  ledgerReducer,
-  type LedgerAction,
-  type LedgerState,
-} from './ledger'
 import { createRig } from './rig'
+import { add, append, demoSlice, set, setLocked } from './slice'
+import { isSyncedAction, type DemoAction } from './synqux'
 
 /**
  * synqux demo: sync a counter across devices with the Firebase emulator
@@ -55,50 +41,14 @@ const role: PeerRole | undefined =
     : undefined
 const stormTotal = Number(params.get('storm'))
 
-type DemoAction = CounterAction | LedgerAction
-type DemoState = SynquxSynced<DemoAction> & {
-  counter: CounterState
-  ledger: LedgerState
-}
-
-const demoInitialState: DemoState = {
-  result: null,
-  counter: counterInitialState,
-  ledger: ledgerInitialState,
-}
-
-/**
- * Combined reducer for createSynquxRootReducer v1's one-synced-slice limit.
- * Copies the target result to the top level, keeping the host decision in one place.
- */
-const demoReducer: Reducer<DemoState> = (state = demoInitialState, action) => {
-  if (isCounterAction(action)) {
-    const counter = counterReducer(
-      stateWithDefaultResult(state.counter, action),
-      action,
-    )
-    return { ...state, result: counter.result, counter }
-  }
-
-  if (isLedgerAction(action)) {
-    const ledger = ledgerReducer(
-      stateWithDefaultResult(state.ledger, action),
-      action,
-    )
-    return { ...state, result: ledger.result, ledger }
-  }
-
-  return state
-}
-
-const isSyncedAction = (action: Action): action is DemoAction =>
-  isCounterAction(action) || isLedgerAction(action)
-
+// createSynquxRootReducer accepts exactly one synced slice — createSyncedSlice
+// covers a demo-sized app in one slice (see demo/slice.ts). Apps with many
+// domains compose sub-reducers into one slice instead (README NOTE).
 const synqux = createSynqux({
   transport: firebaseTransport(db, { archivePrunedRequests: true }),
   ...createSynquxRootReducer({
     isSyncedAction,
-    synced: { demo: demoReducer },
+    synced: { demo: demoSlice.reducer },
     locals: {},
   }),
 })
@@ -143,20 +93,16 @@ const startStorm = (total: number): void => {
         await sleep(25 + Math.random() * 125)
 
         if (Math.random() < 0.1) {
-          store.dispatch({
-            type: 'ledger/setLocked',
-            payload: nextLock,
-          })
+          store.dispatch(setLocked(nextLock))
           nextLock = !nextLock
         } else {
           appendSequence += 1
-          store.dispatch({
-            type: 'ledger/append',
-            payload: {
+          store.dispatch(
+            append({
               by: selectSelfId(store.getState()) ?? 'anon',
               n: appendSequence,
-            },
-          })
+            }),
+          )
         }
 
         stormSent += 1
@@ -174,7 +120,7 @@ el('role').textContent = role ?? 'player'
 const render = (): void => {
   const state = store.getState()
 
-  el('count').textContent = String(state.demo.counter.count)
+  el('count').textContent = String(state.demo.count)
   el('ledger-count').textContent = String(state.demo.ledger.count)
   el('ledger-hash').textContent = state.demo.ledger.hash.slice(0, 8)
   el('ledger-locked').textContent = String(state.demo.ledger.locked)
@@ -193,31 +139,24 @@ const render = (): void => {
 
   // Read the decision result directly from synced state (the SPEC-public-api pattern).
   // Messages are for UI display (ADR-0008). Do not show log-only results here.
+  // A single slice = a single result: counter and ledger rejections both land here.
   const result = state.demo.result
   el('result').textContent = result?.message
     ? `${result.type}: ${result.message.text}`
-    : ''
-
-  const ledgerResult = state.demo.ledger.result
-  el('ledger-result').textContent = ledgerResult?.message
-    ? `${ledgerResult.type}: ${ledgerResult.message.text}`
     : ''
 }
 
 store.subscribe(render)
 render()
 
-el('add1').onclick = () => store.dispatch({ type: 'counter/add', payload: 1 })
-el('add10').onclick = () => store.dispatch({ type: 'counter/add', payload: 10 })
-el('sub1').onclick = () => store.dispatch({ type: 'counter/add', payload: -1 })
-el('reset').onclick = () => store.dispatch({ type: 'counter/set', payload: 0 })
+el('add1').onclick = () => store.dispatch(add(1))
+el('add10').onclick = () => store.dispatch(add(10))
+el('sub1').onclick = () => store.dispatch(add(-1))
+el('reset').onclick = () => store.dispatch(set(0))
 el('storm50').onclick = () => startStorm(50)
 el('storm200').onclick = () => startStorm(200)
 el('lock-toggle').onclick = () =>
-  store.dispatch({
-    type: 'ledger/setLocked',
-    payload: !store.getState().demo.ledger.locked,
-  })
+  store.dispatch(setLocked(!store.getState().demo.ledger.locked))
 
 const setRole = async (nextRole: PeerRole): Promise<void> => {
   try {

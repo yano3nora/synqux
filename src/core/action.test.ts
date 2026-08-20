@@ -1,3 +1,4 @@
+import type { Action } from '@reduxjs/toolkit'
 import { describe, expect, expectTypeOf, it } from 'vitest'
 import {
   createSyncedAction,
@@ -5,7 +6,8 @@ import {
   type SyncedAction,
   type SyncedActionMeta,
 } from './action.js'
-import { synquxKit } from './kit.js'
+import { createSynquxKit } from './kit.js'
+import { createSynquxRootReducer } from './root-reducer.js'
 import type { SynquxState } from './slice.js'
 import type { Result, SynquxSynced } from './types.js'
 
@@ -112,12 +114,12 @@ describe('createSyncedAction', () => {
   })
 })
 
-describe('synquxKit.withTypes', () => {
+describe('createSynquxKit', () => {
   type GameMessage = { text: string; duration?: number | null }
   type GameState = SynquxSynced<SyncedAction, GameMessage> & { count: number }
   type RootState = { synqux: SynquxState; game: GameState }
 
-  const kit = synquxKit.withTypes<{
+  const kit = createSynquxKit<{
     synced: GameState
     root: RootState
     message: GameMessage
@@ -145,5 +147,91 @@ describe('synquxKit.withTypes', () => {
 
     expectTypeOf(result).toMatchTypeOf<Result>()
     expect(result.message?.duration).toBe(2500)
+  })
+
+  it('createSyncedAction が type を registry へ登録し isSyncedAction が判定する', () => {
+    const own = createSynquxKit<{ synced: GameState; root: RootState }>()
+    const increment = own.createSyncedAction<number>('game/increment')
+
+    expect(own.isSyncedAction(increment(1))).toBe(true)
+    // 配達 action は封筒から再構築されるため、type 文字列だけでも判定できること
+    expect(own.isSyncedAction({ type: 'game/increment' })).toBe(true)
+    expect(own.isSyncedAction({ type: 'game/unregistered' })).toBe(false)
+    expect(own.isSyncedAction({ type: 'synqux/restored' })).toBe(false)
+  })
+
+  it('synqux/ 予約 prefix の type は定義時に throw する (内部 action の registry 汚染防止)', () => {
+    const own = createSynquxKit<{ synced: GameState; root: RootState }>()
+
+    expect(() => own.createSyncedAction('synqux/restored')).toThrow(
+      /reserved "synqux\/" prefix/,
+    )
+    expect(own.isSyncedAction({ type: 'synqux/restored' })).toBe(false)
+  })
+
+  it('isSyncedAction は synced state から推論した domain action union へ narrow する', () => {
+    type CountAction = Action<'game/increment'> & {
+      payload: number
+      meta: SyncedActionMeta
+    }
+    type CountState = SynquxSynced<CountAction> & { count: number }
+    const own = createSynquxKit<{
+      synced: CountState
+      root: { synqux: SynquxState; game: CountState }
+    }>()
+    const increment = own.createSyncedAction<number>('game/increment')
+
+    // narrow の正しさは「登録 creator の action ⊆ union」の宣言整合に依存する
+    // (手書き predicate と同じ契約)。ここでは整合した creator で branch を実走させる
+    const action: Action = increment(1)
+    expect(own.isSyncedAction(action)).toBe(true)
+    if (own.isSyncedAction(action)) {
+      expectTypeOf(action).toEqualTypeOf<CountAction>()
+    }
+  })
+
+  it('registry は kit ごとに独立する (creator と述語は同じ kit から取る契約)', () => {
+    const kitA = createSynquxKit<{ synced: GameState; root: RootState }>()
+    const kitB = createSynquxKit<{ synced: GameState; root: RootState }>()
+    const fromA = kitA.createSyncedAction('game/from-a')
+
+    expect(kitA.isSyncedAction(fromA())).toBe(true)
+    expect(kitB.isSyncedAction(fromA())).toBe(false)
+  })
+
+  it('matchers は registry 自動束縛され selectSynced だけで組める', () => {
+    type TestRoot = { synqux: SynquxState; game: GameState; local: number }
+    const own = createSynquxKit<{ synced: GameState; root: TestRoot }>()
+    const increment = own.createSyncedAction<number>('game/increment')
+
+    // rootReducer 経由で default success result の stamp と meta.root の付与を
+    // 実際に通し、locals reducer が受けた action で判定する (実配線と同じ経路)
+    let seenByLocal: Action = { type: '@@none' }
+    const root = createSynquxRootReducer({
+      isSyncedAction: own.isSyncedAction,
+      synced: {
+        game: (state: GameState = { result: null, count: 0 }, action) =>
+          own.isSyncedAction(action)
+            ? { ...state, count: state.count + 1 }
+            : state,
+      },
+      locals: {
+        local: (state: number = 0, action: Action) => {
+          seenByLocal = action
+          return state + 1
+        },
+      },
+    })
+    const matchers = own.createSyncedActionMatchers({
+      selectSynced: root.selectSynced,
+    })
+
+    const initial = root.rootReducer(undefined, { type: '@@INIT' })
+    root.rootReducer(initial, increment(1))
+
+    expect(matchers.isSucceededAction(seenByLocal)).toBe(true)
+    expect(matchers.isSucceededAction({ type: 'game/unregistered' })).toBe(
+      false,
+    )
   })
 })

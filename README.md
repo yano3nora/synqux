@@ -36,20 +36,20 @@ npm install firebase
 
 ### 2. Write a synced slice
 
-Take a normal Redux reducer and add two things: the state carries a `result` (`SynquxSynced`), and validation failures return the unchanged state via `stateWithError`. Success results are stamped automatically by the root reducer helper (full source: [demo/counter.ts](./demo/counter.ts)).
+Write a normal RTK slice with the kit's `createSyncedSlice` (a `createSlice` whose actions are all synced actions), and add two things: the state carries a `result` (`SynquxSynced`), and validation failures return the unchanged state via `stateWithError`. Success results are stamped automatically by the root reducer helper (full source: [demo/slice.ts](./demo/slice.ts)).
 
 ```ts
-import { stateWithError, type SynquxSynced } from 'synqux'
+import type { SyncedAction, SynquxSynced } from 'synqux'
+import { createSyncedSlice, stateWithError } from './synqux' // your kit file (created in step 3)
 
-export type CounterState = SynquxSynced<CounterAction> & { count: number }
+export type CounterState = SynquxSynced<SyncedAction> & { count: number }
 
-export const counterReducer: Reducer<CounterState> = (
-  state = { result: null, count: 0 },
-  action,
-) => {
-  switch (action.type) {
-    case 'counter/add': {
-      const next = state.count + (action.payload ?? 1)
+export const counterSlice = createSyncedSlice({
+  name: 'counter',
+  initialState: { result: null, count: 0 } satisfies CounterState,
+  reducers: {
+    add: (state, action: SyncedAction<number>) => {
+      const next = state.count + action.payload
 
       // Validation lives in the reducer. The host reads this result to
       // reject the request; only the requester gets notified.
@@ -59,31 +59,49 @@ export const counterReducer: Reducer<CounterState> = (
         })
       }
 
-      return { ...state, count: next }
-    }
-    default:
-      return state
-  }
-}
+      state.count = next // immer, as in RTK
+    },
+  },
+})
+
+export const { add } = counterSlice.actions
 ```
+
+Every case you define here is a synced action: the creator stamps its identity (`meta.hash` / `meta.dispatched`) at creation time and registers the type in the kit, so there is no hand-written "is this action synced?" predicate to maintain.
 
 ### 3. Wire the store
 
 The setup layer is one file in your template; feature developers never touch it (full source: [demo/main.ts](./demo/main.ts)). Finish Firebase auth (e.g. anonymous sign-in) before creating the transport. Production notes for the Firebase transport are in [Usage](#firebase-transport-in-production).
 
 ```ts
+// synqux.ts — the kit file (call createSynquxKit exactly once per app).
+// Actions defined via its createSyncedSlice / createSyncedAction register their
+// types, and isSyncedAction judges from that registry — creators and the
+// predicate must come from the same kit.
+import { createSynquxKit } from 'synqux'
+
+export const { createSyncedSlice, createSyncedAction, isSyncedAction, stateWithError } =
+  createSynquxKit<{
+    synced: CounterState
+    root: RootState
+  }>()
+```
+
+```ts
+// store.ts
 import { configureStore } from '@reduxjs/toolkit'
 import { createSynqux, createSynquxRootReducer } from 'synqux'
 import { firebaseTransport } from 'synqux/firebase'
-import { counterReducer } from './counter'        // synced slice (satisfies SynquxSynced)
+import { counterSlice } from './counter'          // synced slice (step 2)
 import { scenesReducer } from './scenes/reducers'  // local slice (not synced)
+import { isSyncedAction } from './synqux'
 
 export const synqux = createSynqux({
   transport: firebaseTransport(db),                // finish auth before creating the transport
   // Returns rootReducer / selectSynced / isSyncedAction — spread as-is into the config.
   ...createSynquxRootReducer({
-    isSyncedAction: (a): a is CounterAction => a.type.startsWith('counter/'),
-    synced: { counter: counterReducer },
+    isSyncedAction,                                // derived from the kit registry
+    synced: { counter: counterSlice.reducer },
     locals: { scenes: scenesReducer },             // run in declaration order; meta.root exposes earlier stages
   }),
 })
@@ -97,7 +115,7 @@ export const store = configureStore({
 })
 ```
 
-NOTE: `synced` accepts **exactly one** slice (by design; two or more throws). If you have multiple domains to sync, compose them into one reducer and lift `result` to the top level. See `demoReducer` in [demo/main.ts](./demo/main.ts), which folds counter and ledger into one slice.
+NOTE: `synced` accepts **exactly one** slice (by design; two or more throws). A demo-sized app fits in one `createSyncedSlice` (see [demo/slice.ts](./demo/slice.ts), which holds both a counter and a ledger). Apps with many domains define actions with `createSyncedAction` and fold them into the slice via `extraReducers` (or compose sub-reducers with builder functions), lifting `result` to the top level.
 
 ### 4. Subscribe and sync
 
@@ -111,7 +129,7 @@ await synqux.setRole('player') // when subscribe started with role: 'guest'
 // Then just dispatch as usual. The middleware turns it into a request, the
 // host arbitrates, and every device applies in the same order.
 // No optimistic updates — what you render is the synced state.
-store.dispatch({ type: 'counter/add', payload: 1 })
+store.dispatch(add(1))
 ```
 
 If `state.counter.count` matches across every device (tab) subscribed to the same `groupId`, it works. The fastest way to try it locally: `npm run demo:emulator` + `npm run demo`, then open http://localhost:5173 in multiple tabs.
@@ -220,7 +238,7 @@ case 'game/harvest': {
 
 ### Run a local tutorial session
 
-**Concept.** A tutorial needs the same reducers without joining or polluting the real sync group. Replace the synced session with a non-persistent standalone session, then subscribe again to restore canonical history.
+**Concept.** A tutorial needs the same reducers without joining or polluting the real sync group. Replace the synced session with a non-persistent standalone session seeded with the tutorial state (`seedSynced` swaps the synced subtree through the restore path — it is session bootstrap, not a game action), then subscribe again to restore canonical history.
 
 ```ts
 await synqux.subscribe({ store, groupId })
@@ -231,9 +249,9 @@ export const startTutorial = () => async () => {
     store,
     groupId,
     mode: 'standalone',
-    localSnapshots: false,
+    localSnapshots: false,             // never touches the real save
+    seedSynced: buildTutorialState(),  // a pure function returning the tutorial state
   })
-  store.dispatch({ type: 'game/reset' })
 }
 
 export const finishTutorial = () => async () => {
@@ -241,6 +259,8 @@ export const finishTutorial = () => async () => {
   await synqux.subscribe({ store, groupId })
 }
 ```
+
+`seedSynced` is standalone-only (a synced session restores from the transport snapshot — the shared truth — so subscribing with both throws), and session-scoped: on unsubscribe the synced subtree returns to the reducer's initial state, so the seed can never merge into canonical history. When combined with enabled `localSnapshots`, it starts a new save from the seed instead of loading the stored one.
 
 **Behavior.**
 
@@ -362,19 +382,33 @@ const count = useAppSelector((s) => s.counter.count)
 
 The core selectors (`selectIsHost` etc.) read the reserved `state.synqux` subtree, so they work through this typed `useAppSelector` as-is. No provider component is required (ADR-0022 / ADR-0023).
 
-### Typed action vocabulary (`synquxKit` / `createSyncedAction`)
+### Typed action vocabulary (`createSynquxKit` / `createSyncedSlice` / `createSyncedAction`)
 
-Bind your domain types once in the setup layer, and feature developers write plain RTK with zero synqux-specific annotations (ADR-0024 / ADR-0025). `createSyncedAction` mirrors `createAction`, but stamps `hash` (a ulid, unique across all devices — safe to use as a record key in synced state) and `dispatched` **at creation time**, so `builder.addCase` infers `action.meta` as required. One creation = one intent: **never re-dispatch the same action object** — the machinery does not deduplicate it (the same identity would apply twice); call the creator again to retry (`dispatchAndWait` rejects a duplicate pending hash explicitly).
+Bind your domain types once in the setup layer, and feature developers write plain RTK with zero synqux-specific annotations (ADR-0024 / ADR-0025). The kit mirrors RTK's two ways of defining actions, one-to-one:
+
+| RTK | synqux kit | use for |
+| --- | --- | --- |
+| `createSlice` | `createSyncedSlice` | slice-local actions — every case you define is a synced action |
+| `createAction` | `createSyncedAction` | standalone / cross-slice actions, consumed via `extraReducers` (on synced or locals slices) or builder composition |
+
+Both stamp `hash` (a ulid, unique across all devices — safe to use as a record key in synced state) and `dispatched` **at creation time**, so `builder.addCase` infers `action.meta` as required. One creation = one intent: **never re-dispatch the same action object** — the machinery does not deduplicate it (the same identity would apply twice); call the creator again to retry (`dispatchAndWait` rejects a duplicate pending hash explicitly). `createSyncedSlice` supports plain case reducers and the `{ prepare, reducer }` notation; RTK 2.x callback creators (`create.asyncThunk` etc.) are not supported.
+
+The kit also holds the **creator registry**: defining an action via `createSyncedSlice` / `createSyncedAction` registers the type, and the kit's `isSyncedAction` judges "is this a synced action" from that registry — no hand-written prefix predicate, no exclusion list. Two contracts follow:
+
+- **Call `createSynquxKit` exactly once per app**, and take creators and `isSyncedAction` from the same kit (each call creates an independent registry).
+- **Registration happens when the creator's module is imported.** As long as your synced reducer references creators statically (`builder.addCase(creator, ...)`), everything is registered by store-creation time. Do not lazy-import creator modules — an action arriving from another device before the import completes would not be judged as synced.
 
 ```ts
 // synqux.ts (once, in the setup layer)
-import { synquxKit, type LocalAction as SynquxLocalAction } from 'synqux'
+import { createSynquxKit, type LocalAction as SynquxLocalAction } from 'synqux'
 
 export const {
+  createSyncedSlice,           // createSlice whose actions are all synced actions
   createSyncedAction,
-  createSyncedActionMatchers,
+  isSyncedAction,              // registry-derived — pass to createSynquxRootReducer
+  createSyncedActionMatchers,  // isSyncedAction is pre-bound; pass only selectSynced
   generateResult, stateWithError, stateWithResult, stateWithTransaction,
-} = synquxKit.withTypes<{
+} = createSynquxKit<{
   synced: GameState
   root: RootState
   message: GameResultMessage   // your ResultMessage extension (optional)
@@ -425,10 +459,9 @@ Reducer helpers (game-developer layer; identical with or without sync):
 
 | export | description |
 | --- | --- |
-| `createSyncedAction(type, prepare?)` | `createAction` with creation-time `hash` (ulid) / `dispatched` stamping and required-`meta` typing — the canonical way to define synced actions (ADR-0024 / ADR-0025) |
-| `synquxKit.withTypes<{ synced, root, message? }>()` | Binds your domain types once and returns typed `createSyncedAction` / matchers / result helpers — kills consumer-side generics re-binding wrappers |
+| `createSynquxKit<{ synced, root, message? }>()` | Binds your domain types once (call once per app) and returns typed helpers plus the creator registry: `createSyncedSlice` (a `createSlice` whose actions are all synced actions) and `createSyncedAction` (a `createAction` for standalone / cross-slice actions) — both stamp `hash` (ulid) / `dispatched` at creation time, type `meta` as required, and register the type (the only ways to define synced actions, ADR-0024 / ADR-0025) — plus the registry-derived `isSyncedAction`, pre-bound matchers, and result helpers |
 | `generateActionHash()` | Issues a synced-action hash (ulid) directly (rarely needed; creators stamp automatically) |
-| `createSyncedActionMatchers({ isSyncedAction, selectSynced })` | Returns type guards (`isSucceededAction` / `isMySucceededAction`) for locals reducers to check "did the applied action succeed / was it my request". Accepts the return value of `createSynquxRootReducer` as-is. Forbidden inside synced reducers |
+| `createSyncedActionMatchers({ isSyncedAction, selectSynced })` | Returns type guards (`isSucceededAction` / `isMySucceededAction`) for locals reducers to check "did the applied action succeed / was it my request". The kit-bound variant takes only `selectSynced`. Forbidden inside synced reducers |
 | `isDeliveredSyncedAction(action)` | Checks whether an action carries the complete request/response delivery metadata. Combine with the consumer's synced-domain matcher when needed |
 | `isSynquxAction(action)` | Excludes synqux-internal actions in listeners / middleware. Avoids direct prefix checks |
 | `isResultForPeer(result, peerId)` | Checks whether a result targets everyone or the given peer, per the `targets` contract |

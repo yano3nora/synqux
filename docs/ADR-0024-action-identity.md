@@ -19,7 +19,7 @@
 2. **採番を ulid (monotonic factory) に変更し、形式を契約にする**: 26 文字 Crockford base32、一意 (80bit 乱数)、同一端末内の生成順で辞書順単調。**端末間の適用順の正はあくまで seq であり、hash の辞書順を端末を跨いだ順序判定に使ってはならない** (端末時計基準のため)。sortable は「端末内生成順の目安」として提供する。採番は `generateActionHash` として公開する
 3. **付与点を middleware から action creator (ADR-0025 の `createSyncedAction` が合成する prepare) へ前倒しする**。生成された action はその瞬間から `hash` / `dispatched` を持ち、型 (required な `SyncedActionMeta`) は事実の記述になる。dispatched は同期時、request 化の時点でサーバ基準時刻に上書きされる (従来どおり)
     - RTK 自身が createAsyncThunk の creator 内で nanoid を生成しており、creator 内での id 採番は対象読者に既知の idiom である
-    - **「1 生成 = 1 意図」= 同一の action オブジェクトを再 dispatch してはならない**。機構は同一 hash の重複排除を**行わず**、再 dispatch は同一 identity の request の二重適用になる。再送・再実行は必ず creator を呼び直す。dispatchAndWait は同一 hash の待機中再発行を明示的に reject して誤用を検出する (silent な resolver 上書きを防ぐ)。middleware / core での同一 hash 重複排除の実装は、request 裁定の不変条件に触るため見送り、BACKLOG で管理する
+    - **「1 生成 = 1 意図」= 同一の action オブジェクトを再 dispatch してはならない**。機構は同一 hash の重複排除を**行わず**、再 dispatch は同一 identity の request の二重適用になる。再送・再実行は必ず creator を呼び直す。dispatchAndWait は同一 hash の待機中再発行を明示的に reject して誤用を検出する (silent な resolver 上書きを防ぐ)。middleware / core での同一 hash 重複排除は**導入しない** (2026-08-20 決定): 再 dispatch は consumer の契約違反 (バグ) であって分散障害モードではなく (重複配信・遅延は seq 線形化で既に守られる)、request 経路への dedup は restore replay で正当に同一 hash が再配達されるケースと区別がつかず裁定の不変条件を汚すため
 4. **metaSetter middleware は fallback として残し、field 単位補完に改める**: 素の RTK createAction や手組み action が dispatch された場合に hash / dispatched の欠落分だけを補う (既存 hash の action 全体素通しは廃止 = dispatched 欠落バグの修正)。これにより不変条件「**reducer に到達する synced action は hash / dispatched を必ず持つ**」が全経路 (creator 経由 / 素の action / dispatchAndWait / automations / request 配達) で無条件に成立する
 5. `SyncedActionHash` (= `string` の名前付き alias) を export し、契約の語彙とする
 

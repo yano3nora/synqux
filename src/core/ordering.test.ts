@@ -191,4 +191,26 @@ describe('createOrdering (ADR-0002)', () => {
       expect(ordering.isProcessing('req-1')).toBe(false)
     })
   })
+
+  describe('reset (seedSynced の新規 session 初期化)', () => {
+    it('session 状態を初期化し fencing (maxSeenEpoch) だけ維持する', () => {
+      const ordering = createOrdering()
+      ordering.observe({ epoch: 3, seq: 5 })
+      ordering.restore({ epoch: 3, appliedSeq: 5, applied: { 5: 'req-5' } })
+      ordering.beginProcessing('req-p')
+      expect(ordering.acceptAdded('req-6')).toBe(true)
+
+      ordering.reset()
+
+      expect(ordering.appliedSeq()).toBe(0)
+      expect(ordering.maxSeenSeq()).toBe(0)
+      expect(ordering.hasPendingIssue()).toBe(false)
+      expect(ordering.isApplied('req-5')).toBe(false)
+      expect(ordering.isProcessing('req-p')).toBe(false)
+      // added guard も解除され、synced 復帰時の backlog replay を受け直せる
+      expect(ordering.acceptAdded('req-6')).toBe(true)
+      // fencing は後退しない: 観測済み epoch 3 を跨いだ世代で host になる
+      expect(ordering.beginHosting()).toBe(4)
+    })
+  })
 })
