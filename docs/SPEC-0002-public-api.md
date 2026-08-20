@@ -143,8 +143,10 @@ export type LocalAction<P = void, TRoot = unknown, TMeta extends object = object
  * synqux の**定義フェーズ** (ADR-0026)。**1 app 1 回だけ呼ぶ** — 定義は creator
  * registry を持ち、呼ぶたび独立した registry になるため、creator と配線 factory
  * は必ず同じ定義の戻りから取る。`defineSynqux({ syncedKey })` が key literal の
- * 値推論を、`.withTypes<T>()` (純粋な型 cast。状態は defineSynqux が 1 回だけ
- * 作るため何度呼んでも分裂しない) が型束縛を担う 2 段チェーン。
+ * 値推論を、`.withTypes<T>()` (純粋な型 cast) が型束縛を担う 2 段チェーン。
+ * **withTypes は 1 回だけ** — 束縛後の定義に withTypes は存在せず chain の
+ * 再束縛は型で封じられる。base を変数に残した別 domain 型での再束縛も禁止
+ * (同一 registry へ矛盾した型 view が付くため。ADR-0026 Decision 4)。
  *
  * - createSyncedSlice: RTK createSlice の synced 版 (`{ name, initialState,
  *   reducers, extraReducers? }` のサブセット互換)。**slice が定義する (= reducers
@@ -184,9 +186,10 @@ export type LocalAction<P = void, TRoot = unknown, TMeta extends object = object
  *   作り直す契約 (core と同じ) のため factory
  * - generateResult / stateWithResult / stateWithError / stateWithTransaction の束縛済み版
  *
- * creators / matchers の meta.root 型は定義時点で判明している部分 root
- * (`{ synqux } & Record<TKey, TSynced>`)。sibling locals まで読む文脈は
- * LocalAction<P, TRoot> 注釈 (TRoot は導出 RootState) を使う
+ * creators の meta.root は型付けない (any) — root は配線フェーズまで未知で、
+ * 型は読み手の LocalAction<P, 導出RootState> 注釈が与える (addCase の注釈 idiom
+ * を壊さないため)。部分 root (`{ synqux } & Record<TKey, TSynced>`) を使うのは
+ * matchers の narrow のみ (注釈と交差評価されるため安全。ADR-0026 Decision 5)
  */
 export const defineSynqux: <TKey extends string>(config: {
   /**
