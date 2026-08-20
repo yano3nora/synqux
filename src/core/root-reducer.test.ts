@@ -214,4 +214,24 @@ describe('createSynquxRootReducer', () => {
       }),
     ).toThrow('reserved root key')
   })
+
+  it('locals が syncedKey / 予約 key と衝突すると throw する (subtree の静かな上書き防止)', () => {
+    expect(() =>
+      createSynquxRootReducer({
+        isSyncedAction,
+        syncedKey: 'game',
+        synced: syncedReducer,
+        locals: { game: firstLocalReducer },
+      }),
+    ).toThrow('collides with syncedKey')
+
+    expect(() =>
+      createSynquxRootReducer({
+        isSyncedAction,
+        syncedKey: 'game',
+        synced: syncedReducer,
+        locals: { synqux: firstLocalReducer },
+      }),
+    ).toThrow('collides with the reserved internal slice')
+  })
 })

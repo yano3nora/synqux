@@ -180,7 +180,8 @@ export const createSynquxKit: <T extends SynquxKitTypes>(config: {
   /**
    * root 内の synced state の mount key。key の命名は consumer の領域のため
    * kit に一度だけ教える (供給点はここだけ)。型は T['root'][K] = T['synced'] を
-   * 満たす key に制限され、typo や別 slice の key はコンパイル時に落ちる
+   * 満たす key に制限され、typo や型の合わない key はコンパイル時に落ちる
+   * (構造的に同型な別 key までは区別できない)
    */
   syncedKey: SyncedKeyOf<T>
 }) => { /* 上記の束縛済み群 */ }

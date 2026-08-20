@@ -68,8 +68,9 @@ type MatchedSyncedActionOf<T extends SynquxKitTypes> = SyncedActionOf<T> &
 
 /**
  * T['root'] のうち synced state (T['synced']) が mount されている key の候補。
- * kit へ渡す syncedKey を「型整合する key」に制限する (typo や別 slice の
- * key を渡す誤配線をコンパイル時に落とす)
+ * kit へ渡す syncedKey を「型整合する key」に制限する (typo や型の合わない
+ * key の誤配線をコンパイル時に落とす。構造的に同型な別 key までは区別できない
+ * ため、最終的な正しさは consumer が指定するリテラルが担う)
  */
 type SyncedKeyOf<T extends SynquxKitTypes> = {
   [K in keyof T['root'] & string]: T['root'][K] extends T['synced'] ? K : never

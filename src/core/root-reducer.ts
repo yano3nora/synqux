@@ -58,6 +58,19 @@ export const createSynquxRootReducer = <
     )
   }
 
+  // locals は直列進行で { ...acc, [key]: next } と mount するため、syncedKey /
+  // 予約 key と同名の local は synced subtree・内部 state を静かに上書きする。
+  // 配線時に fail-fast で拒否する
+  for (const key of Object.keys(config.locals)) {
+    if (key === 'synqux' || key === (config.syncedKey as string)) {
+      throw new Error(
+        `createSynquxRootReducer: locals key "${key}" collides with ${
+          key === 'synqux' ? 'the reserved internal slice' : 'syncedKey'
+        }`,
+      )
+    }
+  }
+
   const { syncedKey, synced: syncedReducer } = config
   const localEntries = Object.entries(config.locals) as [
     keyof TLocals & string,

@@ -134,12 +134,15 @@ rootReducer の record key の 2 箇所に残っている残債が確認され�
    synced key の命名は consumer の領域 (synqux が予約するのは `state.synqux` のみ) の
    ため「どこにあるかを教える責任」自体は consumer に残るが、供給点は kit の 1 箇所。
    型は `SyncedKeyOf<T>` (T['root'][K] extends T['synced'] を満たす K) に制限され、
-   typo や別 slice の key はコンパイル時に落ちる。kit は文字列を持つだけなので
+   typo や型の合わない key はコンパイル時に落ちる (構造同型な別 key までは区別
+   できないため、最終的な正しさは指定リテラルが担う)。kit は文字列を持つだけなので
    instance 非依存 (循環 import 回避) は維持される
 2. **kit は syncedKey を echo し、`createSynquxRootReducer({ syncedKey, synced: reducer })`
    がそれを受ける**。synced は Record ではなく素の Reducer 1 つになり、「synced slice は
    ちょうど 1 つ」(SPEC-0002 判断メモ 4) が runtime throw から API 形状の構造保証に
-   変わった。syncedKey 'synqux' (予約 mount) は配線時に throw
+   変わった。syncedKey 'synqux' (予約 mount) と、syncedKey / 'synqux' に衝突する
+   locals key は配線時に throw (locals の直列 mount が subtree を静かに上書きする
+   footgun の fail-fast。レビュー指摘)
 3. **kit は matchers (isSucceededAction / isMySucceededAction) を束縛済みで直接返す**
    (selectSynced は syncedKey から導出)。kit 版 `createSyncedActionMatchers` factory は
    廃止 (core 版は primitive 方式用に従来どおり)
