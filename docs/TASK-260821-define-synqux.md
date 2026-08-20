@@ -45,4 +45,8 @@
 - [x] demo 追従 (手書き DemoRootState / SynquxState import の削除)
 - [x] ADR-0026 新規、ADR-0025 へ supersede 注記、SPEC-0002、README
 - [x] `npm run fix` / `npm test` (394 tests / lint / tsc / tsc-demo 全 green)
-- [ ] Codex レビュー
+- [x] Codex レビュー → **Approve** (2026-08-21)。指摘対応:
+    - creators の meta.root を部分 root から any へ (LocalAction 注釈 idiom の維持。
+      部分 root は matchers narrow 限定) + 注釈合成の回帰型テスト
+    - withTypes の再束縛封じ (束縛後の定義から型で除去 + doc 契約) + 回帰型テスト
+    - SPEC-0002 / README / TASK の旧記述追従
