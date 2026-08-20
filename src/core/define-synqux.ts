@@ -72,9 +72,10 @@ type SyncedActionOf<T extends SynquxTypes> =
 
 /**
  * 定義フェーズ時点で判明している部分 root (予約 slice + synced subtree)。
- * creators / matchers の meta.root 型に使う — locals は配線フェーズまで未知の
- * ため含まれない。sibling locals まで読む文脈は LocalAction<P, TRoot> 注釈
- * (TRoot は導出 RootState) を使う
+ * matchers の narrow にのみ使う (narrow は注釈と交差するため部分 root で安全)。
+ * creators の meta.root には使わない — addCase の注釈 (LocalAction<P, 導出Root>)
+ * と代入不能になり、従来の注釈 idiom を壊すため。creators 側は any とし、
+ * root の型は読み手の LocalAction 注釈が与える
  */
 type DefinedRootOf<TKey extends string, T extends SynquxTypes> = {
   synqux: SynquxState
@@ -213,16 +214,18 @@ export type SynquxDefinition<T extends SynquxTypes, TKey extends string> = {
   /**
    * RTK createAction の同期版。生成時に hash / dispatched を付与し (ADR-0024)、
    * type を registry へ登録する (定義 = 同期対象の宣言)。
-   * `synqux/` 予約 prefix の type は定義時に throw で拒否する
+   * `synqux/` 予約 prefix の type は定義時に throw で拒否する。
+   * meta.root の型は any — root は配線フェーズまで未知のため定義側では型付けず、
+   * locals で読むときは LocalAction<P, 導出RootState> 注釈が型を与える (ADR-0026)
    */
-  createSyncedAction: CreateSyncedAction<DefinedRootOf<TKey, T>>
+  createSyncedAction: CreateSyncedAction<any>
 
   /**
    * RTK createSlice の synced 版。各 case を { reducer, prepare } 記法へ変換
    * して RTK createSlice に委譲し、合成 prepare が生成時 stamp (ADR-0024) と
    * registry 登録を行う。生成 creator の action は全て synced action になる
    */
-  createSyncedSlice: CreateSyncedSlice<DefinedRootOf<TKey, T>>
+  createSyncedSlice: CreateSyncedSlice<any>
 
   /**
    * synced domain action の判定述語 (registry 由来)。配線フェーズが内部で
@@ -293,13 +296,6 @@ export type SynquxDefinition<T extends SynquxTypes, TKey extends string> = {
     SyncedActionOf<T>,
     MessageOf<T>
   >
-
-  /**
-   * consumer の domain 型を束縛した同一の定義を返す (純粋な型 cast)。
-   * registry などの状態は defineSynqux が 1 回だけ作るため、何度呼んでも
-   * 同じ定義であり分裂しない
-   */
-  withTypes: <T2 extends SynquxTypes>() => SynquxDefinition<T2, TKey>
 }
 
 /**
@@ -356,7 +352,16 @@ export const defineSynqux = <TKey extends string>(config: {
    * この key + locals から導出する
    */
   syncedKey: TKey
-}): SynquxDefinition<SynquxTypes, TKey> => {
+}): SynquxDefinition<SynquxTypes, TKey> & {
+  /**
+   * consumer の domain 型を束縛した同一の定義を返す (純粋な型 cast)。
+   * registry などの状態は defineSynqux が 1 回だけ作るため分裂しないが、
+   * **矛盾した型 view を防ぐため呼ぶのは 1 回だけ** — 束縛後の定義には
+   * withTypes が存在せず、chain での再束縛は型で封じられる。base を変数に
+   * 残して別 domain 型で束縛し直すことも契約違反 (registry は 1 domain 1 つ)
+   */
+  withTypes: <T2 extends SynquxTypes>() => SynquxDefinition<T2, TKey>
+} => {
   const registry = new Set<string>()
 
   // matchers 等の内部束縛用。位置の宣言は syncedKey に一本化したため導出する
@@ -490,6 +495,8 @@ export const defineSynqux = <TKey extends string>(config: {
   }
 
   // runtime は素通しで組み、公開契約は SynquxDefinition の手書き型が担う
-  // (kit 以来の「境界で cast」方式)
-  return definition as unknown as SynquxDefinition<SynquxTypes, TKey>
+  // (境界で cast する方式)。withTypes は base の戻りにだけ型として現れる
+  return definition as unknown as SynquxDefinition<SynquxTypes, TKey> & {
+    withTypes: <T2 extends SynquxTypes>() => SynquxDefinition<T2, TKey>
+  }
 }

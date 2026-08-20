@@ -41,11 +41,16 @@
    TS は型引数の部分推論を許さない (all-or-nothing) ため、「syncedKey の literal
    値推論」と「T の明示束縛」は単一呼び出しに畳めない。withTypes は**純粋な型 cast**
    で、状態 (registry) は defineSynqux が 1 回だけ作る — 旧 withTypes を廃止した
-   理由 (呼ぶたび registry が分裂する) は本形では構造的に発生しない
-5. **定義フェーズの creators / matchers の root 型は部分 root**
-   (`{ synqux } & Record<TKey, TSynced>`) とする。locals は配線まで未知のため
-   含まれない。sibling locals まで読む文脈は従来どおり `LocalAction<P, TRoot>` 注釈
-   (TRoot は導出 RootState) を使う
+   理由 (呼ぶたび registry が分裂する) は本形では構造的に発生しない。
+   ただし同一 registry へ矛盾した型 view を付けないため **withTypes は 1 回だけ**:
+   束縛後の定義には withTypes が存在せず chain での再束縛は型で封じる (base を
+   変数に残した別 domain 型での再束縛は doc 契約で禁止。レビュー指摘)
+5. **creators の meta.root は型付けない (any)**。root は配線フェーズまで未知で、
+   部分 root を主張すると locals の addCase 注釈 (`LocalAction<P, 導出RootState>`)
+   と代入不能になり従来の注釈 idiom を壊す (レビュー指摘)。root の型は読み手の
+   `LocalAction<P, TRoot>` 注釈が与える。**matchers の narrow にのみ部分 root**
+   (`{ synqux } & Record<TKey, TSynced>`) を使う — narrow は注釈と交差評価される
+   ため部分 root で安全に root.<syncedKey> が型付く
 6. **primitive 方式 (core の createSynqux / createSynquxRootReducer への述語注入) は
    維持する**。defineSynqux は推奨 facade であり、core の削除・隠蔽ではない
 

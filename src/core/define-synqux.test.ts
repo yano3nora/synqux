@@ -1,4 +1,9 @@
-import { configureStore, type Action, type Reducer } from '@reduxjs/toolkit'
+import {
+  configureStore,
+  createSlice,
+  type Action,
+  type Reducer,
+} from '@reduxjs/toolkit'
 import {
   afterEach,
   beforeEach,
@@ -9,7 +14,7 @@ import {
   vi,
 } from 'vitest'
 import { createMemoryHub } from '../testing/memory-hub.js'
-import type { SyncedActionMeta } from './action.js'
+import type { LocalAction, SyncedActionMeta } from './action.js'
 import { defineSynqux } from './define-synqux.js'
 import { settle } from './test-fixtures.js'
 import type { SynquxState } from './slice.js'
@@ -196,5 +201,35 @@ describe('defineSynqux (end-to-end)', () => {
     }>()
     // dispatchAndWait は synced state から推論した domain action で型付く
     expectTypeOf(sync.dispatchAndWait).parameter(0).toEqualTypeOf<CountAction>()
+
+    // 束縛後の定義に withTypes は存在しない (別 domain 型への再束縛を型で封じる)
+    expectTypeOf(definition).not.toHaveProperty('withTypes')
+  })
+
+  it('creator は locals の LocalAction 注釈 (導出 root) の addCase と両立する', () => {
+    const sync = definition.createSynqux({
+      transport: createMemoryHub().createTransport(),
+      synced: countReducer,
+      locals: { local: (state: number = 0) => state },
+    })
+    type DerivedRoot = ReturnType<typeof sync.rootReducer>
+
+    // locals slice が synced creator へ追従する既存 idiom: 注釈で root に型を
+    // 与える。creator の meta.root は any のため注釈と衝突しない (ADR-0026)
+    const localsSlice = createSlice({
+      name: 'local',
+      initialState: { seen: 0 },
+      reducers: {},
+      extraReducers: (builder) => {
+        builder.addCase(
+          increment,
+          (state, action: LocalAction<number, DerivedRoot>) => {
+            state.seen = action.meta?.root?.game.count ?? 0
+          },
+        )
+      },
+    })
+
+    expect(localsSlice.reducer(undefined, { type: 'noop' }).seen).toBe(0)
   })
 })

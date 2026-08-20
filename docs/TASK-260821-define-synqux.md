@@ -14,7 +14,7 @@
 - ただし **reducer モジュールが transport / store なしで import できること**
   (creator の module 評価時 import) は譲れない構造制約のため、単一関数への統合は
   runtime 循環 (TDZ) で成立しない。**二相**に分ける:
-  1. **定義フェーズ `defineSynqux<T>({ syncedKey })`**: creators / registry /
+  1. **定義フェーズ `defineSynqux({ syncedKey }).withTypes<T>()`**: creators / registry /
      matchers / result helpers / 型語彙。reducers はこれだけを import する
   2. **配線フェーズ `definition.createSynqux({ transport, synced, locals, ... })`**:
      rootReducer / selectSynced / isSyncedAction の接続を内部化し、root 型を
