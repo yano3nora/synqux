@@ -70,6 +70,8 @@ describe('listeners', () => {
   })
 
   it('everyone は action を適用した全端末でそれぞれ 1 回発火する', async () => {
+    // meta.responsed の時刻ズレによる determinism check ログが発生するため黙殺する
+    vi.spyOn(console, 'error').mockImplementation(() => undefined)
     const hub = createMemoryHub()
     const aEffect = vi.fn()
     const bEffect = vi.fn()
@@ -195,6 +197,8 @@ describe('listeners', () => {
   })
 
   it('host migration 後は新 host が以後の action だけで host-only を発火する', async () => {
+    // meta.responsed の時刻ズレによる determinism check ログが発生するため黙殺する
+    vi.spyOn(console, 'error').mockImplementation(() => undefined)
     const hub = createMemoryHub()
     const aEffect = vi.fn()
     const bEffect = vi.fn()

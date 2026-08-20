@@ -56,6 +56,8 @@ describe('host migration 境界', () => {
   })
 
   it('dual-host 窓: 2 端末が同時に host を自認して同一 request に応答しても、適用は全端末 1 回で収束する', async () => {
+    // dual-host 窓ではシナリオ上 determinism check のエラーログが発生するため黙殺する
+    vi.spyOn(console, 'error').mockImplementation(() => undefined)
     const hub = createMemoryHub()
     const a = createHubClient(hub)
     const b = createHubClient(hub)

@@ -121,6 +121,8 @@ describe('automations', () => {
   })
 
   it('dual-host 相当の二重発行も rejects-repeat reducer により 1 回適用へ収束する', async () => {
+    // dual-host 窓ではシナリオ上 determinism check のエラーログが発生するため黙殺する
+    vi.spyOn(console, 'error').mockImplementation(() => undefined)
     const hub = createMemoryHub()
     const automation = incrementOnce({ retryMs: 10_000 })
     const a = createHubClient(hub, { automations: [automation] })

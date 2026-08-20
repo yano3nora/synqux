@@ -188,6 +188,8 @@ describe('session mode', () => {
   })
 
   it('synced mode + seedSynced は subscribe を reject する (正史は transport snapshot)', async () => {
+    // onSubscribeFailed 未設定の reject が警告ログを出す仕様のため黙殺する
+    vi.spyOn(console, 'error').mockImplementation(() => undefined)
     const client = createHubClient(createMemoryHub())
 
     await expect(
