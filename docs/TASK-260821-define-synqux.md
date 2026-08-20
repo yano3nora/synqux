@@ -50,3 +50,9 @@
       部分 root は matchers narrow 限定) + 注釈合成の回帰型テスト
     - withTypes の再束縛封じ (束縛後の定義から型で除去 + doc 契約) + 回帰型テスト
     - SPEC-0002 / README / TASK の旧記述追従
+
+## 追記: createSyncedActionMatchers の standalone export 削除 (同日、ユーザ指摘)
+
+定義が束縛済み matchers を配る以上、素の factory の公開は creators の standalone
+export と同種の余剰 surface。index から削除し内部実装へ (matchers.test は内部
+import のまま維持)。SPEC-0002 / README / ADR-0026 Consequences 追従済み。

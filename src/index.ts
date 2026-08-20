@@ -50,11 +50,9 @@ export {
 } from './core/slice.js'
 
 // ゲーム開発者層: reducer ヘルパーと読み取り selector
-export {
-  createSyncedActionMatchers,
-  isDeliveredSyncedAction,
-  isSynquxAction,
-} from './core/matchers.js'
+// (成功判定 matchers は defineSynqux の戻り (isSucceededAction /
+//  isMySucceededAction) からのみ提供する — creators と同じ整理。ADR-0026)
+export { isDeliveredSyncedAction, isSynquxAction } from './core/matchers.js'
 export {
   generateResult,
   isResultForPeer,

@@ -177,7 +177,7 @@ export type LocalAction<P = void, TRoot = unknown, TMeta extends object = object
  *   createSynquxRootReducer へ直接渡す場合に使う
  * - isSucceededAction / isMySucceededAction: locals reducer 用の成功判定 matcher
  *   (registry の isSyncedAction と syncedKey 由来の selectSynced で全束縛済み)。
- *   core の createSyncedActionMatchers は primitive 方式用に残る
+ *   標準 export はなく、matchers の提供経路はこの定義の戻りのみ (creators と同じ整理)
  * - **createSynqux (配線フェーズ)**: transport と素材 (synced reducer / locals) を
  *   受けて instance を返す。rootReducer / selectSynced / isSyncedAction の接続は
  *   内部化され、root 型は SynquxRootState<TKey, TSynced, TLocals> として導出される
@@ -518,24 +518,10 @@ export function generateResult<TAction, TMessage extends ResultMessage = ResultM
 // locals 用成功判定 matcher (ゲーム開発者層、Decision 8 / ADR-0013)
 // ============================================================
 
-/**
- * locals reducer 専用。createSynquxRootReducer の返り値をそのまま渡す。
- * meta.root が付かない synced reducer 内では常に false になり、そこで端末ローカル
- * 情報を読む用途には使えない (決定性を壊すため、その用途自体を禁止する)。
- */
-export function createSyncedActionMatchers<
-  TAction extends Action,
-  TSynced extends SynquxSynced,
-  TRoot extends { synqux: SynquxState },
->(config: {
-  isSyncedAction: (action: Action) => action is TAction
-  selectSynced: (root: TRoot) => TSynced
-}): {
-  /** result が action と同じ hash の success なら true。非 synced action は常に false */
-  isSucceededAction: (action: Action) => action is TAction
-  /** standalone なら成功時 true。同期中は requestedBy === selfId も要求する */
-  isMySucceededAction: (action: Action) => action is TAction
-}
+// 成功判定 matchers (isSucceededAction / isMySucceededAction) は defineSynqux の
+// 戻りからのみ提供する (内部実装 createSyncedActionMatchers は非公開。ADR-0026)。
+// locals reducer 専用 — meta.root が付かない synced reducer 内では常に false になり、
+// そこで端末ローカル情報を読む用途には使えない (決定性を壊すため、その用途自体を禁止する)
 
 /** prefix を consumer に露出せず、listener / middleware から内部 action を除外する */
 export function isSynquxAction(action: Action): boolean
@@ -827,7 +813,7 @@ type SnapshotEnvelope<TSynced> = {
 
 | subpath | 主な export | 対象 |
 | --- | --- | --- |
-| `synqux` | `createSynqux` / `createSynquxRootReducer` / `synquxReducer` / `synquxRestored` / reducer helpers / `generateActionHash` / `defineSynqux` (定義フェーズ。creator registry / 配線 factory を持ち、`createSyncedAction` / `createSyncedSlice` はこの戻りからのみ提供、ADR-0026) / `createSyncedActionMatchers` / `isDeliveredSyncedAction` / `isSynquxAction` / `isResultForPeer` / peer・phase・health selectors / `localStorageSnapshotStore` / 契約型 (`SyncedActionMeta` / `SyncedAction` / `LocalAction` / `SyncedActionHash` 含む) | セットアップ層 + reducer ヘルパー + consumer 型語彙 |
+| `synqux` | `createSynqux` / `createSynquxRootReducer` / `synquxReducer` / `synquxRestored` / reducer helpers / `generateActionHash` / `defineSynqux` (定義フェーズ。creator registry / 配線 factory を持ち、`createSyncedAction` / `createSyncedSlice` / 成功判定 matchers はこの戻りからのみ提供、ADR-0026) / `isDeliveredSyncedAction` / `isSynquxAction` / `isResultForPeer` / peer・phase・health selectors / `localStorageSnapshotStore` / 契約型 (`SyncedActionMeta` / `SyncedAction` / `LocalAction` / `SyncedActionHash` 含む) | セットアップ層 + reducer ヘルパー + consumer 型語彙 |
 | `synqux/react` | `useSynquxSubscription` のみ (読み取りは core selectors を typed useAppSelector へ。ADR-0022 / ADR-0023) | ゲーム開発者層 |
 | `synqux/testing` | `createMemoryHub` / `verifyActionIdempotency` / `assertActionIdempotency` / `createTestRootState` | consumer CI / 本 repo の simulation test |
 | `synqux/firebase` | `firebaseTransport(db, options?: { archivePrunedRequests?: boolean })` | Phase 2 で実装 |

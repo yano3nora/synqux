@@ -69,6 +69,10 @@
 - consumer のセットアップは「定義 1 ファイル + 配線 1 ファイル」に畳まれ、
   `SynquxState` / `createSynquxRootReducer` / rootReducer spread が consumer コード
   から消える。RootState は導出 (`ReturnType<typeof synqux.rootReducer>`)
+- `createSyncedActionMatchers` の standalone export は削除 (ユーザ指摘)。成功判定
+  matchers の提供経路は定義の戻り (isSucceededAction / isMySucceededAction) のみ —
+  creators を定義経由のみに絞ったのと同じ整理。primitive 方式の維持対象は core の
+  配線 (createSynqux / createSynquxRootReducer) であり、matchers factory は含めない
 - pre-1.0 の breaking (createSynquxKit / SynquxKitTypes の削除)。既知の利用は
   導入 consumer 1 repo のみで、リリース前に追従する
 - ADR-0025 の Amendment 群 (registry / syncedKey / matchers 直接配布) の決定内容は
