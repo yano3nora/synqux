@@ -13,6 +13,7 @@ import {
   createOrdering,
   type OrderingState,
 } from './ordering.js'
+import { generateActionHash, normalizeSyncedActionMeta } from './action.js'
 import { findFirstDivergence } from './diff.js'
 import { deriveHostId } from './host.js'
 import { localStorageSnapshotStore } from './local-storage.js'
@@ -1080,10 +1081,6 @@ export const createSynqux = <
     return { ...options, teardown }
   }
 
-  let hashSequence = 0
-  const generateHash = (): string =>
-    `${Date.now().toString(36)}-${(hashSequence++).toString(36)}-${Math.random().toString(36).slice(2, 10)}`
-
   /**
    * 「いつ永続化するか」の policy 点 (Decision 11)
    * v1 は移植元踏襲で「受理 request ごと」(host) /「適用 action ごと」(standalone)。
@@ -1233,7 +1230,12 @@ export const createSynqux = <
   // ---------------------------------------------------------------
 
   /**
-   * synced action へ hash / dispatched を付与する (移植元 actionMetaSetter 相当)
+   * synced action の hash / dispatched の欠落を補う fallback (ADR-0024)
+   *
+   * 正規経路は createSyncedAction が生成時に付与するため、ここを通るのは
+   * 素の RTK createAction / 手組み action だけ。field 単位で補完し (既存値は
+   * それぞれ尊重)、「reducer に到達する synced action は hash / dispatched を
+   * 必ず持つ」不変条件を全経路で成立させる。
    * hash は「適用完了の検知」(内部 entities 破棄) と「result 通知の重複判定」の鍵
    */
   const metaSetterMiddleware: Middleware = () => (next) => (action) => {
@@ -1243,18 +1245,14 @@ export const createSynqux = <
 
     const meta = (action as UnknownAction).meta as SynquxActionMeta | undefined
 
-    if (meta?.hash) {
+    if (typeof meta?.hash === 'string' && typeof meta.dispatched === 'number') {
       return next(action)
     }
 
+    // 同期時、dispatched は request 化の時点でサーバ基準時刻に上書きされる
     return next({
       ...action,
-      meta: {
-        ...meta,
-        hash: generateHash(),
-        // 同期時は request 化の時点でサーバ基準時刻に上書きされる
-        dispatched: meta?.dispatched ?? Date.now(),
-      },
+      meta: normalizeSyncedActionMeta(meta),
     })
   }
 
@@ -2659,8 +2657,24 @@ export const createSynqux = <
       return Promise.reject(signal.reason)
     }
 
-    const hash = generateHash()
     const source = action as UnknownAction
+    const sourceHash = (source.meta as SynquxActionMeta | undefined)?.hash
+    const hash =
+      typeof sourceHash === 'string' && sourceHash !== ''
+        ? sourceHash
+        : generateActionHash()
+
+    // 同一 hash の待機中再発行 = 同一 action オブジェクトの再 dispatch。
+    // 機構は重複排除しない (ADR-0024) ため、silent な resolver 上書きにせず
+    // 明示的に reject して「creator を呼び直す」契約へ誘導する
+    if (subscriptionSession.pendingDispatches.has(hash)) {
+      return Promise.reject(
+        new Error(
+          `dispatchAndWait is already pending for hash "${hash}". ` +
+            'Re-dispatching the same action object is not deduplicated — call the action creator again.',
+        ),
+      )
+    }
     const meta = source.meta as SynquxActionMeta | undefined
     const dispatchedAction = {
       ...source,

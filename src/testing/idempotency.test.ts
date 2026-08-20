@@ -186,4 +186,56 @@ describe('assertActionIdempotency', () => {
       }),
     ).toThrow('not idempotent in domain state')
   })
+
+  it('2 回目は hash が再生成され、hash キーの重複排除に隠れた非冪等を検出する', () => {
+    // hash を record key に使う reducer: 同一 hash の再適用なら上書きで冪等に
+    // 見えるが、現実の repeat (別 request = 別 hash) では entry が増える。
+    // ADR-0007 Amendment: ハーネスは 2 回目の hash を再生成して ② を再現する
+    type HashedState = SynquxSynced<ContractAction> & {
+      reactions: Record<string, true>
+    }
+    const action: ContractAction = { type: 'contract/execute' }
+    const reducer: Reducer<HashedState> = (
+      state = { result: null, reactions: {} },
+      applied,
+    ) => {
+      const hash = (applied as ContractAction & { meta?: { hash?: string } })
+        .meta?.hash
+
+      if (!hash) {
+        return state
+      }
+
+      return {
+        ...success({ ...state, count: 0, log: [] }, applied as ContractAction),
+        reactions: { ...state.reactions, [hash]: true as const },
+      } as unknown as HashedState
+    }
+
+    expect(() =>
+      assertActionIdempotency({
+        reducer,
+        state: { result: null, reactions: {} },
+        action,
+        mode: 'idempotent',
+      }),
+    ).toThrow('not idempotent in domain state')
+  })
+
+  it('action へ焼き込み済みの hash / dispatched は 1 回目で尊重される', () => {
+    const action = {
+      type: 'contract/fixed',
+      meta: { hash: '01HFIXED000000000000000000', dispatched: 1_000 },
+    } as ContractAction & { meta: { hash: string; dispatched: number } }
+    let firstSeenHash: string | undefined
+    const reducer: Reducer<ContractState> = (state = initialState, applied) => {
+      firstSeenHash ??= (applied as { meta?: { hash?: string } }).meta?.hash
+
+      return success({ ...state, count: 1 }, applied as ContractAction)
+    }
+
+    verifyActionIdempotency({ reducer, state: initialState, action })
+
+    expect(firstSeenHash).toBe('01HFIXED000000000000000000')
+  })
 })

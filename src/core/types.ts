@@ -104,9 +104,12 @@ export type SynquxSynced<
 }
 
 /**
- * synqux が action に載せる meta の契約
+ * synqux が action に載せる meta の契約 (wire 語彙、全 optional)
  *
- * synced reducer がゲーム判定に使ってよいのは requestedBy / dispatched のみ。
+ * consumer が reducer で常用する型は SyncedActionMeta (hash / dispatched が
+ * required、ADR-0024) — 本型は封筒・診断・adapter 実装者向けの語彙。
+ *
+ * synced reducer がゲーム判定に使ってよいのは hash / requestedBy / dispatched。
  * response 系は host の試し実行と実配達へ同値を注入するが、dual-host 窓では裁定
  * 候補ごとに異なり得るため、middleware / listener / DevTools / log での診断専用。
  * root は locals reducer 専用で、synced reducer には渡らない。
@@ -130,7 +133,12 @@ export type SynquxActionMeta = {
   /** host が採番した適用順連番。同期順序の診断用 */
   seq?: number
 
-  /** 端末内での action 一意性 (適用完了の検知・result 通知の重複判定に使う) */
+  /**
+   * synced action の公開一意識別子 (ulid、ADR-0024)。封筒で運ばれ全端末同値に
+   * なるため、consumer は同期 state の識別子 (record key 等) に使ってよい。
+   * synqux 内部では適用完了の検知・result 通知の重複判定の鍵。
+   * 辞書順は端末内生成順の目安であり、端末間の適用順の正は seq
+   */
   hash?: string
 
   /**

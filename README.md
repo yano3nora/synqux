@@ -362,10 +362,46 @@ const count = useAppSelector((s) => s.counter.count)
 
 The core selectors (`selectIsHost` etc.) read the reserved `state.synqux` subtree, so they work through this typed `useAppSelector` as-is. No provider component is required (ADR-0022 / ADR-0023).
 
+### Typed action vocabulary (`synquxKit` / `createSyncedAction`)
+
+Bind your domain types once in the setup layer, and feature developers write plain RTK with zero synqux-specific annotations (ADR-0024 / ADR-0025). `createSyncedAction` mirrors `createAction`, but stamps `hash` (a ulid, unique across all devices — safe to use as a record key in synced state) and `dispatched` **at creation time**, so `builder.addCase` infers `action.meta` as required. One creation = one intent: **never re-dispatch the same action object** — the machinery does not deduplicate it (the same identity would apply twice); call the creator again to retry (`dispatchAndWait` rejects a duplicate pending hash explicitly).
+
+```ts
+// synqux.ts (once, in the setup layer)
+import { synquxKit, type LocalAction as SynquxLocalAction } from 'synqux'
+
+export const {
+  createSyncedAction,
+  createSyncedActionMatchers,
+  generateResult, stateWithError, stateWithResult, stateWithTransaction,
+} = synquxKit.withTypes<{
+  synced: GameState
+  root: RootState
+  message: GameResultMessage   // your ResultMessage extension (optional)
+}>()
+
+// Annotation type for locals slices (replaces PayloadAction there).
+// The third param is your app-specific dispatch-time meta extension slot.
+export type LocalAction<P = void> = SynquxLocalAction<P, RootState>
+
+// Feature developers then write plain RTK:
+export const launchTalks = createSyncedAction(
+  'game/talks/launch',
+  (phase: PhaseKey, talks: Talk[]) => ({ payload: { phase, talks } }),
+)
+
+builder.addCase(launchTalks, (state, action) => {
+  action.meta.hash // required — no optional chaining, no custom narrow helper
+})
+```
+
+`meta.hash` is lexicographically sortable in creation order **per device only** — the ground truth for cross-device apply order is always `seq`.
+
 ### Test your consumer (`synqux/testing`)
 
 - `createMemoryHub()` — a deterministic in-memory transport hub with fault injection (duplicate / delay / drop / subscription cutoff), for simulation tests of your slices and flows.
-- `assertActionIdempotency()` — an action idempotency harness with explicit mode declarations: `'idempotent'` for set-style actions, `'rejects-repeat'` for execute-once actions, `'repeatable'` to explicitly exempt intentionally repeatable ones.
+- `assertActionIdempotency()` — an action repeat-contract harness with explicit mode declarations: `'idempotent'` for set-style actions, `'rejects-repeat'` for execute-once actions, `'repeatable'` to explicitly exempt intentionally repeatable ones (generic dispatcher actions whose behavior depends on the payload belong here — guard behaviors are covered by ordinary scenario tests, and operations that must run exactly once get a dedicated action whose reducer validation rejects repeats). The second application regenerates `hash` / `dispatched` to faithfully reproduce "same intent, different request" (ADR-0007 Amendment).
+- `createTestRootState(locals, synqux?)` — builds a root-state fixture with the reserved `state.synqux` slice filled in, for locals reducer / selector tests.
 - Action design guidelines and the sync-debugging playbook are in [SPEC-0001](./docs/SPEC-0001-requests-sync.md).
 
 ## API Reference
@@ -389,6 +425,9 @@ Reducer helpers (game-developer layer; identical with or without sync):
 
 | export | description |
 | --- | --- |
+| `createSyncedAction(type, prepare?)` | `createAction` with creation-time `hash` (ulid) / `dispatched` stamping and required-`meta` typing — the canonical way to define synced actions (ADR-0024 / ADR-0025) |
+| `synquxKit.withTypes<{ synced, root, message? }>()` | Binds your domain types once and returns typed `createSyncedAction` / matchers / result helpers — kills consumer-side generics re-binding wrappers |
+| `generateActionHash()` | Issues a synced-action hash (ulid) directly (rarely needed; creators stamp automatically) |
 | `createSyncedActionMatchers({ isSyncedAction, selectSynced })` | Returns type guards (`isSucceededAction` / `isMySucceededAction`) for locals reducers to check "did the applied action succeed / was it my request". Accepts the return value of `createSynquxRootReducer` as-is. Forbidden inside synced reducers |
 | `isDeliveredSyncedAction(action)` | Checks whether an action carries the complete request/response delivery metadata. Combine with the consumer's synced-domain matcher when needed |
 | `isSynquxAction(action)` | Excludes synqux-internal actions in listeners / middleware. Avoids direct prefix checks |
@@ -417,7 +456,9 @@ Types (all contract types are exported from the main entry):
 | --- | --- |
 | `SynquxSynced<TAction, TMessage>` | Type contract for the synced slice (carries `result`) |
 | `Result` / `ResultMessage` | The verdict a reducer writes and the host reads, and its UI display data |
-| `SynquxActionMeta` | Request/response metadata attached to actions. Response fields are diagnostics only; synced reducers must not branch game state on them |
+| `SyncedActionMeta` / `SyncedAction` / `SyncedActionHash` | Consumer-facing action vocabulary: meta with required `hash` / `dispatched` as seen by synced reducers (ADR-0024) |
+| `LocalAction` | Annotation type for locals slice reducers (replaces `PayloadAction` there; carries `meta.root` and an app meta extension slot) |
+| `SynquxActionMeta` | Wire-level (all-optional) metadata vocabulary for envelopes / diagnostics / adapter authors. Response fields are diagnostics only; synced reducers must not branch game state on them |
 | `Peer` / `PeerRole` | Connected device and role (`player` / `dedicated` / `guest`). Guests can also issue requests |
 | `SynquxHealth` / `SynquxPhase` | Sync health / subscription phase |
 | `Synqux` / `CreateSynquxConfig` / `SynquxSubscribeOptions` | `createSynqux` return value / config / `subscribe` options |
@@ -442,6 +483,7 @@ This is the only export — reading is done by passing the core selectors (`sele
 | --- | --- |
 | `createMemoryHub()` | Deterministic in-memory transport hub with fault injection (duplicate / delay / drop / subscription cutoff), for consumer simulation tests |
 | `assertActionIdempotency(...)` / `verifyActionIdempotency(...)` | Action idempotency harness with mode declarations (`idempotent` / `rejects-repeat` / `repeatable`) — assert / report variants |
+| `createTestRootState(locals, synqux?)` | Root-state fixture builder with the reserved `state.synqux` slice pre-filled |
 | `MemoryHub` / `FaultTarget` / `IdempotencyReport` | Types for the above |
 
 ### `synqux/firebase`

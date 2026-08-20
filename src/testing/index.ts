@@ -5,3 +5,4 @@ export {
   verifyActionIdempotency,
   type IdempotencyReport,
 } from './idempotency.js'
+export { createTestRootState } from './root-state.js'

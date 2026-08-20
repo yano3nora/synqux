@@ -161,6 +161,8 @@ describe('isSynquxAction', () => {
 
 describe('isDeliveredSyncedAction', () => {
   const deliveredMeta = {
+    // 配達済み action は必ず hash を持つ (ADR-0024 で契約化)
+    hash: '01HDELIVERED00000000000000',
     requestedBy: 'peer-1',
     dispatched: 1,
     responsedBy: 'peer-host',
@@ -179,6 +181,7 @@ describe('isDeliveredSyncedAction', () => {
   })
 
   it.each([
+    'hash',
     'requestedBy',
     'dispatched',
     'responsedBy',

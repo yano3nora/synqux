@@ -4,10 +4,22 @@
  * 設計は docs/ADR-0001-design.md、同期仕様は docs/SPEC-0001-requests-sync.md、
  * 公開 API の境界と理由は docs/SPEC-0002-public-api.md を参照。
  */
-export const SYNQUX_VERSION = '0.13.0'
+export const SYNQUX_VERSION = '0.14.0'
 
 // 共有語彙 (契約型)
 export * from './core/types.js'
+
+// action identity と consumer 型語彙 (ADR-0024 / ADR-0025)
+export {
+  createSyncedAction,
+  generateActionHash,
+  type CreateSyncedAction,
+  type LocalAction,
+  type SyncedAction,
+  type SyncedActionHash,
+  type SyncedActionMeta,
+} from './core/action.js'
+export { synquxKit, type SynquxKitTypes } from './core/kit.js'
 
 // セットアップ層
 export {

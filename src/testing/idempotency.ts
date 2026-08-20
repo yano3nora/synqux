@@ -1,5 +1,10 @@
 import type { Action, Reducer } from '@reduxjs/toolkit'
+import {
+  generateActionHash,
+  normalizeSyncedActionMeta,
+} from '../core/action.js'
 import { canonicalStringify } from '../core/snapshot.js'
+import type { SynquxActionMeta } from '../core/types.js'
 
 /**
  * action repeat contract ハーネス (ADR-0007)
@@ -33,9 +38,56 @@ const domainState = <TSynced>(state: TSynced): unknown => ({
 const resultType = (state: unknown): unknown =>
   (state as { result?: { type?: unknown } | null }).result?.type
 
+const actionMeta = (action: Action): SynquxActionMeta | undefined =>
+  (action as Action & { meta?: SynquxActionMeta }).meta
+
+/** 1 回目: 未付与の hash / dispatched を補い、有効な synced action にする */
+const ensureActionMeta = <TAction extends Action>(action: TAction): TAction => {
+  const meta = actionMeta(action)
+
+  if (typeof meta?.hash === 'string' && typeof meta.dispatched === 'number') {
+    return action
+  }
+
+  return { ...action, meta: normalizeSyncedActionMeta(meta) }
+}
+
 /**
- * reducer に同一 action を 2 回適用し、domain state が 1 回適用時と一致するか検証する
- * 比較は result を null にしたうえで canonical JSON (undefined 除去・key 辞書順) で行う
+ * 2 回目: hash / dispatched を再生成する (ADR-0007 Amendment)
+ *
+ * 同一 request の二重適用 (①) は同期機構が防ぐため現実に存在しない。検査対象の
+ * 「同じ意図の別 request (②)」は別 hash で届くため、忠実に再現する。hash を
+ * state の識別子に使う consumer では、同一 hash の重複排除が ② の実害を隠す
+ * 偽陰性になるため、同一 action の再適用では検査にならない
+ */
+const regenerateActionMeta = <TAction extends Action>(
+  action: TAction,
+): TAction => {
+  // 「別 request」は pre-dispatch の action なので、配達済み action が入力でも
+  // 配達経路でしか付かない meta (response 系 / root / requestedBy) は持ち込まない
+  const {
+    requestedBy: _requestedBy,
+    responsedBy: _responsedBy,
+    responsed: _responsed,
+    epoch: _epoch,
+    seq: _seq,
+    replay: _replay,
+    root: _root,
+    ...rest
+  } = actionMeta(action) ?? {}
+
+  return {
+    ...action,
+    meta: { ...rest, hash: generateActionHash(), dispatched: Date.now() },
+  }
+}
+
+/**
+ * reducer に「同じ意図の action」を 2 回適用し、domain state が 1 回適用時と
+ * 一致するか検証する。2 回目は hash / dispatched を再生成した**別 request** として
+ * 適用する (ADR-0007 Amendment。① の同一 request 二重適用は同期機構が防ぐため
+ * 検査対象ではない)。比較は result を null にしたうえで canonical JSON
+ * (undefined 除去・key 辞書順) で行う
  *
  * @example
  *   const report = verifyActionIdempotency({
@@ -54,8 +106,10 @@ export const verifyActionIdempotency = <
   state: TSynced
   action: TAction
 }): IdempotencyReport<TSynced> => {
-  const single = config.reducer(config.state, config.action)
-  const double = config.reducer(single, config.action)
+  const first = ensureActionMeta(config.action)
+  const second = regenerateActionMeta(first)
+  const single = config.reducer(config.state, first)
+  const double = config.reducer(single, second)
 
   return {
     idempotent:

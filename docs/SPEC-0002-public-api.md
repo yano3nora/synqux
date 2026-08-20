@@ -85,8 +85,9 @@ export type SynquxHealth = {
 export type SynquxPhase = 'idle' | 'subscribing' | 'live'
 
 /**
- * synqux が action に載せる meta の契約
- * synced reducer がゲーム判定に使ってよいのは requestedBy / dispatched のみ。
+ * synqux が action に載せる meta の契約 (wire 語彙、全 optional)
+ * consumer が reducer で常用する型は SyncedActionMeta (ADR-0024 / 0025)。
+ * synced reducer がゲーム判定に使ってよいのは hash / requestedBy / dispatched。
  * response 系は dual-host 窓で候補ごとに異なり得るため診断専用
  */
 export type SynquxActionMeta = {
@@ -102,11 +103,70 @@ export type SynquxActionMeta = {
   epoch?: number
   /** host が採番した適用順連番 */
   seq?: number
-  /** 端末内での action 一意性。内部 entities 破棄・result 通知の重複判定に使う */
+  /**
+   * synced action の公開一意識別子 (ulid、ADR-0024)。封筒で運ばれ全端末同値。
+   * consumer は同期 state の識別子 (record key 等) に使ってよい。
+   * 辞書順は端末内生成順の目安で、端末間の適用順の正は seq
+   */
   hash?: string
   /** locals reducer にのみ付与される直前実行結果 (createSynquxRootReducer)。synced には渡らない */
   root?: unknown
 }
+
+// ============================================================
+// action identity と consumer 型語彙 (ADR-0024 / ADR-0025)
+// ============================================================
+
+/** synced action の公開一意識別子 (ulid、26 文字 Crockford base32) */
+export type SyncedActionHash = string
+
+/** hash (ulid) を直接採番する (通常は createSyncedAction が内部で行う) */
+export function generateActionHash(): SyncedActionHash
+
+/**
+ * synced reducer が受ける action の meta (consumer の常用型)
+ * hash / dispatched は required。root は locals reducer でのみ実在する
+ */
+export type SyncedActionMeta<TRoot = unknown> = Omit<SynquxActionMeta, 'root'> &
+  Required<Pick<SynquxActionMeta, 'hash' | 'dispatched'>> & { root?: TRoot }
+
+/** synced action 型 (createSyncedAction の生成物)。payload 横断の注釈用 */
+export type SyncedAction<P = any, TRoot = unknown> = PayloadAction<P> & {
+  meta: SyncedActionMeta<TRoot>
+}
+
+/** locals slice の reducers で PayloadAction<P> の代わりに使う注釈型 */
+export type LocalAction<P = void, TRoot = unknown, TMeta extends object = object> =
+  PayloadAction<P> & { meta?: { root?: TRoot } & TMeta }
+
+/**
+ * RTK createAction の主要 2 overload (payload / prepare) 互換の synced 版。
+ * 生成時に hash / dispatched を stamp し、戻り型に meta: SyncedActionMeta が乗る。
+ * ⚠️ 同一 action オブジェクトの再 dispatch は禁止 (機構は重複排除しない)
+ */
+export const createSyncedAction: CreateSyncedAction
+
+/**
+ * consumer の domain 型を一度だけ束縛して型付き語彙を配布する kit。
+ * createSyncedAction / createSyncedActionMatchers / generateResult /
+ * stateWithResult / stateWithError / stateWithTransaction の束縛済み版を返す
+ */
+export const synquxKit: {
+  withTypes<T extends SynquxKitTypes>(): { /* 上記の束縛済み群 */ }
+}
+
+export type SynquxKitTypes = {
+  synced: SynquxSynced<any, any>
+  root: { synqux: SynquxState }
+  message?: ResultMessage
+}
+
+// synqux/testing 追加分
+/** 予約 slice (state.synqux) を初期値で埋めた root state fixture を組む */
+export function createTestRootState<TRoot extends { synqux: SynquxState }>(
+  locals: Omit<TRoot, 'synqux'>,
+  synqux?: Partial<SynquxState>, // shallow merge (1 段のみ)
+): TRoot
 
 // ============================================================
 // createSynqux (セットアップ層、Decision 3)
@@ -557,7 +617,7 @@ export function assertActionIdempotency<TSynced, TAction>(config: {
 }): void
 ```
 
-`idempotent` は top-level の `result` を `null` に正規化した domain state の一致を指す。`rejects-repeat` は初回が error でないこと、2 回目で domain state が変わらないこと、2 回目が error になることを検査する。`repeatable` は無限実行型をレビュー済みとして table に残す no-op であり、同じ意図の別 request による実害評価は consumer の責任とする。
+`idempotent` は top-level の `result` を `null` に正規化した domain state の一致を指す。`rejects-repeat` は初回が error でないこと、2 回目で domain state が変わらないこと、2 回目が error になることを検査する。`repeatable` は無限実行型をレビュー済みとして table に残す no-op である。**2 回目の適用は hash / dispatched を再生成した「同じ意図の別 request」として行う** (ADR-0007 Amendment。同一 request の二重適用は同期機構が防ぐため検査対象ではない)。1 回目は未付与の meta を補完し、焼き込み済みの hash / dispatched は尊重する。
 
 NOTE: 専用の `createSimulation` ハーネスは**公開しない** (実装時決定)。複数端末 simulation は「`createMemoryHub()` + consumer 自身の store 構築 + fake timers」の組合せで成立し、専用ラッパーは consumer の store 設定を再発明させるだけだった。書き方の実例は本 repo の `src/core/create-synqux.test.ts` / `src/core/host-migration.test.ts` を参照。
 
@@ -704,9 +764,9 @@ type SnapshotEnvelope<TSynced> = {
 
 | subpath | 主な export | 対象 |
 | --- | --- | --- |
-| `synqux` | `createSynqux` / `createSynquxRootReducer` / `synquxReducer` / `synquxRestored` / reducer helpers / `createSyncedActionMatchers` / `isDeliveredSyncedAction` / `isSynquxAction` / `isResultForPeer` / peer・phase・health selectors / `localStorageSnapshotStore` / 契約型 | セットアップ層 + reducer ヘルパー |
+| `synqux` | `createSynqux` / `createSynquxRootReducer` / `synquxReducer` / `synquxRestored` / reducer helpers / `createSyncedAction` / `generateActionHash` / `synquxKit` (withTypes、ADR-0025) / `createSyncedActionMatchers` / `isDeliveredSyncedAction` / `isSynquxAction` / `isResultForPeer` / peer・phase・health selectors / `localStorageSnapshotStore` / 契約型 (`SyncedActionMeta` / `SyncedAction` / `LocalAction` / `SyncedActionHash` 含む) | セットアップ層 + reducer ヘルパー + consumer 型語彙 |
 | `synqux/react` | `useSynquxSubscription` のみ (読み取りは core selectors を typed useAppSelector へ。ADR-0022 / ADR-0023) | ゲーム開発者層 |
-| `synqux/testing` | `createMemoryHub` / `verifyActionIdempotency` / `assertActionIdempotency` | consumer CI / 本 repo の simulation test |
+| `synqux/testing` | `createMemoryHub` / `verifyActionIdempotency` / `assertActionIdempotency` / `createTestRootState` | consumer CI / 本 repo の simulation test |
 | `synqux/firebase` | `firebaseTransport(db, options?: { archivePrunedRequests?: boolean })` | Phase 2 で実装 |
 
 隠蔽の確認 (Decision 7): ゲーム開発者層 (`synqux/react` + reducer ヘルパー + selector) に request / prev / revisions の語彙は一切出ない。`RequestEnvelope` / `SynquxTransport` は adapter 実装者 (= 我々) 向けで、セットアップ層のドキュメントに隔離する。

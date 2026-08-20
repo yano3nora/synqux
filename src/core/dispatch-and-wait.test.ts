@@ -35,6 +35,27 @@ describe('dispatchAndWait', () => {
     expect(result.action.meta?.hash).toBeTruthy()
   })
 
+  it('同一 hash の待機中再発行は明示的に reject する (再 dispatch 禁止の検出)', async () => {
+    const hub = createMemoryHub()
+    const client = createHubClient(hub)
+    await client.sync.subscribe({ store: client.store, groupId: GROUP_ID })
+
+    // createSyncedAction 相当: 生成時に hash が焼かれた action を 2 回渡す誤用
+    const action = {
+      type: 'game/increment' as const,
+      payload: 1,
+      meta: { hash: '01HSAMEHASH000000000000000', dispatched: 1_000 },
+    }
+    const first = client.sync.dispatchAndWait(action)
+    const duplicated = client.sync.dispatchAndWait(action)
+
+    await expect(duplicated).rejects.toThrow('already pending for hash')
+
+    // 先発は上書きされず正常に resolve する
+    await settle()
+    await expect(first).resolves.toMatchObject({ type: 'success' })
+  })
+
   it('message あり error result も reject せず resolve する', async () => {
     const hub = createMemoryHub()
     const client = createHubClient(hub)

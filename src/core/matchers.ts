@@ -24,6 +24,7 @@ export const isDeliveredSyncedAction = (
     Required<
       Pick<
         SynquxActionMeta,
+        | 'hash'
         | 'requestedBy'
         | 'dispatched'
         | 'responsedBy'
@@ -35,7 +36,8 @@ export const isDeliveredSyncedAction = (
 } => {
   const meta = (action as UnknownAction).meta as SynquxActionMeta | undefined
   return (
-    typeof meta?.requestedBy === 'string' &&
+    typeof meta?.hash === 'string' &&
+    typeof meta.requestedBy === 'string' &&
     typeof meta.dispatched === 'number' &&
     typeof meta.responsedBy === 'string' &&
     typeof meta.responsed === 'number' &&

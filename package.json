@@ -1,6 +1,6 @@
 {
   "name": "synqux",
-  "version": "0.13.0",
+  "version": "0.14.0",
   "description": "Client-host realtime sync for Redux apps",
   "keywords": [
     "redux",
@@ -95,6 +95,7 @@
     "node": ">=20"
   },
   "dependencies": {
-    "@yano3nora/ts-utils": "^0.37.1"
+    "@yano3nora/ts-utils": "^0.37.1",
+    "ulid": "^3.0.2"
   }
 }

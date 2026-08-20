@@ -32,3 +32,22 @@
 - execute-once 型は `result` の遷移に影響されず、意図した契約を直接検査できる
 - 無限実行型は `'repeatable'` と明示され、意図せず検査 table から漏れた状態と区別できる
 - 同じ意図の別 request による実害は機構もハーネスも自動判定しない。実害があれば payload の一意 key と validation reject で execute-once 化する責任が consumer に残る
+
+## Amendment (2026-08-20): 2 回目適用の meta 再生成と、契約の宣言単位
+
+### Context
+
+- 従来のハーネスは同一 action オブジェクト (= 同一 hash) を 2 回 reduce していた。しかし①同一 request の二重適用は同期機構が防ぐため、これは現実の同期経路に存在しない事象である。検査対象の②「同じ意図の別 request」は別 hash で届く
+- ADR-0024 で hash が state 識別子として契約化されたことで、この差は偽陰性になる: hash による重複排除 (`includes(hash)` / `record[hash] = ...`) が同一 hash の 2 回目を無害化し、別 hash なら起きる二重加算・履歴重複を隠す
+- また payload によって振る舞いが変わる汎用 dispatcher action (導入 consumer 実例: 数十種の意思決定 key を運ぶ汎用実行 action) は、action type として単一の repeat contract を持てない。分類 table が「1 action type = 1 mode」を前提とする以上、これは検査の穴ではなく action 設計への信号として扱う必要がある
+
+### Decision
+
+1. `assertActionIdempotency` / `verifyActionIdempotency` は **2 回目の適用前に hash / dispatched を再生成する** (②の忠実な再現)。1 回目は未付与の meta を補完し、焼き込み済みの hash / dispatched は尊重する (ADR-0024 により通常は creator が生成時に付与済み)
+2. **repeat contract の宣言単位は action type である**ことを明文化する。汎用 dispatcher action は `'repeatable'` と宣言し (単一契約を持たないことの明示)、個別のガード (演出中拒否など) は通常のシナリオテストで検査する
+3. **execute-once が仕様である操作は、state から一意に実行可否を判定できる専用 action + reducer validation で構成する**ことを推奨形とする (導入 consumer 実例: phase timer の期限確定 action — 汎用実行 action を直接発行せず、reducer が synced state から実行段階を導出し、済んでいれば拒否する)。迷ったら専用 action へ切り出す側に倒す
+
+### Consequences
+
+- 2 回目の meta が変わるため **breaking**: 同一 hash の重複排除に依存して `'idempotent'` を通していた宣言は fail し得る。それは本 Amendment が検出したかった偽陰性そのものであり、宣言の見直し (repeatable 化 or 専用 action 化) を促す
+- Rejected Alternatives の「nonce 化 helper は YAGNI」判断は維持する。meta 再生成はハーネス内部の関心に留まり、公開 API は増やさない
