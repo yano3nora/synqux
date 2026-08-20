@@ -1,16 +1,13 @@
-import {
-  createSynquxKit,
-  type SyncedAction,
-  type SynquxState,
-  type SynquxSynced,
-} from 'synqux'
+import { defineSynqux, type SyncedAction, type SynquxSynced } from 'synqux'
 
 /**
- * Setup-layer kit file (call createSynquxKit exactly once per app).
+ * Setup-layer definition file (call defineSynqux exactly once per app).
  *
- * Actions defined via this kit's createSyncedSlice / createSyncedAction are
- * registered as synced actions, so isSyncedAction needs no hand-written
- * predicate. Creators and isSyncedAction must come from the same kit instance.
+ * Actions defined via this definition's createSyncedSlice / createSyncedAction
+ * are registered as synced actions, so isSyncedAction needs no hand-written
+ * predicate. Creators and the wiring factory (createSynqux) must come from the
+ * same definition. The root state is derived at the wiring phase (main.ts), so
+ * there is no hand-written root type here.
  */
 
 export type DemoAction = SyncedAction
@@ -25,15 +22,10 @@ export type DemoState = SynquxSynced<DemoAction> & {
   }
 }
 
-export type DemoRootState = { synqux: SynquxState; demo: DemoState }
-
-export const { createSyncedSlice, isSyncedAction, stateWithError, syncedKey } =
-  createSynquxKit<{
-    synced: DemoState
-    root: DemoRootState
-  }>({
+export const { createSyncedSlice, createSynqux, stateWithError } = defineSynqux(
+  {
     // Where the synced state mounts in the root (naming the key is the
-    // consumer's choice; tell the kit once — matchers come pre-bound and the
-    // store wiring takes the kit's syncedKey as-is).
+    // consumer's choice; told once, here).
     syncedKey: 'demo',
-  })
+  },
+).withTypes<{ synced: DemoState }>()

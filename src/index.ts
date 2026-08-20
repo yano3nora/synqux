@@ -9,9 +9,9 @@ export const SYNQUX_VERSION = '0.14.0'
 // 共有語彙 (契約型)
 export * from './core/types.js'
 
-// action identity と consumer 型語彙 (ADR-0024 / ADR-0025)
-// createSyncedAction は createSynquxKit の戻りからのみ提供する (registry 登録の
-// ため。kit 非経由の creator は「作れるのに同期されない」抜け道になる)
+// action identity と consumer 型語彙 (ADR-0024 / ADR-0025 / ADR-0026)
+// createSyncedAction / createSyncedSlice は defineSynqux の戻りからのみ提供する
+// (registry 登録のため。定義非経由の creator は「作れるのに同期されない」抜け道になる)
 export {
   generateActionHash,
   type CreateSyncedAction,
@@ -20,7 +20,7 @@ export {
   type SyncedActionHash,
   type SyncedActionMeta,
 } from './core/action.js'
-export { createSynquxKit, type SynquxKitTypes } from './core/kit.js'
+export { defineSynqux, type SynquxTypes } from './core/define-synqux.js'
 
 // セットアップ層
 export {

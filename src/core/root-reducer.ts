@@ -35,8 +35,9 @@ export const createSynquxRootReducer = <
   /** default result を付与する synced domain action の判定述語 */
   isSyncedAction: (action: Action) => action is TAction
   /**
-   * synced subtree を mount する root 内の key。kit (createSynquxKit) の
-   * syncedKey をそのまま渡す — 「synced の位置」の供給点は kit の 1 箇所
+   * synced subtree を mount する root 内の key。定義 (defineSynqux) の
+   * syncedKey をそのまま渡す — 「synced の位置」の供給点は定義の 1 箇所
+   * (通常は定義の配線フェーズが内部で渡す。直接呼ぶのは primitive 方式)
    */
   syncedKey: TSyncedKey
   /**

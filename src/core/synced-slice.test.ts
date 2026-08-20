@@ -10,11 +10,8 @@ import {
 } from 'vitest'
 import { createMemoryHub } from '../testing/memory-hub.js'
 import type { SyncedAction, SyncedActionMeta } from './action.js'
-import { createSynqux } from './create-synqux.js'
-import { createSynquxKit } from './kit.js'
+import { defineSynqux } from './define-synqux.js'
 import { stateWithError } from './results.js'
-import { createSynquxRootReducer } from './root-reducer.js'
-import type { SynquxState } from './slice.js'
 import { settle } from './test-fixtures.js'
 import type { SynquxSynced } from './types.js'
 
@@ -22,13 +19,11 @@ import type { SynquxSynced } from './types.js'
 const ULID_PATTERN = /^[0-9ABCDEFGHJKMNPQRSTVWXYZ]{26}$/
 
 type CounterState = SynquxSynced<SyncedAction> & { count: number }
-type RootState = { synqux: SynquxState; counter: CounterState }
-
 const counterInitialState: CounterState = { result: null, count: 0 }
 
-const kit = createSynquxKit<{ synced: CounterState; root: RootState }>({
-  syncedKey: 'counter',
-})
+const kit = defineSynqux({ syncedKey: 'counter' }).withTypes<{
+  synced: CounterState
+}>()
 
 const counterSlice = kit.createSyncedSlice({
   name: 'counter',
@@ -133,9 +128,9 @@ describe('createSyncedSlice', () => {
   })
 
   it('prepare が焼き込んだ hash / dispatched / error を尊重する (createSyncedAction と同じ契約)', () => {
-    const own = createSynquxKit<{ synced: CounterState; root: RootState }>({
-      syncedKey: 'counter',
-    })
+    const own = defineSynqux({ syncedKey: 'counter' }).withTypes<{
+      synced: CounterState
+    }>()
     const slice = own.createSyncedSlice({
       name: 'fixed',
       initialState: counterInitialState,
@@ -162,9 +157,9 @@ describe('createSyncedSlice', () => {
   })
 
   it('extraReducers は他所で定義された synced action への追従を受ける (RTK 同義)', () => {
-    const own = createSynquxKit<{ synced: CounterState; root: RootState }>({
-      syncedKey: 'counter',
-    })
+    const own = defineSynqux({ syncedKey: 'counter' }).withTypes<{
+      synced: CounterState
+    }>()
     // slice 外・横断 action は createSyncedAction で定義し、slice は追従するだけ
     const boost = own.createSyncedAction<number>('shared/boost')
     const slice = own.createSyncedSlice({
@@ -198,15 +193,14 @@ describe('createSyncedSlice (end-to-end)', () => {
     const hub = createMemoryHub()
 
     const createClient = () => {
-      const wiring = createSynquxRootReducer({
-        isSyncedAction: kit.isSyncedAction,
-        syncedKey: kit.syncedKey,
+      // 二相 API: 定義 (defineSynqux) の createSynqux が配線まで内部化する
+      const sync = kit.createSynqux({
+        transport: hub.createTransport(),
         synced: counterSlice.reducer,
         locals: {},
       })
-      const sync = createSynqux({ transport: hub.createTransport(), ...wiring })
       const store = configureStore({
-        reducer: wiring.rootReducer,
+        reducer: sync.rootReducer,
         middleware: (getDefaultMiddleware) =>
           getDefaultMiddleware().prepend(...sync.middlewares),
       })

@@ -1,18 +1,11 @@
 import { configureStore } from '@reduxjs/toolkit'
 import { initializeApp } from 'firebase/app'
 import { connectDatabaseEmulator, getDatabase } from 'firebase/database'
-import {
-  createSynqux,
-  createSynquxRootReducer,
-  selectIsHost,
-  selectPeers,
-  selectSelfId,
-  type PeerRole,
-} from 'synqux'
+import { selectIsHost, selectPeers, selectSelfId, type PeerRole } from 'synqux'
 import { firebaseTransport } from 'synqux/firebase'
 import { createRig } from './rig'
 import { add, append, demoSlice, set, setLocked } from './slice'
-import { isSyncedAction, syncedKey, type DemoAction } from './synqux'
+import { createSynqux, type DemoAction } from './synqux'
 
 /**
  * synqux demo: sync a counter across devices with the Firebase emulator
@@ -41,17 +34,15 @@ const role: PeerRole | undefined =
     : undefined
 const stormTotal = Number(params.get('storm'))
 
-// createSynquxRootReducer accepts exactly one synced slice — createSyncedSlice
-// covers a demo-sized app in one slice (see demo/slice.ts). Apps with many
-// domains compose sub-reducers into one slice instead (README NOTE).
+// Wiring phase: the definition's createSynqux wires rootReducer / selectSynced /
+// isSyncedAction internally and derives the root type from syncedKey + locals.
+// `synced` takes exactly one reducer — createSyncedSlice covers a demo-sized
+// app in one slice (see demo/slice.ts); apps with many domains compose
+// sub-reducers into one slice instead (README NOTE).
 const synqux = createSynqux({
   transport: firebaseTransport(db, { archivePrunedRequests: true }),
-  ...createSynquxRootReducer({
-    isSyncedAction,
-    syncedKey,
-    synced: demoSlice.reducer,
-    locals: {},
-  }),
+  synced: demoSlice.reducer,
+  locals: {},
 })
 
 // Measurement rig for TASK-260812 Phase A-2 (enable with `?rig=1`). Place the

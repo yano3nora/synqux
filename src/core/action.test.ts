@@ -6,9 +6,8 @@ import {
   type SyncedAction,
   type SyncedActionMeta,
 } from './action.js'
-import { createSynquxKit } from './kit.js'
+import { defineSynqux } from './define-synqux.js'
 import { createSynquxRootReducer } from './root-reducer.js'
-import type { SynquxState } from './slice.js'
 import type { Result, SynquxSynced } from './types.js'
 
 // ulid: 26 文字 Crockford base32 (I, L, O, U を含まない)
@@ -114,18 +113,14 @@ describe('createSyncedAction', () => {
   })
 })
 
-describe('createSynquxKit', () => {
+describe('defineSynqux', () => {
   type GameMessage = { text: string; duration?: number | null }
   type GameState = SynquxSynced<SyncedAction, GameMessage> & { count: number }
-  type RootState = { synqux: SynquxState; game: GameState }
 
-  const kit = createSynquxKit<{
+  const kit = defineSynqux({ syncedKey: 'game' }).withTypes<{
     synced: GameState
-    root: RootState
     message: GameMessage
-  }>({
-    syncedKey: 'game',
-  })
+  }>()
 
   it('束縛済み stateWithError が domain 型のまま error result を積む', () => {
     const increment = kit.createSyncedAction<number>('game/increment')
@@ -152,9 +147,9 @@ describe('createSynquxKit', () => {
   })
 
   it('createSyncedAction が type を registry へ登録し isSyncedAction が判定する', () => {
-    const own = createSynquxKit<{ synced: GameState; root: RootState }>({
-      syncedKey: 'game',
-    })
+    const own = defineSynqux({ syncedKey: 'game' }).withTypes<{
+      synced: GameState
+    }>()
     const increment = own.createSyncedAction<number>('game/increment')
 
     expect(own.isSyncedAction(increment(1))).toBe(true)
@@ -165,9 +160,9 @@ describe('createSynquxKit', () => {
   })
 
   it('synqux/ 予約 prefix の type は定義時に throw する (内部 action の registry 汚染防止)', () => {
-    const own = createSynquxKit<{ synced: GameState; root: RootState }>({
-      syncedKey: 'game',
-    })
+    const own = defineSynqux({ syncedKey: 'game' }).withTypes<{
+      synced: GameState
+    }>()
 
     expect(() => own.createSyncedAction('synqux/restored')).toThrow(
       /reserved "synqux\/" prefix/,
@@ -181,12 +176,9 @@ describe('createSynquxKit', () => {
       meta: SyncedActionMeta
     }
     type CountState = SynquxSynced<CountAction> & { count: number }
-    const own = createSynquxKit<{
+    const own = defineSynqux({ syncedKey: 'game' }).withTypes<{
       synced: CountState
-      root: { synqux: SynquxState; game: CountState }
-    }>({
-      syncedKey: 'game',
-    })
+    }>()
     const increment = own.createSyncedAction<number>('game/increment')
 
     // narrow の正しさは「登録 creator の action ⊆ union」の宣言整合に依存する
@@ -199,23 +191,22 @@ describe('createSynquxKit', () => {
   })
 
   it('registry は kit ごとに独立する (creator と述語は同じ kit から取る契約)', () => {
-    const kitA = createSynquxKit<{ synced: GameState; root: RootState }>({
-      syncedKey: 'game',
-    })
-    const kitB = createSynquxKit<{ synced: GameState; root: RootState }>({
-      syncedKey: 'game',
-    })
+    const kitA = defineSynqux({ syncedKey: 'game' }).withTypes<{
+      synced: GameState
+    }>()
+    const kitB = defineSynqux({ syncedKey: 'game' }).withTypes<{
+      synced: GameState
+    }>()
     const fromA = kitA.createSyncedAction('game/from-a')
 
     expect(kitA.isSyncedAction(fromA())).toBe(true)
     expect(kitB.isSyncedAction(fromA())).toBe(false)
   })
 
-  it('matchers は registry / kit config から全束縛済みで、そのまま使える', () => {
-    type TestRoot = { synqux: SynquxState; game: GameState; local: number }
-    const own = createSynquxKit<{ synced: GameState; root: TestRoot }>({
-      syncedKey: 'game',
-    })
+  it('matchers は registry / 定義 config から全束縛済みで、そのまま使える', () => {
+    const own = defineSynqux({ syncedKey: 'game' }).withTypes<{
+      synced: GameState
+    }>()
     const increment = own.createSyncedAction<number>('game/increment')
 
     // rootReducer 経由で default success result の stamp と meta.root の付与を

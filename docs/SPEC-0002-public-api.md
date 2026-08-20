@@ -140,10 +140,11 @@ export type LocalAction<P = void, TRoot = unknown, TMeta extends object = object
   PayloadAction<P> & { meta?: { root?: TRoot } & TMeta }
 
 /**
- * consumer の domain 型を一度だけ束縛して型付き語彙を配布する kit factory
- * (ADR-0025 Amendment)。**1 app 1 回だけ呼ぶ** — kit は creator registry を持ち、
- * 呼ぶたび独立した registry になるため、creator と isSyncedAction は必ず同じ
- * kit の戻りから取る。
+ * synqux の**定義フェーズ** (ADR-0026)。**1 app 1 回だけ呼ぶ** — 定義は creator
+ * registry を持ち、呼ぶたび独立した registry になるため、creator と配線 factory
+ * は必ず同じ定義の戻りから取る。`defineSynqux({ syncedKey })` が key literal の
+ * 値推論を、`.withTypes<T>()` (純粋な型 cast。状態は defineSynqux が 1 回だけ
+ * 作るため何度呼んでも分裂しない) が型束縛を担う 2 段チェーン。
  *
  * - createSyncedSlice: RTK createSlice の synced 版 (`{ name, initialState,
  *   reducers, extraReducers? }` のサブセット互換)。**slice が定義する (= reducers
@@ -162,33 +163,42 @@ export type LocalAction<P = void, TRoot = unknown, TMeta extends object = object
  *   ⚠️ 同一 action オブジェクトの再 dispatch は禁止 (機構は重複排除しない)
  *   `synqux/` 予約 prefix の type は定義時に throw で拒否する (内部 action の
  *   registry 汚染防止)
- * - isSyncedAction: registry 由来の判定述語。createSynquxRootReducer /
- *   createSynqux の config へそのまま渡す。登録は creator 定義モジュールの
- *   import 副作用なので creator の lazy import は禁止 (配達 action の判定漏れ)。
+ * - isSyncedAction: registry 由来の判定述語。配線フェーズが内部で接続するため
+ *   通常は触らない (primitive 方式で core へ直接渡す場合に使う)。登録は creator
+ *   定義モジュールの import 副作用なので creator の lazy import は禁止 (配達
+ *   action の判定漏れ)。
  *   narrow 先は T['synced'] の Result 束縛から推論した domain action union。
  *   実行時は type 文字列照合のみ (creator.match と同じ契約): meta の実在は
  *   metaSetter fallback の不変条件が保証し、union との整合は「登録 creator の
  *   action ⊆ union」という synced state 型宣言の既存義務に依存する
- * - syncedKey: synced subtree の mount key (config の echo)。
- *   createSynquxRootReducer の syncedKey へそのまま渡す
+ * - syncedKey: synced subtree の mount key (config の echo)。primitive 方式で
+ *   createSynquxRootReducer へ直接渡す場合に使う
  * - isSucceededAction / isMySucceededAction: locals reducer 用の成功判定 matcher
  *   (registry の isSyncedAction と syncedKey 由来の selectSynced で全束縛済み)。
  *   core の createSyncedActionMatchers は primitive 方式用に残る
+ * - **createSynqux (配線フェーズ)**: transport と素材 (synced reducer / locals) を
+ *   受けて instance を返す。rootReducer / selectSynced / isSyncedAction の接続は
+ *   内部化され、root 型は SynquxRootState<TKey, TSynced, TLocals> として導出される
+ *   — consumer の RootState は `ReturnType<typeof synqux.rootReducer>` で得る
+ *   (手書き root と SynquxState import は不要)。group を跨ぐときは instance を
+ *   作り直す契約 (core と同じ) のため factory
  * - generateResult / stateWithResult / stateWithError / stateWithTransaction の束縛済み版
+ *
+ * creators / matchers の meta.root 型は定義時点で判明している部分 root
+ * (`{ synqux } & Record<TKey, TSynced>`)。sibling locals まで読む文脈は
+ * LocalAction<P, TRoot> 注釈 (TRoot は導出 RootState) を使う
  */
-export const createSynquxKit: <T extends SynquxKitTypes>(config: {
+export const defineSynqux: <TKey extends string>(config: {
   /**
    * root 内の synced state の mount key。key の命名は consumer の領域のため
-   * kit に一度だけ教える (供給点はここだけ)。型は T['root'][K] = T['synced'] を
-   * 満たす key に制限され、typo や型の合わない key はコンパイル時に落ちる
-   * (構造的に同型な別 key までは区別できない)
+   * 定義に一度だけ教える (供給点はここだけ)。root state は配線フェーズが
+   * この key + locals から導出する
    */
-  syncedKey: SyncedKeyOf<T>
-}) => { /* 上記の束縛済み群 */ }
+  syncedKey: TKey
+}) => SynquxDefinition<SynquxTypes, TKey> // .withTypes<T>() で domain 型を束縛
 
-export type SynquxKitTypes = {
+export type SynquxTypes = {
   synced: SynquxSynced<any, any>
-  root: { synqux: SynquxState }
   message?: ResultMessage
 }
 
@@ -422,8 +432,8 @@ export function createSynquxRootReducer<
   /** synced reducer の前段で default success を stamp する対象 action */
   isSyncedAction: (action: Action) => action is TAction
   /**
-   * synced subtree の mount key。kit (createSynquxKit) の syncedKey を
-   * そのまま渡す。'synqux' は予約 (内部 slice mount) のため throw
+   * synced subtree の mount key。定義 (defineSynqux) の syncedKey を
+   * そのまま渡す (primitive 方式)。'synqux' は予約 (内部 slice mount) のため throw
    */
   syncedKey: TSyncedKey
   /**
@@ -814,7 +824,7 @@ type SnapshotEnvelope<TSynced> = {
 
 | subpath | 主な export | 対象 |
 | --- | --- | --- |
-| `synqux` | `createSynqux` / `createSynquxRootReducer` / `synquxReducer` / `synquxRestored` / reducer helpers / `generateActionHash` / `createSynquxKit` (creator registry を持つ kit factory。`createSyncedAction` はこの戻りからのみ提供、ADR-0025) / `createSyncedActionMatchers` / `isDeliveredSyncedAction` / `isSynquxAction` / `isResultForPeer` / peer・phase・health selectors / `localStorageSnapshotStore` / 契約型 (`SyncedActionMeta` / `SyncedAction` / `LocalAction` / `SyncedActionHash` 含む) | セットアップ層 + reducer ヘルパー + consumer 型語彙 |
+| `synqux` | `createSynqux` / `createSynquxRootReducer` / `synquxReducer` / `synquxRestored` / reducer helpers / `generateActionHash` / `defineSynqux` (定義フェーズ。creator registry / 配線 factory を持ち、`createSyncedAction` / `createSyncedSlice` はこの戻りからのみ提供、ADR-0026) / `createSyncedActionMatchers` / `isDeliveredSyncedAction` / `isSynquxAction` / `isResultForPeer` / peer・phase・health selectors / `localStorageSnapshotStore` / 契約型 (`SyncedActionMeta` / `SyncedAction` / `LocalAction` / `SyncedActionHash` 含む) | セットアップ層 + reducer ヘルパー + consumer 型語彙 |
 | `synqux/react` | `useSynquxSubscription` のみ (読み取りは core selectors を typed useAppSelector へ。ADR-0022 / ADR-0023) | ゲーム開発者層 |
 | `synqux/testing` | `createMemoryHub` / `verifyActionIdempotency` / `assertActionIdempotency` / `createTestRootState` | consumer CI / 本 repo の simulation test |
 | `synqux/firebase` | `firebaseTransport(db, options?: { archivePrunedRequests?: boolean })` | Phase 2 で実装 |

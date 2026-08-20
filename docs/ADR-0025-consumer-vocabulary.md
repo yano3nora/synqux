@@ -1,6 +1,6 @@
 # ADR-0025: consumer への型付き語彙の配布 (createSyncedAction / LocalAction / synquxKit)
 
-- Status: **Accepted**
+- Status: **Accepted** (kit 系 Amendment 群の統合形は ADR-0026 (defineSynqux) が supersede。registry / syncedKey / matchers 直接配布の決定内容自体は defineSynqux に引き継がれている)
 - Date: 2026-08-20
 - 関連: ADR-0024 (action identity)、ADR-0023 (react slim / api inventory)、SPEC-0002、`TASK-260820-action-identity.md`、TASK-260812 (consumer boilerplate 吸収)
 
