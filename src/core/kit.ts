@@ -185,15 +185,24 @@ export type CreateSyncedSlice<TRoot = unknown> = <
  * @example
  * export const {
  *   createSyncedAction, createSyncedSlice, isSyncedAction,
- *   createSyncedActionMatchers,
+ *   isSucceededAction, isMySucceededAction,
  *   generateResult, stateWithError, stateWithResult, stateWithTransaction,
  * } = createSynquxKit<{
  *   synced: GameState
  *   root: RootState
  *   message: GameResultMessage
- * }>()
+ * }>({
+ *   selectSynced: (root) => root.game,
+ * })
  */
-export const createSynquxKit = <T extends SynquxKitTypes>() => {
+export const createSynquxKit = <T extends SynquxKitTypes>(config: {
+  /**
+   * root 内の synced state の位置。synced key の命名は consumer の領域のため
+   * kit に一度だけ教える (matchers の束縛に使う。createSynquxRootReducer の
+   * synced record key と同じ位置を指すこと)
+   */
+  selectSynced: (root: T['root']) => T['synced']
+}) => {
   const registry = new Set<string>()
 
   // narrow 先は T['synced'] から推論した domain action union。RTK の
@@ -303,25 +312,22 @@ export const createSynquxKit = <T extends SynquxKitTypes>() => {
     isSyncedAction,
 
     /**
-     * locals reducer 用の成功判定 matcher 群 (束縛済み)。isSyncedAction は
-     * registry から自動束縛されるため selectSynced だけ渡す
+     * locals reducer 用の成功判定 matcher 群 (isSucceededAction /
+     * isMySucceededAction)。isSyncedAction は registry から、selectSynced は
+     * kit config から束縛済みのため、そのまま使える
      */
-    createSyncedActionMatchers: (config: {
-      /** createSynquxRootReducer が返す synced slice selector */
-      selectSynced: (root: T['root']) => T['synced']
-    }) =>
-      createSyncedActionMatchers<
-        MatchedSyncedActionOf<T>,
-        T['synced'],
-        T['root']
-      >({
-        // matchers の narrow 先 (locals 文脈) では meta.root が実在するため、
-        // ここでだけ root 型を焼き直す (代入点のみ dirty にする)
-        isSyncedAction: isSyncedAction as (
-          action: Action,
-        ) => action is MatchedSyncedActionOf<T>,
-        selectSynced: config.selectSynced,
-      }),
+    ...createSyncedActionMatchers<
+      MatchedSyncedActionOf<T>,
+      T['synced'],
+      T['root']
+    >({
+      // matchers の narrow 先 (locals 文脈) では meta.root が実在するため、
+      // ここでだけ root 型を焼き直す (代入点のみ dirty にする)
+      isSyncedAction: isSyncedAction as (
+        action: Action,
+      ) => action is MatchedSyncedActionOf<T>,
+      selectSynced: config.selectSynced,
+    }),
 
     // results 系の action 束縛は SyncedActionOf<T> (state 自身の Result と同じ
     // union)。synced reducer 内で呼ぶ helper のため root 型は含めない

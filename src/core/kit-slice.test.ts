@@ -26,7 +26,9 @@ type RootState = { synqux: SynquxState; counter: CounterState }
 
 const counterInitialState: CounterState = { result: null, count: 0 }
 
-const kit = createSynquxKit<{ synced: CounterState; root: RootState }>()
+const kit = createSynquxKit<{ synced: CounterState; root: RootState }>({
+  selectSynced: (root) => root.counter,
+})
 
 const counterSlice = kit.createSyncedSlice({
   name: 'counter',
@@ -131,7 +133,9 @@ describe('createSyncedSlice', () => {
   })
 
   it('prepare が焼き込んだ hash / dispatched / error を尊重する (createSyncedAction と同じ契約)', () => {
-    const own = createSynquxKit<{ synced: CounterState; root: RootState }>()
+    const own = createSynquxKit<{ synced: CounterState; root: RootState }>({
+      selectSynced: (root) => root.counter,
+    })
     const slice = own.createSyncedSlice({
       name: 'fixed',
       initialState: counterInitialState,
@@ -158,7 +162,9 @@ describe('createSyncedSlice', () => {
   })
 
   it('extraReducers は他所で定義された synced action への追従を受ける (RTK 同義)', () => {
-    const own = createSynquxKit<{ synced: CounterState; root: RootState }>()
+    const own = createSynquxKit<{ synced: CounterState; root: RootState }>({
+      selectSynced: (root) => root.counter,
+    })
     // slice 外・横断 action は createSyncedAction で定義し、slice は追従するだけ
     const boost = own.createSyncedAction<number>('shared/boost')
     const slice = own.createSyncedSlice({

@@ -31,4 +31,8 @@ export const { createSyncedSlice, isSyncedAction, stateWithError } =
   createSynquxKit<{
     synced: DemoState
     root: DemoRootState
-  }>()
+  }>({
+    // Where the synced state lives in the root (naming the key is the
+    // consumer's choice; tell the kit once so matchers come pre-bound).
+    selectSynced: (root) => root.demo,
+  })

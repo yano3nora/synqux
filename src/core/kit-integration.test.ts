@@ -27,7 +27,9 @@ type CountAction = Action<'game/increment'> & {
 type CountState = SynquxSynced<CountAction> & { count: number }
 type RootState = { synqux: SynquxState; game: CountState }
 
-const kit = createSynquxKit<{ synced: CountState; root: RootState }>()
+const kit = createSynquxKit<{ synced: CountState; root: RootState }>({
+  selectSynced: (root) => root.game,
+})
 const increment = kit.createSyncedAction<number>('game/increment')
 
 const countReducer: Reducer<CountState> = (
@@ -125,7 +127,9 @@ describe('createSynquxKit (end-to-end)', () => {
     // instance は端末ごとに別物になる。同じ creator 定義を各 kit で評価した状態
     // (= 同一 bundle の再現) で、封筒から再構築された action が判定できること
     const buildPeer = (hub: ReturnType<typeof createMemoryHub>) => {
-      const ownKit = createSynquxKit<{ synced: CountState; root: RootState }>()
+      const ownKit = createSynquxKit<{ synced: CountState; root: RootState }>({
+        selectSynced: (root) => root.game,
+      })
       const ownIncrement = ownKit.createSyncedAction<number>('game/increment')
       return { ...createKitClient(hub, ownKit), increment: ownIncrement }
     }

@@ -84,7 +84,9 @@ export const { createSyncedSlice, createSyncedAction, isSyncedAction, stateWithE
   createSynquxKit<{
     synced: CounterState
     root: RootState
-  }>()
+  }>({
+    selectSynced: (root) => root.counter, // where your synced slice lives
+  })
 ```
 
 ```ts
@@ -406,13 +408,19 @@ export const {
   createSyncedSlice,           // createSlice whose actions are all synced actions
   createSyncedAction,
   isSyncedAction,              // registry-derived — pass to createSynquxRootReducer
-  createSyncedActionMatchers,  // isSyncedAction is pre-bound; pass only selectSynced
+  isSucceededAction,           // locals-reducer matchers, fully pre-bound
+  isMySucceededAction,
   generateResult, stateWithError, stateWithResult, stateWithTransaction,
 } = createSynquxKit<{
   synced: GameState
   root: RootState
   message: GameResultMessage   // your ResultMessage extension (optional)
-}>()
+}>({
+  // Where the synced state lives in the root. Naming the key is your choice
+  // (synqux only reserves state.synqux), so tell the kit once — matchers and
+  // future helpers come pre-bound instead of asking again.
+  selectSynced: (root) => root.game,
+})
 
 // Annotation type for locals slices (replaces PayloadAction there).
 // The third param is your app-specific dispatch-time meta extension slot.
@@ -461,7 +469,7 @@ Reducer helpers (game-developer layer; identical with or without sync):
 | --- | --- |
 | `createSynquxKit<{ synced, root, message? }>()` | Binds your domain types once (call once per app) and returns typed helpers plus the creator registry: `createSyncedSlice` (a `createSlice` whose actions are all synced actions) and `createSyncedAction` (a `createAction` for standalone / cross-slice actions) — both stamp `hash` (ulid) / `dispatched` at creation time, type `meta` as required, and register the type (the only ways to define synced actions, ADR-0024 / ADR-0025) — plus the registry-derived `isSyncedAction`, pre-bound matchers, and result helpers |
 | `generateActionHash()` | Issues a synced-action hash (ulid) directly (rarely needed; creators stamp automatically) |
-| `createSyncedActionMatchers({ isSyncedAction, selectSynced })` | Returns type guards (`isSucceededAction` / `isMySucceededAction`) for locals reducers to check "did the applied action succeed / was it my request". The kit-bound variant takes only `selectSynced`. Forbidden inside synced reducers |
+| `createSyncedActionMatchers({ isSyncedAction, selectSynced })` | Returns type guards (`isSucceededAction` / `isMySucceededAction`) for locals reducers to check "did the applied action succeed / was it my request". The kit returns these guards directly, fully pre-bound. Forbidden inside synced reducers |
 | `isDeliveredSyncedAction(action)` | Checks whether an action carries the complete request/response delivery metadata. Combine with the consumer's synced-domain matcher when needed |
 | `isSynquxAction(action)` | Excludes synqux-internal actions in listeners / middleware. Avoids direct prefix checks |
 | `isResultForPeer(result, peerId)` | Checks whether a result targets everyone or the given peer, per the `targets` contract |

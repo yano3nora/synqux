@@ -169,10 +169,15 @@ export type LocalAction<P = void, TRoot = unknown, TMeta extends object = object
  *   実行時は type 文字列照合のみ (creator.match と同じ契約): meta の実在は
  *   metaSetter fallback の不変条件が保証し、union との整合は「登録 creator の
  *   action ⊆ union」という synced state 型宣言の既存義務に依存する
- * - createSyncedActionMatchers: isSyncedAction 束縛済み ({ selectSynced } だけ受ける)
+ * - isSucceededAction / isMySucceededAction: locals reducer 用の成功判定 matcher
+ *   (registry の isSyncedAction と factory config の selectSynced で全束縛済み)。
+ *   core の createSyncedActionMatchers は primitive 方式用に残る
  * - generateResult / stateWithResult / stateWithError / stateWithTransaction の束縛済み版
  */
-export const createSynquxKit: <T extends SynquxKitTypes>() => { /* 上記の束縛済み群 */ }
+export const createSynquxKit: <T extends SynquxKitTypes>(config: {
+  /** root 内の synced の位置。synced key の命名は consumer の領域のため kit に一度だけ教える */
+  selectSynced: (root: T['root']) => T['synced']
+}) => { /* 上記の束縛済み群 */ }
 
 export type SynquxKitTypes = {
   synced: SynquxSynced<any, any>

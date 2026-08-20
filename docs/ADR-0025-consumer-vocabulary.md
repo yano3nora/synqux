@@ -121,3 +121,20 @@ registry 非登録 + meta 非 stamp になる」罠が残っていた。RTK の�
    `SyncedAction<any, T['root']>` から **SyncedActionOf<T> (state 自身の Result と
    同じ union)** へ変更。stateWith* は synced reducer 内 (meta.root が存在しない文脈)
    で呼ぶ helper であり、root 型を含める理由がなかった (述語の narrow と同じ整理)
+
+## Amendment (2026-08-21): kit への selectSynced 集約
+
+導入 consumer の追従作業で「synced の位置 (root.game 等)」を matchers 生成時にも
+供給させられている残債が確認された (registry 化で二重供給を潰した後の最後の 1 箇所)。
+
+1. **`createSynquxKit<T>({ selectSynced })` として factory が selectSynced を受ける**。
+   synced key の命名は consumer の領域 (synqux が予約するのは `state.synqux` のみ) の
+   ため「どこにあるかを教える責任」自体は consumer に残るが、供給点を kit の 1 箇所に
+   畳む
+2. **kit は matchers (isSucceededAction / isMySucceededAction) を束縛済みで直接返す**。
+   kit 版 `createSyncedActionMatchers` factory は廃止 (core 版は primitive 方式用に
+   従来どおり)
+3. `createSynquxRootReducer` の synced record key は state 構成 (shape) の宣言で、
+   kit の selectSynced は読み取り位置の宣言 — 役割が異なるため統合しない。kit は
+   instance 非依存 (循環 import 回避) の構造上、store 側配線から selector を
+   受け取る経路は取れない
