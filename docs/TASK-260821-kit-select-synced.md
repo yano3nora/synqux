@@ -22,5 +22,5 @@
 - [x] `kit.ts`: factory 引数追加・matchers の直接 spread・doc 更新
 - [x] テスト / demo の kit 呼び出し追従
 - [x] ADR-0025 Amendment・SPEC-0002・README
-- [ ] `npm run fix` / `npm test`
-- [ ] Codex レビュー
+- [x] `npm run fix` / `npm test` (392 tests 全 green)
+- [x] Codex レビュー → Approve (docs 2 箇所の追従指摘のみ、修正済み)
