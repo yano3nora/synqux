@@ -291,6 +291,21 @@ const synqux = createSynqux({
 - `when` sees only synced state and server time. Local presentation state and locals are unavailable by design (blocked at the type level).
 - The engine does not guarantee exactly-once (a dual-host window can double-fire). Make the reducer reject the second application (`assertActionIdempotency` mode `'rejects-repeat'`), and use a message-less `withErrorResult` (log-only) for retry rejections to avoid UI noise.
 - Host migration needs no handoff: the new host derives the same conclusion from state. Automations also run in standalone sessions — gate rules you want paused via a predicate on synced state (e.g. a tutorial flag).
+- **Rules are not ordered relative to each other.** One evaluation pass reads the synced state once and issues *all* of the rules whose `when` holds against it. In a synced session each request is then adjudicated on its own and actions apply in the host's `seq` order, but which of the co-issued requests gets a `seq` first is an unspecified race (transport arrival plus async scheduling inside the host). The `automations` array order is evaluation order only — never encode a sequence in it.
+- A rule may only return a synced action (anything else is skipped with a console error). That is the mechanism, not a restriction to work around: rules run on the host alone, so anything the other devices must see has to travel through synced state. Store the durable fact in synced state via a synced action (synced state and its snapshot are the record — request envelopes are pruned, and a device joining later restores from the snapshot without relying on a replay of the complete action history), let each device derive its local state from it deterministically in a locals `extraReducers`, and keep `listeners` (`mode: 'everyone'`) for best-effort live presentation only — listeners are live-phase, non-replayed, and not exactly-once.
+
+**When priority is part of the spec.** Fold the competing rules into one rule whose `action` picks the next single action. The engine deliberately does not serialize rules: contention over an exclusive resource also happens between an automation and a user action (which no rule ordering could cover), and the priority itself is a fact about your domain, not something the engine can derive. Adjudication of the conflict stays where it belongs — in the reducer.
+
+Note that `action` receives synced state only (no `now`), so this shape expresses state-derived priority. When the candidates are separated by time, issue one generic action and let the reducer pick and validate the target from [`action.meta.dispatched`](#use-server-time-in-reducers-actionmetadispatched).
+
+```ts
+automations: [{
+  id: 'advance-experiment',
+  // One rule, one action per tick: the priority lives in `nextExperiment`, in domain code.
+  when: (s) => nextExperiment(s) !== null,
+  action: (s) => nextExperiment(s)!,
+}]
+```
 
 ### React to applied actions (`listeners`)
 

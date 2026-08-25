@@ -76,3 +76,26 @@ rootReducer chain の外 (listener / dispatch 戻り後) で `result` を読む 
 同じ取り違えを起こし得るため、**action identity が必要な読み取りは hash で照合する**
 (ADR-0024)。chain 内 (reducer の述語) は「result に積む action は適用中の action」契約に
 より照合不要 (TASK-260825 設計 1.5)。
+
+## Amendment (2026-08-25): rule 間に順序保証はない (TASK-260825-automation-ordering-docs)
+
+Decision 1 の宣言的ルール表について、**rule 間の適用順は保証しない**ことを明文化する。
+
+- engine は 1 evaluation path で同一の synced state・同一の `now` に対し全 rule を走査し、
+  `when` が成立した分を**すべて**発行する (直列化しない)。synced session では同 tick 発行分の
+  封筒の `requested` も同値になる。適用順自体は host が採番した `seq` 順 (ADR-0002) だが、
+  同時発行された request のどれが先に採番されるかは、裁定ループが `serverNow()` の await を
+  挟んで直列ゲートを取り合う**未規定の競争** (transport の到着順 + host 内の非同期
+  スケジューリング) である。`automations` 配列の並び順は**評価順であって適用順ではない**
+- engine 側で直列化しない理由:
+  1. 排他リソースの競合は automation 同士だけでなく **automation とユーザー操作の間**でも起きる。
+     automation を直列化しても競合は解消せず、競合の裁定は「reducer が唯一の判定器」の原則どおり
+     reducer (試し実行での拒否) が行う
+  2. 優先順位は **domain の事実**であり、engine が持てる汎用の順序規則は存在しない
+- 仕様として優先順位が存在する場合の推奨形は「**競合する rule を 1 本へ畳み、`action` が次の
+  1 件を選ぶ**」。1 tick 1 発行になり、優先順位が domain のコードとして 1 箇所に残る。
+  ただし `action` は synced state のみを受け取る (`now` は `when` にしか渡らない) ため、
+  この形が表現できるのは state 由来の優先順位である。時刻で候補が分かれる場合は汎用 action を
+  1 本発行し、reducer が `meta.dispatched` (synced session ではサーバ基準時刻。ADR-0024 Decision 3 / 4) で対象を選択・検証する
+- 「1 tick 1 rule」を前提に演出順を rule の並び順で固定しようとする踏み方が導入 consumer で
+  実際に起きたため、consumer 向けの記述は README の automations 節にも置く
