@@ -52,3 +52,27 @@ runtime の `setEnabled(false)` は ADR-0018 で廃止され、tutorial は stan
 (`subscribe({ mode: 'standalone' })`) で表現されるようになった。Decision 4 の
 「enabled gate は設けない (tutorial 中も評価継続)」は「mode gate は設けない
 (standalone session でも評価継続・local 適用)」と読み替える。本文は当時の記録のまま残す。
+
+## Amendment (2026-08-25): dispatchAndWait の解決点 = 適用直後 (TASK-260825-dispatch-and-wait-nested)
+
+Decision 6 の「自端末で裁定結果の処理が完了した時点で resolve」の**実装上の確定点**を
+「**適用直後・nested dispatch より前**」と定める。当初実装は `store.dispatch()` から
+戻った後に `synced.result` を後読みして hash 照合していたが、standalone では automation の
+評価が同期継続するため、待っている action の適用が `when` を true にする rule があると
+`result` が内側の action で上書きされ、外側の resolver が孤立していた (永久 pending。
+`AbortSignal.timeout()` 併用時は「適用は成功しているのに timeout reject」として表面化)。
+
+- 解決は `actionRequestMiddleware` の適用後ブロック (listener 発火・automation 評価より前)
+  で行う。request 配達経路もこの middleware を通るため、解決点は「適用直後」と
+  「log 専用 error で dispatch を省略する経路」の 2 つだけになった
+- 契約 (自端末適用まで / success・error とも resolve / reject は abort のみ) は不変。
+  resolve は microtask のため、consumer の継続は**現在の同期スタックが正常終了した後**に走る
+  (通常経路では seq の markApplied・determinism check の完了後)。**非同期 effect の継続との
+  順序は保証しない** — 順序が要る処理は待機側の継続に書くこと
+
+**残る制約**: `synced.result` は「最後に適用された synced action の 1 件」しか保持しない
+transient な通知スロット (ADR-0008) であり、nested dispatch による上書きは仕様である。
+rootReducer chain の外 (listener / dispatch 戻り後) で `result` を読む consumer は
+同じ取り違えを起こし得るため、**action identity が必要な読み取りは hash で照合する**
+(ADR-0024)。chain 内 (reducer の述語) は「result に積む action は適用中の action」契約に
+より照合不要 (TASK-260825 設計 1.5)。

@@ -189,6 +189,36 @@ describe('dispatchAndWait', () => {
     expect(sessionHub.inspect.requests('session-standalone')).toEqual([])
   })
 
+  // 適用直後 (nested dispatch より前) に解決しないと、automation が同期的に
+  // 発行する次の action で result が上書きされ、待機中の resolver が孤立する
+  it('automation の nested dispatch で result が上書きされても outer が resolve する', async () => {
+    const hub = createMemoryHub()
+    const client = createClient(hub.createTransport(), {
+      mode: 'standalone',
+      automations: [
+        {
+          id: 'follow-up',
+          // 待っている action の適用そのものが発行条件になる rule
+          when: (synced) => synced.count === 1,
+          action: () => ({ type: 'game/increment', payload: 10 }),
+        },
+      ],
+    })
+    await client.sync.subscribe({ store: client.store, groupId: 'standalone' })
+
+    const result = await client.sync.dispatchAndWait({
+      type: 'game/increment',
+      payload: 1,
+    })
+
+    // resolve されるのは automation が発行した内側の action ではなく自分の result
+    expect(result.action.payload).toBe(1)
+    expect(client.store.getState().game.log).toEqual([
+      'increment:1',
+      'increment:10',
+    ])
+  })
+
   it('未 subscribe は throw、非 synced action と canRequest=false は即 reject する', async () => {
     const hub = createMemoryHub()
     const unsubscribed = createHubClient(hub)

@@ -1333,6 +1333,10 @@ export const createSynqux = <
         // 適用 (同期 dispatch・standalone 双方) が生んだ result.log を出力する
         const root = store.getState() as TRoot
         emitAppliedResultLog(root, action as UnknownAction)
+        // 適用直後 (= result がこの action のものである唯一の瞬間) に解決する。
+        // listener / automation は同期的に次の action を dispatch し得るため、
+        // dispatch から戻った後に result を後読みすると自分の result を取り逃す
+        resolvePendingDispatch(config.selectSynced(root).result)
         fireListenersAfterApply(root, action, true)
         evaluateAutomationsAfterApply()
       } else {
@@ -1786,9 +1790,6 @@ export const createSynqux = <
             ordering.markApplied(seq, id)
             deliverySyncState.replayDeliveredIds.delete(id)
             waker.notify() // 適用完了: 次の seq を待つ fork を起こす
-            resolvePendingDispatch(
-              config.selectSynced(listener.getState() as TRoot).result,
-            )
 
             // checkpoint トリガー (b): host 在任中の replay (既裁定 added 由来)
             // 適用直後 (ADR-0021 Decision 4)。barrier の timeout 縮退後に届く
@@ -2766,13 +2767,6 @@ export const createSynqux = <
       } catch {
         // middleware の同期 throw も同様に resolver を維持し、abort/unsubscribe
         // だけを reject 理由とする。
-      }
-
-      // standalone は middleware 内で同期的に local 適用済み。
-      if (!shouldRequest) {
-        resolvePendingDispatch(
-          config.selectSynced(subscriptionSession.store.getState()).result,
-        )
       }
     })
   }
