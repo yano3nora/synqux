@@ -1,7 +1,7 @@
 # TASK-260810: locals 用の成功判定 matcher (isSucceededAction / isMySucceededAction) の提供
 
 - Date: 2026-08-10
-- Status: Implemented
+- Status: Superseded (2026-08-25) — TASK-260825-result-predicates で action-only matcher を state 述語 (isSucceededResult / isMySucceededResult) へ置換した。action アンカー・hash 照合は同一 rootReducer chain 内では冗長 (pre-stamp + 直列実行 + result-action 契約) であり、addMatcher 直渡しという設計根拠も実消費で使われていなかったため
 - 由来: 移植元 repo の locals reducer (シーン遷移) が「synced action が受理されたか / 自分の操作か」を result の hash 照合で判定する helper (isSucceededGameAction / isMySucceededGameAction 相当) を持っており、テンプレ移行 (Phase 2) で必要になることが確認された
 - 関連: ADR-0013 (result lifecycle。Out of scope 1 を本 TASK で解禁), ADR-0001 Decision 8 (meta.root は locals 専用), SPEC-0002 (公開 API)
 

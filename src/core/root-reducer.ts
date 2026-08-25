@@ -1,5 +1,5 @@
 import type { Action, Reducer, UnknownAction } from '@reduxjs/toolkit'
-import { stateWithDefaultResult } from './results.js'
+import { withDefaultResult } from './results.js'
 import { synquxReducer, synquxRestored, type SynquxState } from './slice.js'
 import type { SynquxSynced } from './types.js'
 
@@ -89,7 +89,7 @@ export const createSynquxRootReducer = <
       ? (action.payload.synced as TSynced)
       : syncedReducer(
           state && config.isSyncedAction(action)
-            ? (stateWithDefaultResult(
+            ? (withDefaultResult(
                 state[syncedKey] as SynquxSynced<TAction>,
                 action,
               ) as unknown as TSynced)

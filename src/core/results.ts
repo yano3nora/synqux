@@ -40,8 +40,14 @@ export const isResultForPeer = (
 
 /**
  * reducer (唯一の判定器) 用の result 生成ヘルパー
- * (移植元 constants/requests.ts の generateResult / stateWithResult /
- * stateWithError の移植。同期利用・standalone によらず同じ書き方で使う)
+ * (移植元 constants/requests.ts 由来。generate* は Result object を作り、
+ * with* は state を返す。同期利用・standalone によらず同じ書き方で使う)
+ *
+ * **result-action 契約 (ADR-0013 Amendment)**: result に積む action は
+ * **適用中の action そのもの**を渡すこと。封筒 (result.action) の hash /
+ * requestedBy の同一性は isSucceededResult / isMySucceededResult や
+ * dispatchAndWait の照合が依存する。別 action を積むのは consumer のバグで
+ * あり、synqux は機構で防御しない (ADR-0024 の再 dispatch 契約と同じ姿勢)
  */
 
 /**
@@ -86,7 +92,7 @@ export const generateResult = <
  * reducer 実行前に使うため、immer draft を変更せず新しい state を返す。
  * message / log は付けず、UI 通知や console 出力は発生させない (ADR-0008)。
  */
-export const stateWithDefaultResult = <
+export const withDefaultResult = <
   TSynced extends SynquxSynced<TAction, TMessage>,
   TAction extends Action,
   TMessage extends ResultMessage = ResultMessage,
@@ -99,7 +105,7 @@ export const stateWithDefaultResult = <
 })
 
 /** immer draft を直接書き換えて返す (RTK reducer 内での利用前提、Decision 9) */
-export const stateWithResult = <
+export const withResult = <
   TSynced extends SynquxSynced<TAction, TMessage>,
   TAction extends Action,
   TMessage extends ResultMessage = ResultMessage,
@@ -116,7 +122,7 @@ export const stateWithResult = <
  * 拒否になり、log 未指定なら action.type を log として出力する — 開発者向けの
  * デフォルト挙動。log 専用の error result は dispatch 自体が省略される (ADR-0008)
  */
-export const stateWithError = <
+export const withErrorResult = <
   TSynced extends SynquxSynced<TAction, TMessage>,
   TAction extends Action,
   TMessage extends ResultMessage = ResultMessage,
@@ -128,7 +134,7 @@ export const stateWithError = <
     log?: string
   },
 ): TSynced =>
-  stateWithResult<TSynced, TAction, TMessage>(state, {
+  withResult<TSynced, TAction, TMessage>(state, {
     type: 'error',
     message: option?.message,
     // message 指定なし & log 指定なしでも「何が弾かれたか」を console に残す
@@ -150,7 +156,7 @@ export const stateWithError = <
  * reducer throw が拒否裁定になる。また state 全体をコピーするため、高頻度 action
  * には使わないこと。
  */
-export const stateWithTransaction = <
+export const withTransaction = <
   TSynced extends SynquxSynced<TAction, TMessage>,
   TAction extends Action,
   TMessage extends ResultMessage = ResultMessage,
@@ -167,3 +173,24 @@ export const stateWithTransaction = <
 
   return next.result?.type === 'error' ? { ...base, result: next.result } : next
 }
+
+/**
+ * 「直前に適用された synced action が成功したか」の state 述語。
+ * result が null (初期状態・restore 直後) なら false。
+ *
+ * result と action の対応付けが保証されるのは**同一 rootReducer chain 内のみ**
+ * (根拠: pre-stamp (ADR-0013) + 直列実行 (ADR-0001 Decision 8) + 上記の
+ * result-action 契約の 3 点)。特定 action への追従は、synced action の
+ * addCase / isSyncedAction matcher の中で呼ぶこと — local action の処理中に
+ * 呼ぶと残留 result を読む。chain 内では pre-stamp が直前に走るため、
+ * consumer の手書き hash 照合は不要。reducer 外での action identity 照合は
+ * 本述語の領分外 (dispatchAndWait 等の hash 解決を使う)。
+ *
+ * synced reducer (extraReducers matcher) 内では chain 途中の**暫定値** —
+ * 後続 matcher がまだ withErrorResult を積める。「失敗時 domain 不変」を守る
+ * ため、follow-up を書く matcher は先頭で `if (!isSucceededResult(state)) return`
+ * とガードすること (特に standalone は適用がそのまま正史になる)。
+ */
+export const isSucceededResult = (
+  synced: Pick<SynquxSynced, 'result'>,
+): boolean => synced.result?.type === 'success'

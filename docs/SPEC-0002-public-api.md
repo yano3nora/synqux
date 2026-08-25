@@ -175,21 +175,31 @@ export type LocalAction<P = void, TRoot = unknown, TMeta extends object = object
  *   action ⊆ union」という synced state 型宣言の既存義務に依存する
  * - syncedKey: synced subtree の mount key (config の echo)。primitive 方式で
  *   createSynquxRootReducer へ直接渡す場合に使う
- * - isSucceededAction / isMySucceededAction: locals reducer 用の成功判定 matcher
- *   (registry の isSyncedAction と syncedKey 由来の selectSynced で全束縛済み)。
- *   標準 export はなく、matchers の提供経路はこの定義の戻りのみ (creators と同じ整理)
+ * - isSucceededResult / isMySucceededResult: 「直前に適用された synced action が
+ *   成功したか」の state 述語 (TASK-260825。旧 isSucceededAction /
+ *   isMySucceededAction matcher の置換)。
+ *   isSucceededResult(synced) は synced domain のデータのみで判定するため
+ *   synced reducer (extraReducers matcher) でも locals でも呼べる (決定的)。
+ *   isMySucceededResult(root) は selfId / mode という端末ローカル情報が必要な
+ *   ため root を受ける — root を持たない synced reducer では物理的に呼べず、
+ *   locals / listener 専用が signature で保証される (決定性境界)。
+ *   result と action の対応付けが保証されるのは同一 rootReducer chain 内のみ
+ *   (pre-stamp + 直列実行 + result-action 契約の 3 点)。synced action の
+ *   addCase / isSyncedAction matcher の中で呼ぶこと (手書き hash 照合は不要)。
+ *   isMySucceededResult の提供経路はこの定義の戻りのみ (syncedKey 束縛が必要)
  * - **createSynqux (配線フェーズ)**: transport と素材 (synced reducer / locals) を
  *   受けて instance を返す。rootReducer / selectSynced / isSyncedAction の接続は
  *   内部化され、root 型は SynquxRootState<TKey, TSynced, TLocals> として導出される
  *   — consumer の RootState は `ReturnType<typeof synqux.rootReducer>` で得る
  *   (手書き root と SynquxState import は不要)。group を跨ぐときは instance を
  *   作り直す契約 (core と同じ) のため factory
- * - generateResult / stateWithResult / stateWithError / stateWithTransaction の束縛済み版
+ * - generateResult / withResult / withErrorResult / withTransaction の束縛済み版
  *
  * creators の meta.root は型付けない (any) — root は配線フェーズまで未知で、
  * 型は読み手の LocalAction<P, 導出RootState> 注釈が与える (addCase の注釈 idiom
  * を壊さないため)。部分 root (`{ synqux } & Record<TKey, TSynced>`) を使うのは
- * matchers の narrow のみ (注釈と交差評価されるため安全。ADR-0026 Decision 5)
+ * isMySucceededResult の root 引数のみ (実引数の完全 root は構造的部分型で
+ * 代入可能。ADR-0026 Decision 5)
  */
 export const defineSynqux: <TKey extends string>(config: {
   /**
@@ -468,7 +478,7 @@ export const synquxReducer: Reducer<SynquxState>
  * 1. `synquxReducer` を予約 key `state.synqux` に mount する (位置は固定)
  * 2. rootReducer で本 action を match し、synced subtree を `payload.synced` で
  *    全量差し替える (createSynquxRootReducer 利用時は自動で処理される)
- * 3. synced domain action では synced reducer の前段で `stateWithDefaultResult` を
+ * 3. synced domain action では synced reducer の前段で `withDefaultResult` を
  *    必ず呼び、今回の action 自身の default success を stamp する (ADR-0013)
  * 4. 【危険・禁止】consumer が自分で dispatch しないこと — request 経路を通らない
  *    state 差し替えは自端末にしか起きず、他端末と静かに desync する。
@@ -488,8 +498,17 @@ export type PendingRequest
 // reducer ヘルパー (ゲーム開発者層、Decision 7)
 // ============================================================
 
+// 命名: generate* は Result object を作り、with* は state を返す (state が
+// 第 1 引数に来るため名前に state prefix は持たない。TASK-260825 で rename)。
+//
+// 【result-action 契約 (ADR-0013 Amendment)】withResult / withErrorResult /
+// generateResult に渡す action は**適用中の action そのもの**であること。
+// 封筒 (result.action) の hash / requestedBy の同一性は result 述語や
+// dispatchAndWait の照合が依存する。別 action を積むのは consumer のバグで
+// あり、synqux は機構で防御しない (ADR-0024 の再 dispatch 契約と同じ姿勢)
+
 /** synced reducer の実行前に action 自身の default success result を immutable に載せる */
-export function stateWithDefaultResult<TSynced, TAction, TMessage extends ResultMessage = ResultMessage>(
+export function withDefaultResult<TSynced, TAction, TMessage extends ResultMessage = ResultMessage>(
   state: TSynced,
   action: TAction,
 ): TSynced
@@ -498,16 +517,16 @@ export function stateWithDefaultResult<TSynced, TAction, TMessage extends Result
  * validation 失敗時に draft へ error result を積んで返す。immer 前提 (Decision 9)
  * message 省略時は action.type を log とした「log 専用の拒否」になる (ADR-0008)
  */
-export function stateWithError<TSynced, TAction, TMessage extends ResultMessage = ResultMessage>(
+export function withErrorResult<TSynced, TAction, TMessage extends ResultMessage = ResultMessage>(
   state: TSynced,
   action: TAction,
   option?: { message?: TMessage; log?: string },
 ): TSynced
 
-export function stateWithResult<TSynced, TAction, TMessage extends ResultMessage = ResultMessage>(state: TSynced, result: ...): TSynced
+export function withResult<TSynced, TAction, TMessage extends ResultMessage = ResultMessage>(state: TSynced, result: ...): TSynced
 
 /** callback 内の変更を一括適用し、error 時は domain 変更を巻き戻して error result だけを残す */
-export function stateWithTransaction<TSynced, TAction, TMessage extends ResultMessage = ResultMessage>(
+export function withTransaction<TSynced, TAction, TMessage extends ResultMessage = ResultMessage>(
   state: TSynced,
   mutate: (draft: TSynced) => void,
 ): TSynced
@@ -515,13 +534,23 @@ export function stateWithTransaction<TSynced, TAction, TMessage extends ResultMe
 export function generateResult<TAction, TMessage extends ResultMessage = ResultMessage>(props: ...): Result<TAction, TMessage>
 
 // ============================================================
-// locals 用成功判定 matcher (ゲーム開発者層、Decision 8 / ADR-0013)
+// result 述語 (ゲーム開発者層、Decision 8 / ADR-0013 / TASK-260825)
 // ============================================================
 
-// 成功判定 matchers (isSucceededAction / isMySucceededAction) は defineSynqux の
-// 戻りからのみ提供する (内部実装 createSyncedActionMatchers は非公開。ADR-0026)。
-// locals reducer 専用 — meta.root が付かない synced reducer 内では常に false になり、
-// そこで端末ローカル情報を読む用途には使えない (決定性を壊すため、その用途自体を禁止する)
+/**
+ * 「直前に適用された synced action が成功したか」の state 述語。
+ * result null (初期状態・restore 直後) は false。synced domain のデータのみで
+ * 判定するため synced reducer (extraReducers matcher) でも locals でも呼べる。
+ * result と action の対応付けが保証されるのは同一 rootReducer chain 内のみ
+ * (pre-stamp + 直列実行 + result-action 契約) — synced action の addCase /
+ * isSyncedAction matcher の中で呼ぶこと (手書き hash 照合は不要)。
+ * synced matcher 内では chain 途中の暫定値のため、follow-up は先頭ガード
+ * `if (!isSucceededResult(state)) return` で「失敗時 domain 不変」を守る。
+ * isMySucceededResult (上記 + 依頼元が自端末か。standalone は成功時 true) は
+ * 端末ローカル情報 (selfId / mode) が必要なため defineSynqux の戻りからのみ
+ * 提供され、root を受ける — synced reducer では物理的に呼べない (決定性境界)
+ */
+export function isSucceededResult(synced: Pick<SynquxSynced, 'result'>): boolean
 
 /** prefix を consumer に露出せず、listener / middleware から内部 action を除外する */
 export function isSynquxAction(action: Action): boolean
@@ -813,7 +842,7 @@ type SnapshotEnvelope<TSynced> = {
 
 | subpath | 主な export | 対象 |
 | --- | --- | --- |
-| `synqux` | `createSynqux` / `createSynquxRootReducer` / `synquxReducer` / `synquxRestored` / reducer helpers / `generateActionHash` / `defineSynqux` (定義フェーズ。creator registry / 配線 factory を持ち、`createSyncedAction` / `createSyncedSlice` / 成功判定 matchers はこの戻りからのみ提供、ADR-0026) / `isDeliveredSyncedAction` / `isSynquxAction` / `isResultForPeer` / peer・phase・health selectors / `localStorageSnapshotStore` / 契約型 (`SyncedActionMeta` / `SyncedAction` / `LocalAction` / `SyncedActionHash` 含む) | セットアップ層 + reducer ヘルパー + consumer 型語彙 |
+| `synqux` | `createSynqux` / `createSynquxRootReducer` / `synquxReducer` / `synquxRestored` / reducer helpers / `generateActionHash` / `defineSynqux` (定義フェーズ。creator registry / 配線 factory を持ち、`createSyncedAction` / `createSyncedSlice` / `isMySucceededResult` はこの戻りからのみ提供、ADR-0026) / `isDeliveredSyncedAction` / `isSynquxAction` / `isResultForPeer` / `isSucceededResult` / peer・phase・health selectors / `localStorageSnapshotStore` / 契約型 (`SyncedActionMeta` / `SyncedAction` / `LocalAction` / `SyncedActionHash` 含む) | セットアップ層 + reducer ヘルパー + consumer 型語彙 |
 | `synqux/react` | `useSynquxSubscription` のみ (読み取りは core selectors を typed useAppSelector へ。ADR-0022 / ADR-0023) | ゲーム開発者層 |
 | `synqux/testing` | `createMemoryHub` / `verifyActionIdempotency` / `assertActionIdempotency` / `createTestRootState` | consumer CI / 本 repo の simulation test |
 | `synqux/firebase` | `firebaseTransport(db, options?: { archivePrunedRequests?: boolean })` | Phase 2 で実装 |
@@ -836,7 +865,7 @@ type SnapshotEnvelope<TSynced> = {
 
 1. **selector を静的関数にできた**: `state.synqux` が予約 key のため instance なしで `selectIsHost` 等を提供できる。ゲーム開発者が instance に触れない Decision 7 の層分けがそのまま成立する
 2. **`selectLatestResult` は廃止** (レビュー決定): result は consumer 自身の synced state の所有物で直読みできるため、setup 層 re-export の迂回ごと削除。react の `useLatestResult` のみ提供 (その後 ADR-0022 で `useLatestResult` / `useMyLatestResult` / `SynquxProvider` も廃止し、typed selector 直読みへ一本化)
-3. **createSynquxRootReducer の返り値を config へ spread する形**で、ADR が山場と呼んだ「rootReducer × selectSynced × isSyncedAction × consumer State 型」の接続点を 1 箇所に畳んだ。primitive 方式は `synquxReducer` + `synquxRestored` の match + `stateWithDefaultResult` + 手書き rootReducer + 手動 `selectSynced` で成立する (契約の正式化は 2026-07-20、result stamp の追加は ADR-0013。上記「primitive 方式の正式契約」と公開 surface 回帰テスト `src/index.test.ts` を参照)
+3. **createSynquxRootReducer の返り値を config へ spread する形**で、ADR が山場と呼んだ「rootReducer × selectSynced × isSyncedAction × consumer State 型」の接続点を 1 箇所に畳んだ。primitive 方式は `synquxReducer` + `synquxRestored` の match + `withDefaultResult` + 手書き rootReducer + 手動 `selectSynced` で成立する (契約の正式化は 2026-07-20、result stamp の追加は ADR-0013。上記「primitive 方式の正式契約」と公開 surface 回帰テスト `src/index.test.ts` を参照)
 4. **synced slice は 1 つに限定 — 仕様として確定 (2026-07-18)**。当初は「v1 暫定・複数対応は必要になってから」だったが、host の成否判定 (result の読み取り位置) と snapshot の単位が単一 subtree に固定されることが同期機構の単純さの源泉であり、複数エントリ対応は判定・復元の分割という複雑さだけを持ち込むため採らない。複数ドメインは consumer が合成 reducer / 1 slice に畳み、result を top-level へ写す (実例: demo/slice.ts。当初は Record 1 エントリの runtime throw で守っていたが、kit への syncedKey 集約で `syncedKey + synced: Reducer` の構造保証になった)
 5. **`agent` / `guest` → `role: 'player' | 'dedicated' | 'observer'` へ改名** (レビュー決定): 排他 enum にすることで「agent かつ guest」という不正状態を型で排除。dedicated は「常駐プロセスを強制 host にして安定進行・無人進行を担う」ユースケース由来 (dedicated server 文化)。process id は `label` へ分離
    - その後 `observer` → `guest` へ再改名した (TASK-260811 / ADR-0014)。observer は readonly を暗示する一方、role の実際の作用は host 適格性だけであり、request 発行を制限しないため

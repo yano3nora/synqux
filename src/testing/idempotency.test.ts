@@ -1,6 +1,6 @@
 import type { Action, Reducer } from '@reduxjs/toolkit'
 import { describe, expect, it, vi } from 'vitest'
-import { stateWithError, stateWithResult } from '../core/results.js'
+import { withErrorResult, withResult } from '../core/results.js'
 import type { SynquxSynced } from '../core/types.js'
 import {
   gameInitialState,
@@ -22,7 +22,7 @@ type ContractState = SynquxSynced<ContractAction> & {
 const initialState: ContractState = { result: null, count: 0, log: [] }
 
 const success = (state: ContractState, action: ContractAction): ContractState =>
-  stateWithResult(
+  withResult(
     { ...state },
     {
       action,
@@ -40,7 +40,7 @@ describe('verifyActionIdempotency', () => {
         return success({ ...state, count: 1 }, action)
       }
 
-      return stateWithError({ ...state }, action)
+      return withErrorResult({ ...state }, action)
     }
 
     const report = verifyActionIdempotency({
@@ -99,7 +99,7 @@ describe('assertActionIdempotency', () => {
         return success({ ...state, count: 1 }, action)
       }
 
-      return stateWithError({ ...state }, action)
+      return withErrorResult({ ...state }, action)
     }
 
     expect(() =>
@@ -115,7 +115,7 @@ describe('assertActionIdempotency', () => {
   it("'rejects-repeat' は 1 回目から error なら fail する", () => {
     const action: ContractAction = { type: 'contract/always-reject' }
     const reducer: Reducer<ContractState> = (state = initialState) =>
-      stateWithError({ ...state }, action)
+      withErrorResult({ ...state }, action)
 
     expect(() =>
       assertActionIdempotency({
@@ -134,7 +134,7 @@ describe('assertActionIdempotency', () => {
         return success({ ...state, count: 1 }, action)
       }
 
-      return stateWithError({ ...state, count: state.count + 1 }, action)
+      return withErrorResult({ ...state, count: state.count + 1 }, action)
     }
 
     expect(() =>

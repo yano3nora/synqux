@@ -3,16 +3,16 @@ import { describe, expect, it } from 'vitest'
 import {
   generateResult,
   isResultForPeer,
-  stateWithDefaultResult,
-  stateWithError,
-  stateWithResult,
-  stateWithTransaction,
+  withDefaultResult,
+  withErrorResult,
+  withResult,
+  withTransaction,
 } from './results.js'
 import type { SynquxSynced } from './types.js'
 
 /**
  * Phase 0 characterization (移植元 constants/requests.test.ts) の
- * generateResult / stateWithError 相当シナリオの新 API 移植
+ * generateResult / withErrorResult 相当シナリオの新 API 移植
  */
 
 type TestAction = {
@@ -92,7 +92,7 @@ describe('isResultForPeer', () => {
   )
 })
 
-describe('stateWithError', () => {
+describe('withErrorResult', () => {
   type State = SynquxSynced<TestAction>
   const plainAction: TestAction = {
     type: 'game/test',
@@ -101,14 +101,14 @@ describe('stateWithError', () => {
   }
 
   it('message 省略時は action.type を log とした log 専用の拒否になる', () => {
-    const state = stateWithError({ result: null } as State, plainAction)
+    const state = withErrorResult({ result: null } as State, plainAction)
     expect(state.result?.type).toBe('error')
     expect(state.result?.message).toBeUndefined()
     expect(state.result?.log).toBe('game/test')
   })
 
   it('message 指定時は UI 表示データが積まれ、log は付与されない', () => {
-    const state = stateWithError({ result: null } as State, plainAction, {
+    const state = withErrorResult({ result: null } as State, plainAction, {
       message: { text: 'NG' },
     })
     expect(state.result?.message).toEqual({ text: 'NG' })
@@ -116,7 +116,7 @@ describe('stateWithError', () => {
   })
 
   it('message と log の併用は両チャネルに積まれる', () => {
-    const state = stateWithError({ result: null } as State, plainAction, {
+    const state = withErrorResult({ result: null } as State, plainAction, {
       message: { text: 'NG' },
       log: 'rejected: game/test',
     })
@@ -125,13 +125,13 @@ describe('stateWithError', () => {
   })
 })
 
-describe('stateWithDefaultResult', () => {
+describe('withDefaultResult', () => {
   it('state を変更せず action 自身の silent success result を持つ新オブジェクトを返す', () => {
     const state: SynquxSynced<TestAction> & { count: number } = {
       result: null,
       count: 1,
     }
-    const next = stateWithDefaultResult(state, action)
+    const next = withDefaultResult(state, action)
 
     expect(next).not.toBe(state)
     expect(state.result).toBeNull()
@@ -144,7 +144,7 @@ describe('stateWithDefaultResult', () => {
   })
 })
 
-describe('stateWithTransaction', () => {
+describe('withTransaction', () => {
   type TransactionState = SynquxSynced<TestAction> & {
     count: number
     items: string[]
@@ -156,14 +156,14 @@ describe('stateWithTransaction', () => {
   }
 
   const stampedState = (): TransactionState =>
-    stateWithDefaultResult(
+    withDefaultResult(
       { result: null, count: 1, items: ['before'] },
       transactionAction,
     )
 
   it('success では複数 mutation を採用し、事前の default success stamp を保持する', () => {
     const base = stampedState()
-    const next = stateWithTransaction(base, (draft) => {
+    const next = withTransaction(base, (draft) => {
       draft.count += 2
       draft.items.push('after')
     })
@@ -176,11 +176,11 @@ describe('stateWithTransaction', () => {
     expect(next.result).toBe(base.result)
   })
 
-  it('mutate 内の stateWithResult が success message を上書きして保持する', () => {
+  it('mutate 内の withResult が success message を上書きして保持する', () => {
     const base = stampedState()
-    const next = stateWithTransaction(base, (draft) => {
+    const next = withTransaction(base, (draft) => {
       draft.count += 1
-      stateWithResult(draft, {
+      withResult(draft, {
         action: transactionAction,
         type: 'success',
         message: { text: 'committed' },
@@ -196,10 +196,10 @@ describe('stateWithTransaction', () => {
 
   it('mutate 途中の error では全 domain mutation を巻き戻し、error result だけを載せる', () => {
     const base = stampedState()
-    const next = stateWithTransaction(base, (draft) => {
+    const next = withTransaction(base, (draft) => {
       draft.count = 99
       draft.items.push('rolled-back')
-      stateWithError(draft, transactionAction, {
+      withErrorResult(draft, transactionAction, {
         message: { text: 'rollback' },
       })
     })
@@ -216,16 +216,16 @@ describe('stateWithTransaction', () => {
     const reducer = createReducer(stampedState(), (builder) => {
       builder
         .addCase('transaction/success', (state) =>
-          stateWithTransaction(state as TransactionState, (draft) => {
+          withTransaction(state as TransactionState, (draft) => {
             draft.count += 1
             draft.items.push('committed')
           }),
         )
         .addCase('transaction/error', (state) =>
-          stateWithTransaction(state as TransactionState, (draft) => {
+          withTransaction(state as TransactionState, (draft) => {
             draft.count = 999
             draft.items.push('rolled-back')
-            stateWithError(draft, transactionAction)
+            withErrorResult(draft, transactionAction)
           }),
         )
     })
@@ -240,13 +240,13 @@ describe('stateWithTransaction', () => {
 
   it('plain object でも success / error の両経路が動く', () => {
     const successBase = stampedState()
-    const success = stateWithTransaction(successBase, (draft) => {
+    const success = withTransaction(successBase, (draft) => {
       draft.count = 2
     })
     const errorBase = stampedState()
-    const error = stateWithTransaction(errorBase, (draft) => {
+    const error = withTransaction(errorBase, (draft) => {
       draft.count = 999
-      stateWithError(draft, transactionAction)
+      withErrorResult(draft, transactionAction)
     })
 
     expect(success.count).toBe(2)
@@ -260,7 +260,7 @@ describe('stateWithTransaction', () => {
     const reducer = createReducer(stampedState(), (builder) => {
       builder.addCase('transaction/invalid', (state) => {
         state.count += 1
-        return stateWithTransaction(state as TransactionState, (draft) => {
+        return withTransaction(state as TransactionState, (draft) => {
           draft.items.push('invalid')
         })
       })

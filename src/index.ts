@@ -50,16 +50,17 @@ export {
 } from './core/slice.js'
 
 // ゲーム開発者層: reducer ヘルパーと読み取り selector
-// (成功判定 matchers は defineSynqux の戻り (isSucceededAction /
-//  isMySucceededAction) からのみ提供する — creators と同じ整理。ADR-0026)
+// (isMySucceededResult は defineSynqux の戻りからのみ提供する — syncedKey
+//  束縛が必要なため。creators と同じ整理。ADR-0026)
 export { isDeliveredSyncedAction, isSynquxAction } from './core/matchers.js'
 export {
   generateResult,
   isResultForPeer,
-  stateWithDefaultResult,
-  stateWithError,
-  stateWithResult,
-  stateWithTransaction,
+  isSucceededResult,
+  withDefaultResult,
+  withErrorResult,
+  withResult,
+  withTransaction,
 } from './core/results.js'
 export {
   selectIsHost,

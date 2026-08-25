@@ -122,10 +122,10 @@ describe('defineSynqux', () => {
     message: GameMessage
   }>()
 
-  it('束縛済み stateWithError が domain 型のまま error result を積む', () => {
+  it('束縛済み withErrorResult が domain 型のまま error result を積む', () => {
     const increment = kit.createSyncedAction<number>('game/increment')
     const state: GameState = { result: null, count: 10 }
-    const next = kit.stateWithError({ ...state }, increment(1), {
+    const next = kit.withErrorResult({ ...state }, increment(1), {
       message: { text: '10までです。', duration: null },
     })
 
@@ -203,7 +203,7 @@ describe('defineSynqux', () => {
     expect(kitB.isSyncedAction(fromA())).toBe(false)
   })
 
-  it('matchers は registry / 定義 config から全束縛済みで、そのまま使える', () => {
+  it('result 述語は定義 config から全束縛済みで、そのまま使える', () => {
     const own = defineSynqux({ syncedKey: 'game' }).withTypes<{
       synced: GameState
     }>()
@@ -228,9 +228,14 @@ describe('defineSynqux', () => {
     })
 
     const initial = root.rootReducer(undefined, { type: '@@INIT' })
-    root.rootReducer(initial, increment(1))
+    expect(own.isSucceededResult(initial.game)).toBe(false)
 
-    expect(own.isSucceededAction(seenByLocal)).toBe(true)
-    expect(own.isSucceededAction({ type: 'game/unregistered' })).toBe(false)
+    const next = root.rootReducer(initial, increment(1))
+    expect(own.isSucceededResult(next.game)).toBe(true)
+
+    // locals が meta.root 経由で読む synced でも同じ判定になる (同一 chain)
+    const seenRoot = (seenByLocal as Action & { meta?: { root?: typeof next } })
+      .meta?.root
+    expect(seenRoot && own.isSucceededResult(seenRoot.game)).toBe(true)
   })
 })

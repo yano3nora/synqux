@@ -11,7 +11,7 @@ import {
 import { createMemoryHub } from '../testing/memory-hub.js'
 import type { SyncedAction, SyncedActionMeta } from './action.js'
 import { defineSynqux } from './define-synqux.js'
-import { stateWithError } from './results.js'
+import { withErrorResult } from './results.js'
 import { settle } from './test-fixtures.js'
 import type { SynquxSynced } from './types.js'
 
@@ -34,7 +34,7 @@ const counterSlice = kit.createSyncedSlice({
 
       // reducer が唯一の判定器: validation 失敗は state を変えず error を積む
       if (next > 100) {
-        return stateWithError({ ...state }, action, {
+        return withErrorResult({ ...state }, action, {
           message: { text: 'over' },
         })
       }
@@ -95,7 +95,7 @@ describe('createSyncedSlice', () => {
     expect(reset().meta.hash).toMatch(ULID_PATTERN)
   })
 
-  it('reducer は immer の mutable 記法と stateWithError の返却を両方受ける', () => {
+  it('reducer は immer の mutable 記法と withErrorResult の返却を両方受ける', () => {
     const applied = counterSlice.reducer(undefined, add(2))
     expect(applied.count).toBe(2)
 

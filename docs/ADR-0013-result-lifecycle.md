@@ -57,3 +57,13 @@ core のテストフィクスチャは各分岐に手書きの `result: null` �
 - **breaking**: `createSynquxRootReducer` の config に `isSyncedAction` が必須で加わる (0.5.0)。消費者は再導入時に述語を渡す 1 行の追従で済む
 - characterization test の「result null = 受理」の表明を「default success = 受理」へ更新する
 - core フィクスチャの手書き `result: null` は stamp に置き換わり、「stamp を忘れた primitive consumer」という失敗モードはテストと SPEC の両方で明示される
+
+## Amendment (2026-08-25, TASK-260825): result-action 契約の明文化
+
+`withResult` / `withErrorResult` (旧 stateWithResult / stateWithError) /
+`generateResult` に渡す action は**適用中の action そのもの**であることを公開契約とする。
+
+- 「同一 rootReducer chain 内の result は適用中の action のもの」という不変条件は、pre-stamp + 直列実行 (ADR-0001 Decision 8) だけでは閉じない — consumer が別 action を result に積めば破れる。本契約を加えた 3 点で保証が成立する
+- この保証を根拠に、`isSucceededResult` / `isMySucceededResult` (TASK-260825。旧 isSucceededAction / isMySucceededAction matcher の置換) は chain 内で hash 照合なしに result を読む。`isMySucceededResult` の依頼元照合は封筒 (`result.action.meta.requestedBy`) に依存する
+- 契約違反 (別 action を積む) は consumer のバグであり、synqux は機構で防御しない (ADR-0024 の「同一 hash の再 dispatch は契約違反、dedup は導入しない」と同じ姿勢)。旧 matcher の hash 照合はこの違反を偶発的に検出していたが、防御のために action アンカーという API 複雑性を維持する価値はないと判断した
+- Out of scope 1 の locals 用 helper は本 Amendment の時点で state 述語 (`isSucceededResult` / `isMySucceededResult`) に置換済み

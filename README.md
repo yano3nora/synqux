@@ -7,7 +7,7 @@ synqux adds client-hosted realtime multi-device sync to Redux (Redux Toolkit) ap
 
 **Plain RTK is the sync framework.** You write ordinary Redux reducers and dispatch ordinary actions — no wrapper types, no special dispatch API. synqux does not do optimistic updates, so "the state on screen" is always "the synced state"; there is no rollback UI to design.
 
-**The reducer is the only arbiter.** Validation lives in the reducer: on failure it returns the unchanged state plus an error result (`stateWithError`). The host trial-runs the reducer against a request and accepts or rejects it based on that result. Because the reducer is the single source of judgment, the same code runs identically on host, client, and standalone (sync disabled) — no branching logic per role.
+**The reducer is the only arbiter.** Validation lives in the reducer: on failure it returns the unchanged state plus an error result (`withErrorResult`). The host trial-runs the reducer against a request and accepts or rejects it based on that result. Because the reducer is the single source of judgment, the same code runs identically on host, client, and standalone (sync disabled) — no branching logic per role.
 
 **One host, one order.** Each sync group has exactly one host, derived deterministically from the connected peer pool (with automatic migration when the host leaves). The host stamps each accepted request with a sequence number `(epoch, seq)`, and every device applies actions strictly in that order. Rejected requests change nothing; only the requester is notified of the result.
 
@@ -36,11 +36,11 @@ npm install firebase
 
 ### 2. Write a synced slice
 
-Write a normal RTK slice with the definition's `createSyncedSlice` (a `createSlice` whose actions are all synced actions), and add two things: the state carries a `result` (`SynquxSynced`), and validation failures return the unchanged state via `stateWithError`. Success results are stamped automatically by the root reducer helper (full source: [demo/slice.ts](./demo/slice.ts)).
+Write a normal RTK slice with the definition's `createSyncedSlice` (a `createSlice` whose actions are all synced actions), and add two things: the state carries a `result` (`SynquxSynced`), and validation failures return the unchanged state via `withErrorResult`. Success results are stamped automatically by the root reducer helper (full source: [demo/slice.ts](./demo/slice.ts)).
 
 ```ts
 import type { SyncedAction, SynquxSynced } from 'synqux'
-import { createSyncedSlice, stateWithError } from './synqux' // your definition file (created in step 3)
+import { createSyncedSlice, withErrorResult } from './synqux' // your definition file (created in step 3)
 
 export type CounterState = SynquxSynced<SyncedAction> & { count: number }
 
@@ -54,7 +54,7 @@ export const counterSlice = createSyncedSlice({
       // Validation lives in the reducer. The host reads this result to
       // reject the request; only the requester gets notified.
       if (next > 100 || next < 0) {
-        return stateWithError({ ...state }, action, {
+        return withErrorResult({ ...state }, action, {
           message: { text: 'count must stay between 0 and 100' },
         })
       }
@@ -80,7 +80,7 @@ The setup layer is one file in your template; feature developers never touch it 
 // (createSynqux) must come from the same definition.
 import { defineSynqux } from 'synqux'
 
-export const { createSyncedSlice, createSyncedAction, createSynqux, stateWithError } =
+export const { createSyncedSlice, createSyncedAction, createSynqux, withErrorResult } =
   defineSynqux({
     syncedKey: 'counter', // where your synced slice mounts in the root (told once, here)
   }).withTypes<{
@@ -139,11 +139,11 @@ The instance-level `synqux.unsubscribe()` tears down the current session even wh
 ### Three rules to remember
 
 1. **Never mutate synced state directly — dispatch actions.** Requests happen automatically; you write plain Redux.
-2. **Validate in the reducer; return `stateWithError` on failure.**
+2. **Validate in the reducer; return `withErrorResult` on failure.**
 
     ```ts
     if (state.phase !== 'battle') {
-      return stateWithError(state, action, { message: { text: 'not available right now' } })
+      return withErrorResult(state, action, { message: { text: 'not available right now' } })
     }
     ```
 
@@ -222,7 +222,7 @@ case 'game/harvest': {
   const now = action.meta?.dispatched ?? 0
 
   if (now - state.plantedAt < GROW_MS) {
-    return stateWithError(state, action, { message: { text: 'not grown yet' } })
+    return withErrorResult(state, action, { message: { text: 'not grown yet' } })
   }
   // ...
 }
@@ -289,7 +289,7 @@ const synqux = createSynqux({
 
 - Evaluated at two points: **right after each synced action applies**, and **every `retryMs` (default 1000ms)**. While `when` stays true, the action is re-issued every `retryMs`.
 - `when` sees only synced state and server time. Local presentation state and locals are unavailable by design (blocked at the type level).
-- The engine does not guarantee exactly-once (a dual-host window can double-fire). Make the reducer reject the second application (`assertActionIdempotency` mode `'rejects-repeat'`), and use a message-less `stateWithError` (log-only) for retry rejections to avoid UI noise.
+- The engine does not guarantee exactly-once (a dual-host window can double-fire). Make the reducer reject the second application (`assertActionIdempotency` mode `'rejects-repeat'`), and use a message-less `withErrorResult` (log-only) for retry rejections to avoid UI noise.
 - Host migration needs no handoff: the new host derives the same conclusion from state. Automations also run in standalone sessions — gate rules you want paused via a predicate on synced state (e.g. a tutorial flag).
 
 ### React to applied actions (`listeners`)
@@ -406,9 +406,9 @@ export const {
   createSyncedSlice,           // createSlice whose actions are all synced actions
   createSyncedAction,
   createSynqux,                // wiring factory — call it in your store file
-  isSucceededAction,           // locals-reducer matchers, fully pre-bound
-  isMySucceededAction,
-  generateResult, stateWithError, stateWithResult, stateWithTransaction,
+  isSucceededResult,           // result predicates, fully pre-bound
+  isMySucceededResult,         // needs the root (locals / listeners only)
+  generateResult, withErrorResult, withResult, withTransaction,
 } = defineSynqux({
   // Where the synced state mounts in the root. Naming the key is your choice
   // (synqux only reserves state.synqux), so tell the definition once — the
@@ -464,16 +464,16 @@ Reducer helpers (game-developer layer; identical with or without sync):
 
 | export | description |
 | --- | --- |
-| `defineSynqux({ syncedKey }).withTypes<{ synced, message? }>()` | The definition phase (call once per app; `syncedKey` tells it — once — where the synced state mounts, and the root type is derived at wiring). Returns typed helpers plus the creator registry: `createSyncedSlice` (a `createSlice` whose actions are all synced actions) and `createSyncedAction` (a `createAction` for standalone / cross-slice actions) — both stamp `hash` (ulid) / `dispatched` at creation time, type `meta` as required, and register the type (the only ways to define synced actions, ADR-0024 / ADR-0026) — plus pre-bound matchers, result helpers, and the wiring factory `createSynqux({ transport, synced, locals, ... })` |
+| `defineSynqux({ syncedKey }).withTypes<{ synced, message? }>()` | The definition phase (call once per app; `syncedKey` tells it — once — where the synced state mounts, and the root type is derived at wiring). Returns typed helpers plus the creator registry: `createSyncedSlice` (a `createSlice` whose actions are all synced actions) and `createSyncedAction` (a `createAction` for standalone / cross-slice actions) — both stamp `hash` (ulid) / `dispatched` at creation time, type `meta` as required, and register the type (the only ways to define synced actions, ADR-0024 / ADR-0026) — plus pre-bound result predicates, result helpers, and the wiring factory `createSynqux({ transport, synced, locals, ... })` |
 | `generateActionHash()` | Issues a synced-action hash (ulid) directly (rarely needed; creators stamp automatically) |
-| `isSucceededAction` / `isMySucceededAction` (from `defineSynqux`) | Type guards for locals reducers to check "did the applied action succeed / was it my request", fully pre-bound by the definition. Forbidden inside synced reducers |
+| `isSucceededResult(synced)` / `isMySucceededResult(root)` | State predicates for "did the last applied synced action succeed / was it my request". `isSucceededResult` works in both synced (extraReducers matcher) and locals contexts — no hand-written hash comparison needed inside the same rootReducer chain. `isMySucceededResult` (from `defineSynqux` only) needs the root (`selfId` / mode), so it is structurally impossible to call from a synced reducer (determinism boundary). Pass the action being applied itself to `withResult` / `withErrorResult` / `generateResult` — the predicates rely on that contract |
 | `isDeliveredSyncedAction(action)` | Checks whether an action carries the complete request/response delivery metadata. Combine with the consumer's synced-domain matcher when needed |
 | `isSynquxAction(action)` | Excludes synqux-internal actions in listeners / middleware. Avoids direct prefix checks |
 | `isResultForPeer(result, peerId)` | Checks whether a result targets everyone or the given peer, per the `targets` contract |
-| `stateWithError(state, action, option?)` | Declares a validation failure: stacks an error result without changing state. Without `message`, the rejection is log-only (no dispatch to the requester) |
-| `stateWithResult(state, result)` | Stacks an arbitrary result (e.g. success + message) |
-| `stateWithTransaction(state, mutate)` | Applies multiple changes in `mutate` as a unit; if an error result is stacked midway, **all changes roll back** and only the error remains. Copies the whole state — avoid for high-frequency actions |
-| `stateWithDefaultResult(state, action)` | Immutably stamps the action's own default success result. Automatic with `createSynquxRootReducer`; in the primitive style, call it first in the synced reducer (ADR-0013) |
+| `withErrorResult(state, action, option?)` | Declares a validation failure: stacks an error result without changing state. Without `message`, the rejection is log-only (no dispatch to the requester) |
+| `withResult(state, result)` | Stacks an arbitrary result (e.g. success + message) |
+| `withTransaction(state, mutate)` | Applies multiple changes in `mutate` as a unit; if an error result is stacked midway, **all changes roll back** and only the error remains. Copies the whole state — avoid for high-frequency actions |
+| `withDefaultResult(state, action)` | Immutably stamps the action's own default success result. Automatic with `createSynquxRootReducer`; in the primitive style, call it first in the synced reducer (ADR-0013) |
 | `generateResult(props)` | Builds a result object (low-level material for the helpers above) |
 
 Selectors (static functions, no instance needed, usable without React):

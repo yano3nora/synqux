@@ -1,5 +1,5 @@
 import type { SyncedAction } from 'synqux'
-import { createSyncedSlice, stateWithError, type DemoState } from './synqux'
+import { createSyncedSlice, withErrorResult, type DemoState } from './synqux'
 
 /**
  * Synced slice for the demo, defined with createSyncedSlice: every case here
@@ -7,7 +7,7 @@ import { createSyncedSlice, stateWithError, type DemoState } from './synqux'
  *
  * Follows the synqux conventions:
  * - The state carries a `result` (SynquxSynced)
- * - On validation failure, stateWithError sets the result without changing state
+ * - On validation failure, withErrorResult sets the result without changing state
  * - Prefer set-style actions that do not depend on the current value where
  *   possible (Design Guideline 1); `add` is an intentionally repeatable action
  */
@@ -43,7 +43,7 @@ export const demoSlice = createSyncedSlice({
       // Validation lives in the reducer. The host reads this result to reject
       // the request; only the requester gets notified.
       if (next > MAX || next < MIN) {
-        return stateWithError({ ...state }, action, {
+        return withErrorResult({ ...state }, action, {
           message: {
             text: `count must stay between ${String(MIN)} and ${String(MAX)}`,
           },
@@ -61,7 +61,7 @@ export const demoSlice = createSyncedSlice({
     // apply order changes the hash — a visual check of ordering guarantees.
     append: (state, action: SyncedAction<{ by: string; n: number }>) => {
       if (state.ledger.locked) {
-        return stateWithError({ ...state }, action, {
+        return withErrorResult({ ...state }, action, {
           message: { text: 'ledger is locked' },
         })
       }

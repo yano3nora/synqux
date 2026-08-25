@@ -22,10 +22,9 @@ export type DemoState = SynquxSynced<DemoAction> & {
   }
 }
 
-export const { createSyncedSlice, createSynqux, stateWithError } = defineSynqux(
-  {
+export const { createSyncedSlice, createSynqux, withErrorResult } =
+  defineSynqux({
     // Where the synced state mounts in the root (naming the key is the
     // consumer's choice; told once, here).
     syncedKey: 'demo',
-  },
-).withTypes<{ synced: DemoState }>()
+  }).withTypes<{ synced: DemoState }>()

@@ -7,7 +7,7 @@ import {
 import { vi } from 'vitest'
 import type { createMemoryHub } from '../testing/memory-hub.js'
 import { createSynqux, type CreateSynquxConfig } from './create-synqux.js'
-import { stateWithDefaultResult } from './results.js'
+import { withDefaultResult } from './results.js'
 import { synquxReducer, synquxRestored, type SynquxState } from './slice.js'
 import type { Result, SynquxSynced, SynquxTransport } from './types.js'
 
@@ -148,7 +148,7 @@ export const rootReducer: Reducer<RootState> = (state, action) => {
     synqux: synquxReducer(state?.synqux, action),
     game: gameReducer(
       isGameAction(action)
-        ? stateWithDefaultResult(state?.game ?? gameInitialState, action)
+        ? withDefaultResult(state?.game ?? gameInitialState, action)
         : state?.game,
       action,
     ),

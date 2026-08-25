@@ -1,6 +1,6 @@
 import type { Reducer, UnknownAction } from '@reduxjs/toolkit'
 import { describe, expect, it } from 'vitest'
-import { stateWithError } from './results.js'
+import { withErrorResult } from './results.js'
 import { createSynquxRootReducer } from './root-reducer.js'
 import { synquxRestored } from './slice.js'
 import type { SynquxSynced } from './types.js'
@@ -11,7 +11,7 @@ const syncedInitial: Synced = { result: null, count: 0, sawRootMeta: false }
 
 const syncedReducer: Reducer<Synced> = (state = syncedInitial, action) => {
   if (action.type === 'game/reject') {
-    return stateWithError({ ...state }, action, {
+    return withErrorResult({ ...state }, action, {
       message: { text: 'rejected' },
     })
   }
@@ -101,7 +101,7 @@ describe('createSynquxRootReducer', () => {
     })
   })
 
-  it('stateWithError は default success stamp を上書きして error を残す', () => {
+  it('withErrorResult は default success stamp を上書きして error を残す', () => {
     const { rootReducer } = setup()
     const initial = rootReducer(undefined, { type: '@@INIT' })
     const next = rootReducer(initial, {

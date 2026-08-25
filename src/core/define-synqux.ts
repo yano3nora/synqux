@@ -6,6 +6,7 @@ import {
   type Draft,
   type PrepareAction,
   type Reducer,
+  type UnknownAction,
 } from '@reduxjs/toolkit'
 import {
   createSyncedAction,
@@ -20,12 +21,12 @@ import {
   type CreateSynquxConfig,
   type Synqux,
 } from './create-synqux.js'
-import { createSyncedActionMatchers } from './matchers.js'
 import {
   generateResult,
-  stateWithError,
-  stateWithResult,
-  stateWithTransaction,
+  isSucceededResult,
+  withErrorResult,
+  withResult,
+  withTransaction,
 } from './results.js'
 import {
   createSynquxRootReducer,
@@ -72,23 +73,14 @@ type SyncedActionOf<T extends SynquxTypes> =
 
 /**
  * 定義フェーズ時点で判明している部分 root (予約 slice + synced subtree)。
- * matchers の narrow にのみ使う (narrow は注釈と交差するため部分 root で安全)。
- * creators の meta.root には使わない — addCase の注釈 (LocalAction<P, 導出Root>)
- * と代入不能になり、従来の注釈 idiom を壊すため。creators 側は any とし、
- * root の型は読み手の LocalAction 注釈が与える
+ * isMySucceededResult の root 引数に使う (実引数の完全 root は構造的部分型で
+ * 代入可能)。creators の meta.root には使わない — addCase の注釈
+ * (LocalAction<P, 導出Root>) と代入不能になり、従来の注釈 idiom を壊すため。
+ * creators 側は any とし、root の型は読み手の LocalAction 注釈が与える
  */
 type DefinedRootOf<TKey extends string, T extends SynquxTypes> = {
   synqux: SynquxState
 } & Record<TKey, T['synced']>
-
-/**
- * matchers の narrow 先: domain union に加え、locals 文脈で実在する
- * meta.root を部分 root で焼き直したもの
- */
-type MatchedSyncedActionOf<
-  TKey extends string,
-  T extends SynquxTypes,
-> = SyncedActionOf<T> & SyncedAction<any, DefinedRootOf<TKey, T>>
 
 /** createSyncedSlice の case reducer (RTK 同様 immer draft を受ける) */
 type SyncedSliceCaseReducer<TState> = (
@@ -240,18 +232,20 @@ export type SynquxDefinition<T extends SynquxTypes, TKey extends string> = {
   syncedKey: TKey
 
   /**
-   * locals reducer 用の成功判定 matcher。「直前に適用された synced action が
-   * 成功したか」。isSyncedAction は registry から、selectSynced は syncedKey
-   * から束縛済み。meta.root は locals にしか付与されないため locals reducer 専用
+   * 「直前に適用された synced action が成功したか」の state 述語 (core の
+   * isSucceededResult の型束縛版)。synced domain のデータのみで判定するため
+   * synced reducer (extraReducers matcher) でも locals でも呼べる (決定的)。
+   * 対応付けの保証範囲・暫定値の注意は core 側 docstring を参照
    */
-  isSucceededAction: (
-    action: Action,
-  ) => action is MatchedSyncedActionOf<TKey, T>
+  isSucceededResult: (synced: T['synced']) => boolean
 
-  /** isSucceededAction + 「依頼元が自端末か」(standalone は成功時 true) */
-  isMySucceededAction: (
-    action: Action,
-  ) => action is MatchedSyncedActionOf<TKey, T>
+  /**
+   * isSucceededResult + 「依頼元 (result.action.meta.requestedBy) が自端末か」
+   * (standalone は成功時 true)。selfId / mode という端末ローカル情報が必要な
+   * ため root を受ける — root を持たない synced reducer では物理的に呼べず、
+   * 「locals / listener 専用」が signature で保証される (決定性境界)
+   */
+  isMySucceededResult: (root: DefinedRootOf<TKey, T>) => boolean
 
   /**
    * **配線フェーズ**: transport と素材 (synced reducer / locals) を受けて
@@ -279,19 +273,15 @@ export type SynquxDefinition<T extends SynquxTypes, TKey extends string> = {
   /** Result を組む helper (domain 型束縛済み) */
   generateResult: typeof generateResult<SyncedActionOf<T>, MessageOf<T>>
   /** state を変えつつ任意の result を積む helper (domain 型束縛済み) */
-  stateWithResult: typeof stateWithResult<
-    T['synced'],
-    SyncedActionOf<T>,
-    MessageOf<T>
-  >
+  withResult: typeof withResult<T['synced'], SyncedActionOf<T>, MessageOf<T>>
   /** validation 失敗を宣言する helper (domain 型束縛済み) */
-  stateWithError: typeof stateWithError<
+  withErrorResult: typeof withErrorResult<
     T['synced'],
     SyncedActionOf<T>,
     MessageOf<T>
   >
   /** 複数段の判定を transaction として畳む helper (domain 型束縛済み) */
-  stateWithTransaction: typeof stateWithTransaction<
+  withTransaction: typeof withTransaction<
     T['synced'],
     SyncedActionOf<T>,
     MessageOf<T>
@@ -300,7 +290,7 @@ export type SynquxDefinition<T extends SynquxTypes, TKey extends string> = {
 
 /**
  * synqux の**定義フェーズ** (ADR-0026)。synced の mount key を受けて
- * 型付き語彙 (creators / matchers / result helpers) と配線 factory
+ * 型付き語彙 (creators / result 述語 / result helpers) と配線 factory
  * (createSynqux) を配布する。セットアップ層の 1 ファイルで **1 回だけ** 呼び、
  * `.withTypes<T>()` で consumer の domain 型を束縛する。
  *
@@ -330,8 +320,8 @@ export type SynquxDefinition<T extends SynquxTypes, TKey extends string> = {
  * // 定義フェーズ (reducers はこのファイルだけを import する)
  * export const {
  *   createSyncedAction, createSyncedSlice, isSyncedAction,
- *   isSucceededAction, isMySucceededAction, createSynqux,
- *   generateResult, stateWithError, stateWithResult, stateWithTransaction,
+ *   isSucceededResult, isMySucceededResult, createSynqux,
+ *   generateResult, withErrorResult, withResult, withTransaction,
  * } = defineSynqux({ syncedKey: 'game' }).withTypes<{
  *   synced: GameState
  *   message: GameResultMessage
@@ -364,7 +354,7 @@ export const defineSynqux = <TKey extends string>(config: {
 } => {
   const registry = new Set<string>()
 
-  // matchers 等の内部束縛用。位置の宣言は syncedKey に一本化したため導出する
+  // isMySucceededResult 等の内部束縛用。位置の宣言は syncedKey に一本化したため導出する
   const selectSynced = (root: Record<string, unknown>): unknown =>
     root[config.syncedKey]
 
@@ -459,12 +449,34 @@ export const defineSynqux = <TKey extends string>(config: {
     isSyncedAction,
     syncedKey: config.syncedKey,
 
-    ...createSyncedActionMatchers({
-      isSyncedAction: isSyncedAction as (action: Action) => action is Action,
-      selectSynced: selectSynced as (root: {
-        synqux: SynquxState
-      }) => SynquxSynced,
-    }),
+    isSucceededResult,
+    isMySucceededResult: (root: { synqux: SynquxState }): boolean => {
+      const synced = selectSynced(
+        root as unknown as Record<string, unknown>,
+      ) as SynquxSynced
+      if (!isSucceededResult(synced)) {
+        return false
+      }
+
+      if (root.synqux.mode === 'standalone') {
+        return true
+      }
+
+      // 依頼元は封筒 (result.action) から読む。request / host 試し実行 /
+      // 実配達の全経路で requestedBy は封筒に保持される (欠落は false = 安全側)
+      const requestedBy = (
+        (synced.result?.action as UnknownAction | undefined)?.meta as
+          | SynquxActionMeta
+          | undefined
+      )?.requestedBy
+      const selfId = root.synqux.connections.selfId
+
+      return (
+        selfId !== null &&
+        typeof requestedBy === 'string' &&
+        requestedBy === selfId
+      )
+    },
 
     createSynqux: (instanceConfig: {
       synced: Reducer<SynquxSynced>
@@ -486,9 +498,9 @@ export const defineSynqux = <TKey extends string>(config: {
     },
 
     generateResult,
-    stateWithResult,
-    stateWithError,
-    stateWithTransaction,
+    withResult,
+    withErrorResult,
+    withTransaction,
 
     // 純粋な型 cast: 状態は defineSynqux が作った 1 つだけ (分裂しない)
     withTypes: () => definition,

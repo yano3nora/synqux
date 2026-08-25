@@ -16,6 +16,8 @@
 - xxx
 
 ### P1 — 本番境界と公開契約
+- **0.15.0 release (breaking: TASK-260825) と導入 consumer の追従**。isSucceededAction / isMySucceededAction → state 述語 (isSucceededResult / isMySucceededResult)、stateWith* → with* rename。release (bump + publish) はユーザ判断・実行。consumer 側は locals の matcher 呼び出し 4 箇所を述語へ置換、synced extraReducers matcher の手書き hash 照合を `if (!isSucceededResult(state)) return` へ簡約 (誤った根拠コメントも修正)、rename やりきり
+- **standalone の dispatchAndWait × automation nested dispatch で pending が解決されない疑い** (TASK-260825 のレビューで Codex が指摘)。standalone の dispatchAndWait は dispatch 後の最新 result だけを hash 照合するため、automation が outer action 適用後・dispatch return 前に nested dispatch すると result が内側 action に上書きされ、outer の pending resolver が解決できず残る可能性がある。再現テスト (dispatchAndWait + automation の複合) を書いて実在を確認し、修正するか既知制約として ADR へ明文化する
 - xxx
 
 ### P2 — 文書・consumer 導入・コスト最適化
