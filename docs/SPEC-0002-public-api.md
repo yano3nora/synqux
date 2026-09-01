@@ -140,6 +140,23 @@ export type LocalAction<P = void, TRoot = unknown, TMeta extends object = object
   PayloadAction<P> & { meta?: { root?: TRoot } & TMeta }
 
 /**
+ * locals slice 用 createSlice factory (ADR-0027)。runtime は RTK createSlice
+ * 素通しで、extraReducers の builder に「locals reducer には meta.root が渡る」
+ * 契約を型として与える (meta.root は交差ではなく**置換**で TRoot 型付け)。
+ * builder は RTK ActionReducerMapBuilder の宣言 subset: addCase (creator / type
+ * 文字列) / addMatcher (guard / boolean) / addDefaultCase。addAsyncThunk 非対応。
+ * TRoot (RootState) は配線フェーズの生成物のため defineSynqux からは配らない —
+ * consumer がセットアップ層で 1 回だけ束縛し、LocalAction 注釈型は
+ * LocalActionOf で束縛済み factory から逆引きする (供給点は束縛 1 箇所)。
+ * TMeta のフィールドは synqux が実在を保証しない (注入するのは root のみ)
+ * ため、middleware 等で常時付与しない限り optional で宣言すること:
+ *   export const createLocalSlice = buildCreateLocalSlice<RootState, TMeta>()
+ *   export type AppLocalAction<P = void> = LocalActionOf<typeof createLocalSlice, P>
+ */
+export function buildCreateLocalSlice<TRoot = unknown, TMeta extends object = object>(): CreateLocalSlice<TRoot, TMeta>
+export type LocalActionOf<C, P = void> // 束縛済み CreateLocalSlice → LocalAction<P, TRoot, TMeta>
+
+/**
  * synqux の**定義フェーズ** (ADR-0026)。**1 app 1 回だけ呼ぶ** — 定義は creator
  * registry を持ち、呼ぶたび独立した registry になるため、creator と配線 factory
  * は必ず同じ定義の戻りから取る。`defineSynqux({ syncedKey })` が key literal の
@@ -842,7 +859,7 @@ type SnapshotEnvelope<TSynced> = {
 
 | subpath | 主な export | 対象 |
 | --- | --- | --- |
-| `synqux` | `createSynqux` / `createSynquxRootReducer` / `synquxReducer` / `synquxRestored` / reducer helpers / `generateActionHash` / `defineSynqux` (定義フェーズ。creator registry / 配線 factory を持ち、`createSyncedAction` / `createSyncedSlice` / `isMySucceededResult` はこの戻りからのみ提供、ADR-0026) / `isDeliveredSyncedAction` / `isSynquxAction` / `isResultForPeer` / `isSucceededResult` / peer・phase・health selectors / `localStorageSnapshotStore` / 契約型 (`SyncedActionMeta` / `SyncedAction` / `LocalAction` / `SyncedActionHash` 含む) | セットアップ層 + reducer ヘルパー + consumer 型語彙 |
+| `synqux` | `createSynqux` / `createSynquxRootReducer` / `synquxReducer` / `synquxRestored` / reducer helpers / `generateActionHash` / `defineSynqux` (定義フェーズ。creator registry / 配線 factory を持ち、`createSyncedAction` / `createSyncedSlice` / `isMySucceededResult` はこの戻りからのみ提供、ADR-0026) / `buildCreateLocalSlice` (locals slice の meta.root 型付け。TRoot が配線フェーズ生成物のため定義非経由の standalone、ADR-0027) / `isDeliveredSyncedAction` / `isSynquxAction` / `isResultForPeer` / `isSucceededResult` / peer・phase・health selectors / `localStorageSnapshotStore` / 契約型 (`SyncedActionMeta` / `SyncedAction` / `LocalAction` / `LocalActionOf` / `SyncedActionHash` 含む) | セットアップ層 + reducer ヘルパー + consumer 型語彙 |
 | `synqux/react` | `useSynquxSubscription` のみ (読み取りは core selectors を typed useAppSelector へ。ADR-0022 / ADR-0023) | ゲーム開発者層 |
 | `synqux/testing` | `createMemoryHub` / `verifyActionIdempotency` / `assertActionIdempotency` / `createTestRootState` | consumer CI / 本 repo の simulation test |
 | `synqux/firebase` | `firebaseTransport(db, options?: { archivePrunedRequests?: boolean })` | Phase 2 で実装 |

@@ -404,6 +404,7 @@ Bind your domain types once in the setup layer, and feature developers write pla
 | --- | --- | --- |
 | `createSlice` | `createSyncedSlice` | slice-local actions — every case you define is a synced action |
 | `createAction` | `createSyncedAction` | standalone / cross-slice actions, consumed via `extraReducers` (on synced or locals slices) or builder composition |
+| `createSlice` (locals) | `buildCreateLocalSlice<TRoot, TMeta>()` | locals slices — same runtime as `createSlice`, but `extraReducers` sees `action.meta.root` fully typed (ADR-0027; bound once in the setup layer, not distributed by `defineSynqux` — see below) |
 
 Both stamp `hash` (a ulid, unique across all devices — safe to use as a record key in synced state) and `dispatched` **at creation time**, so `builder.addCase` infers `action.meta` as required. One creation = one intent: **never re-dispatch the same action object** — the machinery does not deduplicate it (the same identity would apply twice); call the creator again to retry (`dispatchAndWait` rejects a duplicate pending hash explicitly). `createSyncedSlice` supports plain case reducers and the `{ prepare, reducer }` notation; RTK 2.x callback creators (`create.asyncThunk` etc.) are not supported.
 
@@ -414,7 +415,7 @@ The definition also holds the **creator registry**: defining an action via `crea
 
 ```ts
 // synqux.ts (once, in the setup layer)
-import { defineSynqux, type LocalAction as SynquxLocalAction } from 'synqux'
+import { buildCreateLocalSlice, defineSynqux, type LocalActionOf } from 'synqux'
 import type { RootState } from './store' // derived there; type-only import
 
 export const {
@@ -434,9 +435,16 @@ export const {
   message: GameResultMessage   // your ResultMessage extension (optional)
 }>()
 
-// Annotation type for locals slices (replaces PayloadAction there).
-// The third param is your app-specific dispatch-time meta extension slot.
-export type LocalAction<P = void> = SynquxLocalAction<P, RootState>
+// createSlice for locals slices (typed meta.root in extraReducers, ADR-0027).
+// TRoot (RootState) is a wiring-phase product, so it cannot come from
+// defineSynqux (feeding it back would be a circular type) — bind it here,
+// once. The second type param is your app-specific dispatch-time meta
+// extension slot (fields are not injected by synqux — declare them optional).
+export const createLocalSlice = buildCreateLocalSlice<RootState>()
+
+// Annotation type for locals slice reducers (replaces PayloadAction there).
+// Derived from the bound factory — TRoot / TMeta are supplied in one place only.
+export type LocalAction<P = void> = LocalActionOf<typeof createLocalSlice, P>
 
 // Feature developers then write plain RTK:
 export const launchTalks = createSyncedAction(
@@ -446,6 +454,20 @@ export const launchTalks = createSyncedAction(
 
 builder.addCase(launchTalks, (state, action) => {
   action.meta.hash // required — no optional chaining, no custom narrow helper
+})
+
+// ...and locals slices follow synced actions with a typed meta.root:
+export const scenesSlice = createLocalSlice({
+  name: 'scenes',
+  initialState: scenesInitialState,
+  reducers: {
+    changeScene: (state, action: LocalAction<Scene>) => { /* ... */ },
+  },
+  extraReducers: (builder) => {
+    builder.addCase(launchTalks, (state, action) => {
+      action.meta.root?.game // post-apply root state — typed, no cast
+    })
+  },
 })
 ```
 
@@ -480,7 +502,7 @@ Reducer helpers (game-developer layer; identical with or without sync):
 | export | description |
 | --- | --- |
 | `defineSynqux({ syncedKey }).withTypes<{ synced, message? }>()` | The definition phase (call once per app; `syncedKey` tells it — once — where the synced state mounts, and the root type is derived at wiring). Returns typed helpers plus the creator registry: `createSyncedSlice` (a `createSlice` whose actions are all synced actions) and `createSyncedAction` (a `createAction` for standalone / cross-slice actions) — both stamp `hash` (ulid) / `dispatched` at creation time, type `meta` as required, and register the type (the only ways to define synced actions, ADR-0024 / ADR-0026) — plus pre-bound result predicates, result helpers, and the wiring factory `createSynqux({ transport, synced, locals, ... })` |
-| `generateActionHash()` | Issues a synced-action hash (ulid) directly (rarely needed; creators stamp automatically) |
+| `buildCreateLocalSlice<TRoot, TMeta>()` | `createSlice` factory for locals slices (ADR-0027). Runtime is RTK `createSlice` untouched; the type work makes `extraReducers` see `action.meta.root` (the post-apply root state) by **replacing** the meta's `root` (an intersection would collapse against the creators' `root?: any`). Bound once in the setup layer — `TRoot` is derived at wiring, so the definition structurally cannot supply it. Declared builder subset: `addCase` (creator / type string), `addMatcher` (guard / boolean), `addDefaultCase`; no `addAsyncThunk`. `TMeta` fields are not injected by synqux — declare them optional |
 | `isSucceededResult(synced)` / `isMySucceededResult(root)` | State predicates for "did the last applied synced action succeed / was it my request". `isSucceededResult` works in both synced (extraReducers matcher) and locals contexts — no hand-written hash comparison needed inside the same rootReducer chain. `isMySucceededResult` (from `defineSynqux` only) needs the root (`selfId` / mode), so it is structurally impossible to call from a synced reducer (determinism boundary). Pass the action being applied itself to `withResult` / `withErrorResult` / `generateResult` — the predicates rely on that contract |
 | `isDeliveredSyncedAction(action)` | Checks whether an action carries the complete request/response delivery metadata. Combine with the consumer's synced-domain matcher when needed |
 | `isSynquxAction(action)` | Excludes synqux-internal actions in listeners / middleware. Avoids direct prefix checks |
@@ -510,7 +532,9 @@ Types (all contract types are exported from the main entry):
 | `SynquxSynced<TAction, TMessage>` | Type contract for the synced slice (carries `result`) |
 | `Result` / `ResultMessage` | The verdict a reducer writes and the host reads, and its UI display data |
 | `SyncedActionMeta` / `SyncedAction` / `SyncedActionHash` | Consumer-facing action vocabulary: meta with required `hash` / `dispatched` as seen by synced reducers (ADR-0024) |
-| `LocalAction` | Annotation type for locals slice reducers (replaces `PayloadAction` there; carries `meta.root` and an app meta extension slot) |
+| `LocalAction` | Annotation type for locals slice reducers (replaces `PayloadAction` there; carries `meta.root` and an app meta extension slot). Prefer deriving your app alias via `LocalActionOf` from the bound `buildCreateLocalSlice` factory |
+| `LocalActionOf` / `CreateLocalSlice` | `LocalActionOf` derives the `LocalAction` annotation type from a bound `buildCreateLocalSlice` factory (single supply point for `TRoot` / `TMeta`); `CreateLocalSlice` is the bound factory's function type |
+| `LocalReducerBuilder` / `LocalMatcherBuilder` / `WithLocalMeta` / `LocalUnknownAction` | Type surface of the locals `extraReducers` builder subset and its meta-root replacement views (ADR-0027) |
 | `SynquxActionMeta` | Wire-level (all-optional) metadata vocabulary for envelopes / diagnostics / adapter authors. Response fields are diagnostics only; synced reducers must not branch game state on them |
 | `Peer` / `PeerRole` | Connected device and role (`player` / `dedicated` / `guest`). Guests can also issue requests |
 | `SynquxHealth` / `SynquxPhase` | Sync health / subscription phase |

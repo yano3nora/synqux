@@ -26,6 +26,7 @@ describe('package smoke test', () => {
       [
         'SYNQUX_SCHEMA_VERSION',
         'SYNQUX_VERSION',
+        'buildCreateLocalSlice',
         'createSynqux',
         'createSynquxRootReducer',
         'defineSynqux',

@@ -4,7 +4,7 @@
  * 設計は docs/ADR-0001-design.md、同期仕様は docs/SPEC-0001-requests-sync.md、
  * 公開 API の境界と理由は docs/SPEC-0002-public-api.md を参照。
  */
-export const SYNQUX_VERSION = '0.15.0'
+export const SYNQUX_VERSION = '0.16.0'
 
 // 共有語彙 (契約型)
 export * from './core/types.js'
@@ -21,6 +21,19 @@ export {
   type SyncedActionMeta,
 } from './core/action.js'
 export { defineSynqux, type SynquxTypes } from './core/define-synqux.js'
+
+// locals slice の型付け (ADR-0027)
+// TRoot は配線フェーズの生成物のため defineSynqux からは配らない —
+// consumer が RootState 導出後に buildCreateLocalSlice<TRoot, TMeta>() で束縛する
+export {
+  buildCreateLocalSlice,
+  type CreateLocalSlice,
+  type LocalActionOf,
+  type LocalMatcherBuilder,
+  type LocalReducerBuilder,
+  type LocalUnknownAction,
+  type WithLocalMeta,
+} from './core/local-slice.js'
 
 // セットアップ層
 export {
