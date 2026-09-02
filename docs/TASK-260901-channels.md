@@ -26,7 +26,7 @@
 - [x] テスト (multi-peer 配送 / throttle trailing / cleanup / standalone / 未対応 transport fail-fast)
 - [x] SPEC-0002 / README 更新
 - [x] Codex レビュー 5 巡 (送信直列化 / onDisconnect 競合 / in-flight coalesce / barrier 跨ぎ / cancel 競合を修正) → approve
-- [ ] release (人間判断。0.17.0 想定 — transport optional 拡張のため非 breaking)
+- [x] release (2026-09-02 に 0.17.0 として release 済み。fc-310 も bump 済み)
 
 ## testcases
 
