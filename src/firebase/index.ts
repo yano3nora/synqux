@@ -420,26 +420,49 @@ export const firebaseTransport = (
       // 委ねる (契約 8)。リスナーごとに発火し得るが、重複排除は core が行う
       const onCancel = (error: Error): void => handlers.onError?.(error)
 
+      // heartbeat / demotePeer の update が削除済み path へ再生成し得る残骸
+      // ({ lastSeenAt } / { role } だけの部分 object) は Peer ではないため
+      // 配送しない (契約 17)。id を欠く peer が core へ届くと entities の key が
+      // 'undefined' になり、connected を欠くと host 導出の sort が NaN で壊れる。
+      // 残骸の物理削除は demotePeer 契約 (11) と同じく group 終了時の
+      // data lifecycle に委ねる
+      const toPeer = (value: unknown): Peer | null => {
+        const candidate = value as Peer | null
+        return typeof candidate?.id === 'string' &&
+          typeof candidate.connected === 'number'
+          ? candidate
+          : null
+      }
+
       // 購読開始時、既存 peer は firebase の仕様どおり onChildAdded で一括配送される
       const unsubs = [
         onChildAdded(
           connectionsRef,
           (snap) => {
-            handlers.onAdded(snap.val() as Peer)
+            const peer = toPeer(snap.val())
+            if (peer) {
+              handlers.onAdded(peer)
+            }
           },
           onCancel,
         ),
         onChildChanged(
           connectionsRef,
           (snap) => {
-            handlers.onChanged(snap.val() as Peer)
+            const peer = toPeer(snap.val())
+            if (peer) {
+              handlers.onChanged(peer)
+            }
           },
           onCancel,
         ),
         onChildRemoved(
           connectionsRef,
           (snap) => {
-            handlers.onRemoved(snap.val() as Peer)
+            const peer = toPeer(snap.val())
+            if (peer) {
+              handlers.onRemoved(peer)
+            }
           },
           onCancel,
         ),

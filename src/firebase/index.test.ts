@@ -337,6 +337,45 @@ describe('firebaseTransport', () => {
     expect(onError).toHaveBeenCalledTimes(1)
   })
 
+  it('subscribePeers: id を欠く残骸レコードは配送しない (契約 17)', async () => {
+    const { transport } = await connect()
+    const handlers = {
+      onAdded: vi.fn(),
+      onChanged: vi.fn(),
+      onRemoved: vi.fn(),
+    }
+
+    transport.subscribePeers(handlers)
+
+    type ChildCallback = (snap: { val: () => unknown }) => void
+    const added = h.onChildAddedMock.mock.calls.at(-1)?.[1] as ChildCallback
+    const changed = h.onChildChangedMock.mock.calls.at(-1)?.[1] as ChildCallback
+    const removed = h.onChildRemovedMock.mock.calls.at(-1)?.[1] as ChildCallback
+
+    // demotePeer / heartbeat の update が削除済み path へ再生成する部分 object
+    added({ val: () => ({ role: 'guest' }) })
+    added({ val: () => ({ lastSeenAt: 1 }) })
+    // id / connected の型が Peer 形状を満たさない値も drop する
+    added({ val: () => ({ id: 123, connected: 1 }) })
+    added({ val: () => ({ id: 'peer-x' }) })
+    changed({ val: () => ({ role: 'guest' }) })
+    removed({ val: () => ({ role: 'guest' }) })
+
+    expect(handlers.onAdded).not.toHaveBeenCalled()
+    expect(handlers.onChanged).not.toHaveBeenCalled()
+    expect(handlers.onRemoved).not.toHaveBeenCalled()
+
+    // Peer 形状 (id あり) は従来どおり配送される
+    const peer = { id: 'peer-1', groupId: GROUP_ID, connected: 1 }
+    added({ val: () => peer })
+    changed({ val: () => peer })
+    removed({ val: () => peer })
+
+    expect(handlers.onAdded).toHaveBeenCalledWith(peer)
+    expect(handlers.onChanged).toHaveBeenCalledWith(peer)
+    expect(handlers.onRemoved).toHaveBeenCalledWith(peer)
+  })
+
   it('disconnect: watcher を先に解除し、その後の切断・復帰では再登録しない', async () => {
     h.pushKeys.push('conn-1')
     const { transport } = await connect()

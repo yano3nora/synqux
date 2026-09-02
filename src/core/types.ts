@@ -335,6 +335,13 @@ export type SnapshotStore = {
  * 16.【channel onError】subscribeChannel の回復不能な打ち切りは契約 8 と同様に
  *    onError で通知すること。channel の配送喪失は sync の correctness に影響
  *    しないため、core は診断ログに留めて sync health へは載せない
+ * 17.【peers 形状保証】subscribePeers が配送する値は Peer 形状 (少なくとも
+ *    string の id と number の connected を持つ) に限る。adapter 自身の update 系
+ *    書き込み (heartbeat / demotePeer) が削除済みレコードへ再生成し得る部分
+ *    object 等、契約外形状は配送せず drop すること — id を欠く peer が core へ
+ *    届くと entities の key が 'undefined' になり、connected を欠くと host 導出の
+ *    sort が NaN で壊れる。残骸の物理削除は契約 11 と同じく data lifecycle
+ *    (consumer 責務) に含まれる
  */
 export type SynquxTransport = SnapshotStore & {
   /** presence 登録。selfId は transport が採番する */

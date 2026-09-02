@@ -790,6 +790,9 @@ export type SynquxTransport = SnapshotStore & {
   serverNow(): Promise<number>
 
   subscribePeers(handlers: {
+    // 配送する値は Peer 形状 (string の id と number の connected を持つ) に限る。adapter 自身の
+    // update 系書き込みが削除済みレコードへ再生成し得る部分 object 等の契約外形状は drop する
+    // (契約 17。全契約の正は src/core/types.ts の SynquxTransport doc)
     onAdded(peer: Peer): void
     onChanged(peer: Peer): void
     onRemoved(peer: Peer): void
