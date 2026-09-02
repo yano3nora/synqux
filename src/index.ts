@@ -35,6 +35,14 @@ export {
   type WithLocalMeta,
 } from './core/local-slice.js'
 
+// channels — 裁定なし高頻度同期チャネル (ADR-0028)。handle は instance の
+// synqux.channel() から取得する。ここで配るのは型のみ
+export {
+  type SynquxChannel,
+  type SynquxChannelHandlers,
+  type SynquxChannelOptions,
+} from './core/channels.js'
+
 // セットアップ層
 export {
   createSynqux,

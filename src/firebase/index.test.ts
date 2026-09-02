@@ -860,4 +860,214 @@ describe('firebaseTransport', () => {
     // 切断後の再利用は不可
     await expect(transport.loadSnapshot('k')).rejects.toThrow('not connected')
   })
+
+  it("publishChannel: cleanup 'disconnect' は set より先に onDisconnect を確定し、同一 key の再登録は省略する", async () => {
+    h.pushKeys.push('conn-1')
+    const { transport } = await connect()
+    const presenceDisconnects = h.onDisconnectMock.mock.calls.length
+
+    await transport.publishChannel!('cursors', 'conn-1', '{"x":1}', {
+      cleanup: 'disconnect',
+    })
+    await transport.publishChannel!('cursors', 'conn-1', '{"x":2}', {
+      cleanup: 'disconnect',
+    })
+
+    // 登録 (onDisconnect) は初回 publish の 1 回だけ、かつ set より先 (契約 15)
+    expect(h.onDisconnectMock).toHaveBeenCalledTimes(presenceDisconnects + 1)
+    const disconnectOrder = h.onDisconnectMock.mock.invocationCallOrder.at(-1)!
+    const setOrder = h.setMock.mock.invocationCallOrder.at(-2)! // channel 初回 set
+    expect(disconnectOrder).toBeLessThan(setOrder)
+
+    expect(h.setMock).toHaveBeenLastCalledWith(
+      expect.objectContaining({
+        path: `channels/${GROUP_ID}/cursors/conn-1`,
+      }),
+      '{"x":2}',
+    )
+  })
+
+  it("publishChannel: cleanup 'none' は onDisconnect を登録しない", async () => {
+    h.pushKeys.push('conn-1')
+    const { transport } = await connect()
+    const presenceDisconnects = h.onDisconnectMock.mock.calls.length
+
+    await transport.publishChannel!('drag', 'block-1', '{"x":1}', {
+      cleanup: 'none',
+    })
+
+    expect(h.onDisconnectMock).toHaveBeenCalledTimes(presenceDisconnects)
+  })
+
+  it('publishChannel: 切断観測後の publish は onDisconnect を張り直す (契約 15 の再接続対応)', async () => {
+    h.pushKeys.push('conn-1')
+    const { transport } = await connect()
+    const watcher = h.connectedSubscriptions.at(-1)!
+
+    await transport.publishChannel!('cursors', 'conn-1', '{"x":1}', {
+      cleanup: 'disconnect',
+    })
+    const registered = h.onDisconnectMock.mock.calls.length
+
+    // 切断で server 側の予約は消化済み → 登録済みマークが破棄され、
+    // 復帰後の publish が予約を張り直す
+    watcher.callback({ val: () => false })
+    await transport.publishChannel!('cursors', 'conn-1', '{"x":2}', {
+      cleanup: 'disconnect',
+    })
+
+    expect(h.onDisconnectMock.mock.calls.length).toBe(registered + 1)
+  })
+
+  it('publishChannel: onDisconnect 登録の await 中に切断を観測したら publish ごと drop する', async () => {
+    h.pushKeys.push('conn-1')
+    const { transport } = await connect()
+    const watcher = h.connectedSubscriptions.at(-1)!
+    const presenceSets = h.setMock.mock.calls.length
+
+    // onDisconnect().remove() を保留し、待機中に切断を観測させる
+    let releaseRemove: () => void = () => undefined
+    h.onDisconnectMock.mockImplementationOnce(() => ({
+      remove: vi.fn(
+        () =>
+          new Promise<undefined>((resolve) => {
+            releaseRemove = () => resolve(undefined)
+          }),
+      ),
+      cancel: vi.fn(async () => undefined),
+    }))
+
+    const publishing = transport.publishChannel!(
+      'cursors',
+      'conn-1',
+      '{"x":1}',
+      {
+        cleanup: 'disconnect',
+      },
+    )
+    watcher.callback({ val: () => false }) // await 中の切断 (epoch 進行)
+    releaseRemove()
+    await publishing
+
+    // 予約の保証がない set は書かれない (書くと次の publish が来ない限り孤児)
+    expect(h.setMock.mock.calls.length).toBe(presenceSets)
+
+    // マークもされていないので、次の publish は onDisconnect を再登録して書く
+    const before = h.onDisconnectMock.mock.calls.length
+    await transport.publishChannel!('cursors', 'conn-1', '{"x":2}', {
+      cleanup: 'disconnect',
+    })
+    expect(h.onDisconnectMock.mock.calls.length).toBe(before + 1)
+    expect(h.setMock).toHaveBeenLastCalledWith(
+      expect.objectContaining({
+        path: `channels/${GROUP_ID}/cursors/conn-1`,
+      }),
+      '{"x":2}',
+    )
+  })
+
+  it('publishChannel: 論理 disconnect を跨いだ書き込みは drop する (後着 set を作らない)', async () => {
+    h.pushKeys.push('conn-1')
+    const { transport } = await connect()
+    const presenceSets = h.setMock.mock.calls.length
+
+    let releaseRemove: () => void = () => undefined
+    h.onDisconnectMock.mockImplementationOnce(() => ({
+      remove: vi.fn(
+        () =>
+          new Promise<undefined>((resolve) => {
+            releaseRemove = () => resolve(undefined)
+          }),
+      ),
+      cancel: vi.fn(async () => undefined),
+    }))
+
+    const publishing = transport.publishChannel!(
+      'cursors',
+      'conn-1',
+      '{"x":1}',
+      {
+        cleanup: 'disconnect',
+      },
+    )
+    await transport.disconnect() // 登録待ちの間に論理切断
+    releaseRemove()
+    await publishing
+
+    expect(h.setMock.mock.calls.length).toBe(presenceSets)
+  })
+
+  it('removeChannelValue: remove を cancel より先に実行する (cancel 先行だと失敗時に値が永久に残る)', async () => {
+    h.pushKeys.push('conn-1')
+    const { transport } = await connect()
+
+    await transport.publishChannel!('cursors', 'conn-1', '{"x":1}', {
+      cleanup: 'disconnect',
+    })
+    await transport.removeChannelValue!('cursors', 'conn-1')
+
+    expect(h.removeMock).toHaveBeenCalledWith(
+      expect.objectContaining({
+        path: `channels/${GROUP_ID}/cursors/conn-1`,
+      }),
+    )
+    const removeOrder = h.removeMock.mock.invocationCallOrder.at(-1)!
+    const cancelledReservation = h.onDisconnectMock.mock.results.at(-1)!
+      .value as { cancel: ReturnType<typeof vi.fn> }
+    const cancelOrder =
+      cancelledReservation.cancel.mock.invocationCallOrder.at(-1)!
+    expect(removeOrder).toBeLessThan(cancelOrder)
+
+    // 登録済みマークも破棄されるため、次の publish は onDisconnect を再登録する
+    const before = h.onDisconnectMock.mock.calls.length
+    await transport.publishChannel!('cursors', 'conn-1', '{"x":2}', {
+      cleanup: 'disconnect',
+    })
+    expect(h.onDisconnectMock.mock.calls.length).toBe(before + 1)
+  })
+
+  it('subscribeChannel: added / changed を onChanged へ畳み、契約外 value は配送しない', async () => {
+    h.pushKeys.push('conn-1')
+    const { transport } = await connect()
+
+    const onChanged = vi.fn()
+    const onRemoved = vi.fn()
+    transport.subscribeChannel!('cursors', { onChanged, onRemoved })
+
+    const added = h.onChildAddedMock.mock.calls.at(-1)![1] as (snap: {
+      key: string | null
+      val: () => unknown
+    }) => void
+    const changed = h.onChildChangedMock.mock.calls.at(-1)![1] as typeof added
+    const removed = h.onChildRemovedMock.mock.calls.at(-1)![1] as typeof added
+
+    added({ key: 'a', val: () => '{"x":1}' })
+    changed({ key: 'a', val: () => '{"x":2}' })
+    changed({ key: 'b', val: () => 123 }) // 不透明文字列契約 (契約 14) 外
+    removed({ key: 'a', val: () => null })
+
+    expect(onChanged).toHaveBeenNthCalledWith(1, 'a', '{"x":1}')
+    expect(onChanged).toHaveBeenNthCalledWith(2, 'a', '{"x":2}')
+    expect(onChanged).toHaveBeenCalledTimes(2)
+    expect(onRemoved).toHaveBeenCalledWith('a')
+  })
+
+  it("disconnect: cleanup 'disconnect' の channel value を明示切断でも削除する (契約 15)", async () => {
+    h.pushKeys.push('conn-1')
+    const { transport } = await connect()
+
+    await transport.publishChannel!('cursors', 'conn-1', '{"x":1}', {
+      cleanup: 'disconnect',
+    })
+    await transport.disconnect()
+
+    expect(h.removeMock).toHaveBeenCalledWith(
+      expect.objectContaining({
+        path: `channels/${GROUP_ID}/cursors/conn-1`,
+      }),
+    )
+    expect(h.removeMock).toHaveBeenCalledWith(
+      expect.objectContaining({ path: `connections/${GROUP_ID}/conn-1` }),
+    )
+  })
 })

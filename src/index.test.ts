@@ -57,6 +57,20 @@ describe('package smoke test', () => {
     )
   })
 
+  it('SynquxChannel 型を main entry から公開する (handle 自体は instance の channel() から)', () => {
+    type Cursor = { x: number; y: number }
+
+    expectTypeOf<synqux.SynquxChannel<Cursor>>().toMatchTypeOf<{
+      publish: (key: string, value: Cursor) => void
+      remove: (key: string) => Promise<void>
+      subscribe: (handlers: synqux.SynquxChannelHandlers<Cursor>) => () => void
+    }>()
+    expectTypeOf<synqux.SynquxChannelOptions>().toMatchTypeOf<{
+      cleanup?: 'disconnect' | 'none'
+      throttleMs?: number
+    }>()
+  })
+
   it('SynquxAutomation 型を main entry から公開する', () => {
     expectTypeOf<SynquxAutomation<{ count: number }, Action>>().toMatchTypeOf<{
       id: string

@@ -63,6 +63,7 @@ const INVALID_GROUP_ID_CHARS = /[.#$/[\]\u0000-\u001f\u007f]/
  * - `requests/{groupId}/{requestId}` — request 封筒 (push id 採番 = 挿入順辞書順)
  * - `logs/{groupId}/{requestId}` — prune 済み request の調査ログ (opt-in)
  * - `games/{groupId}` — fence と canonical JSON snapshot payload
+ * - `channels/{groupId}/{channel}/{key}` — 裁定なし LWW KV (契約 14-16、ADR-0028)
  *
  * 前提: firebase auth (匿名認証等) は consumer が transport 生成前に済ませること。
  * at-least-once の吸収 (重複・遅延・振り分け) は core の責務のため、この adapter は
@@ -83,6 +84,19 @@ export const firebaseTransport = (
     reregistering: Promise<void> | null
     unsubscribeConnected?: () => void
     disposed: boolean
+    /**
+     * cleanup 'disconnect' で publish 済みの channel value path (契約 15)。
+     * onDisconnect の再登録要否の判定に使う — 切断を観測したら clear し、
+     * 次の publish で onDisconnect を張り直す (server 側は切断時に実行済みのため)
+     */
+    channelDisconnectRegistered: Set<string>
+
+    /**
+     * 切断観測の世代番号。onDisconnect 登録の await 中に切断が起きた場合、
+     * clear 後の add で「登録済みだが server 予約は消化済み」の齟齬を作らない
+     * ための guard (check → await → add の競合対策)
+     */
+    disconnectEpoch: number
   } | null = null
 
   // .info/serverTimeOffset の補正値。インスタンス内に cache する (module 変数禁止)
@@ -99,6 +113,8 @@ export const firebaseTransport = (
   const requestsPath = (groupId: string) => `requests/${groupId}`
   const logsPath = (groupId: string) => `logs/${groupId}`
   const snapshotPath = (key: string) => `games/${key}`
+  const channelValuePath = (groupId: string, channel: string, key: string) =>
+    `channels/${groupId}/${channel}/${key}`
 
   /**
    * firebase は undefined を含む値の書き込みで throw するため、書き込み直前に
@@ -213,6 +229,8 @@ export const firebaseTransport = (
         reregistering: null as Promise<void> | null,
         unsubscribeConnected: undefined as (() => void) | undefined,
         disposed: false,
+        channelDisconnectRegistered: new Set<string>(),
+        disconnectEpoch: 0,
       }
       session = currentSession
 
@@ -225,6 +243,11 @@ export const firebaseTransport = (
 
           if (snap.val() === false) {
             currentSession.sawDisconnect = true
+            // 切断で server 側の onDisconnect (channel cleanup) は実行済み。
+            // 復帰後の publish で張り直せるよう登録済みマークを破棄する (契約 15)。
+            // epoch は await 中の登録処理へ「この登録は無効」と伝える
+            currentSession.channelDisconnectRegistered.clear()
+            currentSession.disconnectEpoch += 1
             return
           }
 
@@ -290,6 +313,23 @@ export const firebaseTransport = (
       currentSession.disposed = true
       session = null
       await currentSession.reregistering
+
+      // cleanup 'disconnect' の channel value を明示切断でも削除する (契約 15)。
+      // best effort — presence 解除を channel 掃除の失敗で止めない
+      // (削除に失敗しても onDisconnect の予約が server 側で残っており最終的に消える)
+      const cleanupPaths = [...currentSession.channelDisconnectRegistered]
+      currentSession.channelDisconnectRegistered.clear()
+      await Promise.all(
+        cleanupPaths.map(async (path) => {
+          try {
+            const valueRef = ref(db, path)
+            await remove(valueRef)
+            await onDisconnect(valueRef).cancel()
+          } catch (error) {
+            console.error(error)
+          }
+        }),
+      )
 
       await remove(selfRef)
       await onDisconnect(selfRef).cancel()
@@ -626,6 +666,109 @@ export const firebaseTransport = (
           console.error(error)
         },
       )
+    },
+
+    async publishChannel(channel, key, payload, options) {
+      const currentSession = requireSession()
+      const path = channelValuePath(currentSession.groupId, channel, key)
+      const valueRef = ref(db, path)
+
+      if (
+        options.cleanup === 'disconnect' &&
+        !currentSession.channelDisconnectRegistered.has(path)
+      ) {
+        // presence 登録と同じ順序: set より先に onDisconnect を確定し、
+        // 登録前の切断で孤児 value を残さない (契約 15)
+        const epoch = currentSession.disconnectEpoch
+        await onDisconnect(valueRef).remove()
+
+        // await 中に切断 (epoch 進行 = 予約消化済みの可能性) や論理 disconnect
+        // (session 差し替え) を観測したら、この publish を丸ごと drop する。
+        // 予約の保証なしに set を書くと「以後 publish が来なければ切断後も残る
+        // 孤児」になるため。LWW の高頻度データなので drop は次の publish が
+        // 予約の張り直しごと上書きする
+        if (
+          session !== currentSession ||
+          currentSession.disconnectEpoch !== epoch
+        ) {
+          return
+        }
+        currentSession.channelDisconnectRegistered.add(path)
+      }
+
+      // 論理 disconnect 後の後着 set を作らない (契約 14 の session 再検査)。
+      // payload は core 直列化済みの不透明文字列をそのまま格納する
+      if (session !== currentSession) {
+        return
+      }
+      await set(valueRef, payload)
+    },
+
+    async removeChannelValue(channel, key) {
+      const currentSession = requireSession()
+      const path = channelValuePath(currentSession.groupId, channel, key)
+      const valueRef = ref(db, path)
+      const wasRegistered = currentSession.channelDisconnectRegistered.has(path)
+      const epoch = currentSession.disconnectEpoch
+
+      // remove → cancel の順 (契約 15)。cancel を先にすると cancel 成功後の
+      // remove 失敗・プロセス死で値が永久に残る。逆順なら残るのは予約だけで、
+      // 発火しても削除済み path への remove として無害。
+      // 登録済みマークは durable な remove 成功後に消す — 先に消すと remove
+      // 失敗時に論理 disconnect の cleanup 対象から漏れる
+      await remove(valueRef)
+
+      // await 中の論理 disconnect (session 差し替え) や切断 (epoch 進行) を
+      // 跨いだ cancel は、新 session / 復帰後 publish が張り直した予約を殺す
+      // ため skip する (残る予約は削除済み path への remove として無害)
+      if (
+        session !== currentSession ||
+        currentSession.disconnectEpoch !== epoch
+      ) {
+        return
+      }
+
+      if (wasRegistered) {
+        await onDisconnect(valueRef).cancel()
+        currentSession.channelDisconnectRegistered.delete(path)
+      }
+    },
+
+    subscribeChannel(channel, handlers) {
+      const { groupId } = requireSession()
+      const channelRef = ref(db, `channels/${groupId}/${channel}`)
+
+      // subscribePeers と同じ理由で cancel を onError へ引き渡す (契約 16)
+      const onCancel = (error: Error): void => handlers.onError?.(error)
+
+      // LWW では added / changed の区別が無意味のため、両方 onChanged へ畳む
+      // (契約 14)。購読開始時の既存 entry は firebase の仕様どおり onChildAdded で
+      // 一括配送される。payload 契約 (不透明文字列) 外の混入 value は配送しない
+      const deliver = (snap: {
+        key: string | null
+        val: () => unknown
+      }): void => {
+        const payload = snap.val()
+        if (snap.key !== null && typeof payload === 'string') {
+          handlers.onChanged(snap.key, payload)
+        }
+      }
+
+      const unsubs = [
+        onChildAdded(channelRef, deliver, onCancel),
+        onChildChanged(channelRef, deliver, onCancel),
+        onChildRemoved(
+          channelRef,
+          (snap) => {
+            if (snap.key !== null) {
+              handlers.onRemoved(snap.key)
+            }
+          },
+          onCancel,
+        ),
+      ]
+
+      return () => unsubs.forEach((unsub) => unsub())
     },
   }
 }

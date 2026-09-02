@@ -1,4 +1,5 @@
 import type {
+  ChannelValueHandlers,
   Peer,
   RequestEnvelope,
   SnapshotFence,
@@ -55,6 +56,8 @@ export type MemoryHub = {
     peers(groupId: string): Peer[]
     snapshot(key: string): string | null
     snapshotFence(key: string): SnapshotFence | null
+    /** channel の現在値 (key → payload 文字列)。ADR-0028 */
+    channel(groupId: string, channel: string): Record<string, string>
   }
 }
 
@@ -84,13 +87,30 @@ type RequestSubscriber = {
   scheduled: boolean
 }
 
-type Subscriber = PeerSubscriber | RequestSubscriber
+type ChannelSubscriber = {
+  id: number
+  groupId: string
+  peerId: Peer['id']
+  active: boolean
+  kind: 'channel'
+  channel: string
+  handlers: ChannelValueHandlers
+  queue: (() => void)[]
+  scheduled: boolean
+}
+
+type Subscriber = PeerSubscriber | RequestSubscriber | ChannelSubscriber
+
+/** channel value の格納形。cleanupOwner は cleanup 'disconnect' の削除主 (契約 15) */
+type ChannelValue = { payload: string; cleanupOwner: Peer['id'] | null }
 
 type GroupState = {
   peers: Peer[]
   requests: RequestEnvelope[]
+  channels: Map<string, Map<string, ChannelValue>>
   peerSubscribers: PeerSubscriber[]
   requestSubscribers: RequestSubscriber[]
+  channelSubscribers: ChannelSubscriber[]
 }
 
 type OneShotFault = {
@@ -216,8 +236,10 @@ export function createMemoryHub(): MemoryHub {
     const created: GroupState = {
       peers: [],
       requests: [],
+      channels: new Map(),
       peerSubscribers: [],
       requestSubscribers: [],
+      channelSubscribers: [],
     }
     groups.set(groupId, created)
     return created
@@ -317,12 +339,40 @@ export function createMemoryHub(): MemoryHub {
     enqueue(subscriber, delivery.task)
   }
 
+  const notifyChannelSubscribers = (
+    group: GroupState,
+    channel: string,
+    task: (subscriber: ChannelSubscriber) => () => void,
+  ): void => {
+    for (const subscriber of group.channelSubscribers) {
+      if (subscriber.channel === channel) {
+        enqueue(subscriber, task(subscriber))
+      }
+    }
+  }
+
   const removePeer = (peerId: Peer['id']): void => {
     const { group, peer } = requirePeer(peerId)
     group.peers = group.peers.filter((candidate) => candidate.id !== peerId)
 
     for (const subscriber of group.peerSubscribers) {
       enqueue(subscriber, () => subscriber.handlers.onRemoved(clone(peer)))
+    }
+
+    // cleanup 'disconnect' の channel value を削除して onRemoved を配送する
+    // (契約 15。プロセス死の模擬 faults.disconnect / 明示 disconnect の両方が通る)
+    for (const [channelName, values] of group.channels) {
+      // Map は iteration 中の delete が仕様上安全なため、そのまま回して消す
+      for (const [key, value] of values) {
+        if (value.cleanupOwner === peerId) {
+          values.delete(key)
+          notifyChannelSubscribers(
+            group,
+            channelName,
+            (subscriber) => () => subscriber.handlers.onRemoved(key),
+          )
+        }
+      }
     }
   }
 
@@ -661,6 +711,74 @@ export function createMemoryHub(): MemoryHub {
           }
         }
       },
+
+      async publishChannel(channel, key, payload, options) {
+        const { group, peerId } = assertConnected()
+        const values =
+          group.channels.get(channel) ?? new Map<string, ChannelValue>()
+        group.channels.set(channel, values)
+
+        values.set(key, {
+          payload,
+          cleanupOwner: options.cleanup === 'disconnect' ? peerId : null,
+        })
+        notifyChannelSubscribers(
+          group,
+          channel,
+          (subscriber) => () => subscriber.handlers.onChanged(key, payload),
+        )
+      },
+
+      async removeChannelValue(channel, key) {
+        const { group } = assertConnected()
+        const values = group.channels.get(channel)
+        if (values === undefined || !values.delete(key)) {
+          return
+        }
+
+        notifyChannelSubscribers(
+          group,
+          channel,
+          (subscriber) => () => subscriber.handlers.onRemoved(key),
+        )
+      },
+
+      subscribeChannel(channel, handlers) {
+        const { group, peerId, groupId: boundGroupId } = assertConnected()
+        const subscriber: ChannelSubscriber = {
+          id: nextSubscriberId,
+          groupId: boundGroupId,
+          peerId,
+          active: true,
+          kind: 'channel',
+          channel,
+          handlers,
+          queue: [],
+          scheduled: false,
+        }
+        nextSubscriberId += 1
+        group.channelSubscribers.push(subscriber)
+
+        // 購読開始時の既存 entry の一括配送 (契約 14)
+        const existing = group.channels.get(channel)
+        if (existing !== undefined) {
+          for (const [key, value] of existing) {
+            enqueue(subscriber, () =>
+              subscriber.handlers.onChanged(key, value.payload),
+            )
+          }
+        }
+
+        return () => {
+          subscriber.active = false
+          subscriber.queue = []
+          const currentGroup = getGroup(boundGroupId)
+          currentGroup.channelSubscribers =
+            currentGroup.channelSubscribers.filter(
+              (candidate) => candidate.id !== subscriber.id,
+            )
+        }
+      },
     }
   }
 
@@ -760,6 +878,7 @@ export function createMemoryHub(): MemoryHub {
           const targets = [
             ...group.peerSubscribers,
             ...group.requestSubscribers,
+            ...group.channelSubscribers,
           ].filter((subscriber) => subscriber.peerId === peerId)
 
           // 一覧から外して以後の新規配送を止める。queue 済みの配送はそのまま
@@ -769,6 +888,9 @@ export function createMemoryHub(): MemoryHub {
             (subscriber) => subscriber.peerId !== peerId,
           )
           group.requestSubscribers = group.requestSubscribers.filter(
+            (subscriber) => subscriber.peerId !== peerId,
+          )
+          group.channelSubscribers = group.channelSubscribers.filter(
             (subscriber) => subscriber.peerId !== peerId,
           )
 
@@ -799,6 +921,17 @@ export function createMemoryHub(): MemoryHub {
       snapshotFence(key) {
         const stored = snapshots.get(key)
         return stored === undefined ? null : clone(stored.fence)
+      },
+
+      channel(groupId, channel) {
+        const values = getGroup(groupId).channels.get(channel)
+        if (values === undefined) {
+          return {}
+        }
+
+        return Object.fromEntries(
+          [...values].map(([key, value]) => [key, value.payload]),
+        )
       },
     },
   }

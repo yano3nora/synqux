@@ -360,6 +360,37 @@ if (result.type === 'error') { /* rejected */ }
 - The contract is "until **this device** finishes processing the verdict". Apply-on-every-device cannot be guaranteed in a distributed system.
 - Both success and error (rejection) resolve with a Result. It rejects only on signal abort or unsubscribe; pick your own timeout via `AbortSignal.timeout()` etc.
 
+### Sync high-frequency ephemeral values (`channel`)
+
+**Concept.** Cursor positions and mid-drag coordinates are the opposite of synced actions: high-frequency, last-write-wins per key, no verdict, no history. Routing them through requests would waste bandwidth and host adjudication, and routing them through Redux would storm re-renders. `synqux.channel()` gives them their own lane — a per-key LWW KV outside the store (ADR-0028).
+
+```ts
+// setup layer — same name + options always returns the same handle
+// (calling channel() again with different options throws)
+export const cursors = synqux.channel<{ x: number; y: number }>('cursors', {
+  cleanup: 'disconnect', // 'disconnect' = removed automatically when the publisher disconnects; default 'none' retains values
+  throttleMs: 70, // per-key publish throttle in ms (leading + trailing). Default 70; 0 disables
+})
+
+// publisher (e.g. a mousemove handler; key = own peer id)
+cursors.publish(selfId, { x, y }) // throttled per key (leading + trailing, default 70ms)
+
+// subscriber (bind to your own per-key store, e.g. a jotai atomFamily)
+const unsubscribe = cursors.subscribe({
+  onChanged: (peerId, position) => setCursorAtom(peerId, position),
+  onRemoved: (peerId) => removeCursorAtom(peerId),
+})
+```
+
+**Behavior.**
+
+- Channel data never enters Redux, snapshots, or restore — **do not use it for game-deciding state**. When a final position matters (e.g. after a drag ends), commit it to synced state with a normal synced action.
+- `publish` is fire-and-forget and silently dropped before `subscribe()` starts a session; subscription registrations survive across sessions and re-attach automatically.
+- `throttleMs` coalesces publishes per key inside the window (intermediate values are dropped, the latest always lands thanks to the trailing send), so event handlers can publish on every `mousemove` / drag move without their own throttling. Deliveries to subscribers follow the same cadence.
+- Standalone sessions self-loop deliveries in memory with the same semantics; values are discarded when the session ends.
+- `cleanup: 'disconnect'` keys should be publisher-unique (typically the peer id). Default `'none'` retains values for the group's lifetime — deleting them when a group is discarded is the consumer's data lifecycle, like `connections/` and `requests/`.
+- Requires a transport with channel support (the bundled firebase transport and MemoryHub have it); a synced subscribe fails fast otherwise.
+
 ### Run without sync (standalone)
 
 **Concept.** Standalone mode (`mode: 'standalone'`) runs the exact same reducers and dispatch flow on a single device, so a solo mode or an offline title screen needs no separate code path.
@@ -490,7 +521,7 @@ Setup layer (touched only by the single setup file in your template):
 
 | export | description |
 | --- | --- |
-| `createSynqux(config)` | Creates a sync instance (core / primitive form — the definition's wiring factory wraps this). Returns `middlewares` / `rootReducer` / `reducer` / `subscribe` / `unsubscribe` / `setRole` / `dispatchAndWait` |
+| `createSynqux(config)` | Creates a sync instance (core / primitive form — the definition's wiring factory wraps this). Returns `middlewares` / `rootReducer` / `reducer` / `subscribe` / `unsubscribe` / `setRole` / `dispatchAndWait` / `channel` |
 | `createSynquxRootReducer({ isSyncedAction, syncedKey, synced, locals })` | Serial rootReducer helper ("synced is pure, locals see earlier stages"). Primitive-style helper — the definition's wiring phase calls this internally; use directly only with hand-wired stores. Takes a `syncedKey` plus a single synced reducer, auto-stamps a default success result on synced actions (ADR-0013), and returns `rootReducer` / `selectSynced` / `isSyncedAction` to spread into the core `createSynqux` config |
 | `localStorageSnapshotStore()` | Default browser persistence for standalone mode. Pass to `localSnapshots` to use or replace explicitly |
 | `synquxReducer` | Internal slice reducer mounted at the reserved key `state.synqux` (for the primitive wiring style) |
@@ -542,7 +573,9 @@ Types (all contract types are exported from the main entry):
 | `SynquxAutomation` | Rule type for the `automations` config (host-driven auto dispatch, ADR-0015) |
 | `SynquxListener` | Rule type for `listeners`; `scope: 'all'` opts into local actions (live-only, ADR-0017 / ADR-0020) |
 | `SynquxRootState` / `SynquxState` / `PendingRequest` | Composed rootReducer state / internal slice state and pending request |
-| `SynquxTransport` / `RequestEnvelope` | Transport abstraction and request envelope (contract for adapter authors) |
+| `SynquxChannel` / `SynquxChannelOptions` / `SynquxChannelHandlers` | High-frequency ephemeral channel handle / options / subscription handlers (handles come from the instance's `synqux.channel()`, ADR-0028) |
+| `ChannelCleanup` / `ChannelValueHandlers` | Channel cleanup policy (`'disconnect'` / `'none'`) and the adapter-facing subscription handler contract |
+| `SynquxTransport` / `RequestEnvelope` | Transport abstraction and request envelope (contract for adapter authors; channels add three optional methods) |
 | `SnapshotStore` / `SnapshotFence` / `SnapshotEnvelope` | Snapshot persistence contract (fenced conditional writes) |
 | `Unsubscribe` | Unsubscribe function |
 

@@ -433,6 +433,33 @@ export type Synqux<TRoot, TAction = Action, TSynced = never> = {
    */
   dispatchAndWait(action: TAction, options?: { signal?: AbortSignal }): Promise<Result<TAction>>
 
+  /**
+   * 裁定なし高頻度同期チャネル (LWW KV、ADR-0028)。カーソル座標・ドラッグ中座標
+   * など「per-key の最新値だけが意味を持つ非永続データ」用で、Redux store を
+   * 通さない (React binding は consumer 責務)。同名は同一 handle (options 相違は
+   * throw)。handle は session を跨いで生存し、publish は session 未開始の間 drop、
+   * subscribe の登録は session 開始で自動 attach。publish は per-key throttle
+   * (leading + trailing、既定 70ms)。channels 未対応 transport は synced session
+   * で fail-fast。ゲームの正誤判定に使う値は synced へ明示 commit する (consumer 規約)
+   */
+  channel<TValue>(name: string, options?: SynquxChannelOptions): SynquxChannel<TValue>
+
+}
+
+export type SynquxChannelOptions = {
+  cleanup?: 'disconnect' | 'none'  // 'disconnect' = publish 元の切断で自動削除 (既定 'none')
+  throttleMs?: number              // per-key throttle (既定 70)。0 で無効化
+}
+
+export type SynquxChannel<TValue> = {
+  publish(key: string, value: TValue): void        // fire-and-forget。window 中は最新値へ coalesce
+  remove(key: string): Promise<void>               // 全端末へ onRemoved を配送
+  subscribe(handlers: SynquxChannelHandlers<TValue>): Unsubscribe  // 購読時に既知 entry を一括配送
+}
+
+export type SynquxChannelHandlers<TValue> = {
+  onChanged(key: string, value: TValue): void  // upsert 通知 (LWW のため added/changed は非区別)
+  onRemoved(key: string): void
 }
 
 export function createSynqux<TRoot, TSynced, TAction>(
@@ -788,6 +815,16 @@ export type SynquxTransport = SnapshotStore & {
       onError?(error: unknown): void  // 購読の回復不能な打ち切りの通知 (契約 8, ADR-0012)
     },
   ): Unsubscribe
+
+  // channels (契約 14-16、ADR-0028)。3 つ揃えて optional — correctness に関与しない
+  // 拡張機能で、未対応 adapter でも同期自体は成立する (channels 使用時のみ fail-fast)
+  publishChannel?(channel: string, key: string, payload: string, options: { cleanup: 'disconnect' | 'none' }): Promise<void>
+  removeChannelValue?(channel: string, key: string): Promise<void>
+  subscribeChannel?(channel: string, handlers: {
+    onChanged(key: string, payload: string): void  // 購読開始時に既存 entry を一括配送
+    onRemoved(key: string): void
+    onError?(error: unknown): void
+  }): Unsubscribe
 }
 
 // NOTE: transport インスタンスは connect で指定した 1 グループに束縛される
@@ -808,6 +845,7 @@ export type SynquxTransport = SnapshotStore & {
 | `pruneRequests` | `orderByChild('seq').endBefore(beforeSeq)` で取得し、seq なしをコード側で除外。既定は requests から物理削除、`archivePrunedRequests` 有効時は root-level multi-path `update()` で `logs/` へ原子的に退避 | なし |
 | `subscribeRequests` | `onChildAdded` / `onChildChanged` + `orderByKey().startAfter(after)` | `subscribe-requests.ts` / `game-requests-query.ts` |
 | `saveSnapshot` | `set(ref, payload)` (payload は文字列なので undefined 落ち・空配列消失が起きない) | `update-game-state.ts` |
+| `publishChannel` / `subscribeChannel` | `channels/{groupId}/{channel}/{key}` へ `set()` (cleanup 'disconnect' は set より先に `onDisconnect().remove()` を確定)。購読は `onChildAdded` / `onChildChanged` を onChanged へ畳み、`onChildRemoved` を onRemoved へ | `cursor-self.tsx` / `cursor-other.tsx` (RTDB 直書き) の一般化 (ADR-0028) |
 
 移植元で `subscribe-requests.ts` (firebase 層) に置かれていた at-least-once 対応 (added 重複破棄・裁定済み added の changed 振り分け) は、**core の受信ルーティングへ移した** (どの transport でも起きうる普遍的な問題のため)。prev チェーン由来の対応 (prevKey 補完等) は seq 化 (ADR-0002) で不要になり消滅
 
@@ -859,7 +897,7 @@ type SnapshotEnvelope<TSynced> = {
 
 | subpath | 主な export | 対象 |
 | --- | --- | --- |
-| `synqux` | `createSynqux` / `createSynquxRootReducer` / `synquxReducer` / `synquxRestored` / reducer helpers / `generateActionHash` / `defineSynqux` (定義フェーズ。creator registry / 配線 factory を持ち、`createSyncedAction` / `createSyncedSlice` / `isMySucceededResult` はこの戻りからのみ提供、ADR-0026) / `buildCreateLocalSlice` (locals slice の meta.root 型付け。TRoot が配線フェーズ生成物のため定義非経由の standalone、ADR-0027) / `isDeliveredSyncedAction` / `isSynquxAction` / `isResultForPeer` / `isSucceededResult` / peer・phase・health selectors / `localStorageSnapshotStore` / 契約型 (`SyncedActionMeta` / `SyncedAction` / `LocalAction` / `LocalActionOf` / `SyncedActionHash` 含む) | セットアップ層 + reducer ヘルパー + consumer 型語彙 |
+| `synqux` | `createSynqux` / `createSynquxRootReducer` / `synquxReducer` / `synquxRestored` / reducer helpers / `generateActionHash` / `defineSynqux` (定義フェーズ。creator registry / 配線 factory を持ち、`createSyncedAction` / `createSyncedSlice` / `isMySucceededResult` はこの戻りからのみ提供、ADR-0026) / `buildCreateLocalSlice` (locals slice の meta.root 型付け。TRoot が配線フェーズ生成物のため定義非経由の standalone、ADR-0027) / `isDeliveredSyncedAction` / `isSynquxAction` / `isResultForPeer` / `isSucceededResult` / peer・phase・health selectors / `localStorageSnapshotStore` / 契約型 (`SyncedActionMeta` / `SyncedAction` / `LocalAction` / `LocalActionOf` / `SyncedActionHash` / `SynquxChannel` / `SynquxChannelOptions` / `SynquxChannelHandlers` 含む。channel handle 自体は instance の `synqux.channel()` から取得、ADR-0028) | セットアップ層 + reducer ヘルパー + consumer 型語彙 |
 | `synqux/react` | `useSynquxSubscription` のみ (読み取りは core selectors を typed useAppSelector へ。ADR-0022 / ADR-0023) | ゲーム開発者層 |
 | `synqux/testing` | `createMemoryHub` / `verifyActionIdempotency` / `assertActionIdempotency` / `createTestRootState` | consumer CI / 本 repo の simulation test |
 | `synqux/firebase` | `firebaseTransport(db, options?: { archivePrunedRequests?: boolean })` | Phase 2 で実装 |

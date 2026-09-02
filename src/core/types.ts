@@ -313,6 +313,28 @@ export type SnapshotStore = {
  *    fence があれば初期値として配送してよい。重複・逆順配送は core が単調 max で
  *    吸収する。未実装の adapter では、非 host 端末の listener `fire: 'persisted'`
  *    が実質 timeout drop になる (縮退挙動)
+ * 14.【channels (ADR-0028)】publishChannel / removeChannelValue /
+ *    subscribeChannel は 3 つ揃えて optional。(channel, key) ごとの
+ *    last-write-wins な KV で、requests の裁定・順序・snapshot/restore の対象外。
+ *    配送は at-least-once でよく、中間値の coalesce (最新値への間引き) を許すが、
+ *    最後に publish された値は最終的に配送すること。subscribeChannel は購読開始
+ *    時に既存 entry を onChanged で一括配送すること。payload は core が直列化
+ *    済みの不透明文字列で、adapter は parse しない。
+ *    publishChannel が内部 await (予約登録等) を跨ぐ場合は、書き込み前に接続
+ *    session の同一性を再検査し、disconnect 後の後着 write を作らないこと
+ *    (drop してよい — LWW のため次の publish が上書きする)
+ * 15.【channel cleanup (ADR-0028)】cleanup 'disconnect' で publish された
+ *    (channel, key) は、publish した接続の切断 (disconnect() 呼び出し・
+ *    プロセス死・ネットワーク断) で削除し、onRemoved を全端末へ配送すること。
+ *    同一 key へ複数接続が publish した場合の削除タイミングは未定義 —
+ *    過去のどの publisher の切断でも削除され得る (firebase は全 publisher の
+ *    onDisconnect 予約が残るため)。**'disconnect' channel の key は
+ *    publisher-unique (典型は selfId) が必須契約**。
+ *    cleanup 'none' は session を跨いで transport 上に残る (物理削除は
+ *    connections / requests と同じく consumer の data lifecycle)
+ * 16.【channel onError】subscribeChannel の回復不能な打ち切りは契約 8 と同様に
+ *    onError で通知すること。channel の配送喪失は sync の correctness に影響
+ *    しないため、core は診断ログに留めて sync health へは載せない
  */
 export type SynquxTransport = SnapshotStore & {
   /** presence 登録。selfId は transport が採番する */
@@ -409,4 +431,44 @@ export type SynquxTransport = SnapshotStore & {
     key: string,
     handler: (fence: SnapshotFence) => void,
   ): Unsubscribe
+
+  /**
+   * channel への LWW 書き込み (契約 14-15、ADR-0028)。payload は core 直列化済み
+   * の不透明文字列。cleanup 'disconnect' は自接続の切断で値を自動削除する
+   */
+  publishChannel?(
+    channel: string,
+    key: string,
+    payload: string,
+    options: { cleanup: ChannelCleanup },
+  ): Promise<void>
+
+  /** channel 値の明示削除 (契約 14)。全端末へ onRemoved を配送する */
+  removeChannelValue?(channel: string, key: string): Promise<void>
+
+  /**
+   * channel の変更購読 (契約 14、16)。購読開始時に既存 entry を onChanged で
+   * 一括配送すること。added / changed の区別は LWW では無意味のため設けない
+   */
+  subscribeChannel?(
+    channel: string,
+    handlers: ChannelValueHandlers,
+  ): Unsubscribe
+}
+
+/**
+ * channel 値の削除タイミング (ADR-0028)
+ *
+ * - 'disconnect': publish した接続の切断で自動削除 (カーソル等の presence 連動値)
+ * - 'none': session を跨いで transport 上に残る (ドラッグ座標等)。物理削除は
+ *   consumer の data lifecycle
+ */
+export type ChannelCleanup = 'disconnect' | 'none'
+
+/** transport adapter が受ける channel 購読 handler (payload は不透明文字列) */
+export type ChannelValueHandlers = {
+  onChanged(key: string, payload: string): void
+  onRemoved(key: string): void
+  /** 購読の回復不能な打ち切りの通知 (契約 16) */
+  onError?(error: unknown): void
 }

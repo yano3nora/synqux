@@ -14,6 +14,11 @@ import {
   type OrderingState,
 } from './ordering.js'
 import { generateActionHash, normalizeSyncedActionMeta } from './action.js'
+import {
+  createChannelEngine,
+  type SynquxChannel,
+  type SynquxChannelOptions,
+} from './channels.js'
 import { findFirstDivergence } from './diff.js'
 import { deriveHostId } from './host.js'
 import { localStorageSnapshotStore } from './local-storage.js'
@@ -554,6 +559,20 @@ export type Synqux<
     action: TAction,
     options?: { signal?: AbortSignal },
   ) => Promise<Result<TAction>>
+
+  /**
+   * 裁定なし高頻度同期チャネル (LWW KV、ADR-0028) の取得。カーソル座標・
+   * ドラッグ中座標など「per-key の最新値だけが意味を持つ非永続データ」用で、
+   * Redux store を通さない (React binding は consumer 責務)。
+   * 同名は同一 handle を返す (options が異なると throw)。handle は session を
+   * 跨いで生存し、publish は session 未開始の間 drop、subscribe の登録は
+   * session 開始で自動 attach・終了で detach される。
+   * channels 未対応 transport では synced session で使えない (fail-fast)
+   */
+  channel: <TValue>(
+    name: string,
+    options?: SynquxChannelOptions,
+  ) => SynquxChannel<TValue>
 }
 
 export const createSynqux = <
@@ -564,6 +583,7 @@ export const createSynqux = <
   config: CreateSynquxConfig<TRoot, TSynced, TAction>,
 ): Synqux<TRoot, TAction, TSynced> => {
   const { transport } = config
+  const channelEngine = createChannelEngine(transport)
   const instanceMode = config.mode ?? 'synced'
   const canRequest = config.canRequest ?? (() => true)
   const stallAfterMs = config.stallAfterMs ?? 30_000
@@ -2106,6 +2126,8 @@ export const createSynqux = <
       )
       session = subscriptionSession
       cleanups.push(() => endSubscriptionSession(subscriptionSession))
+      channelEngine.attachSession(sessionMode)
+      cleanups.push(() => channelEngine.detachSession())
       store.dispatch(
         synquxActions.sessionStarted({ selfId: null, mode: sessionMode }),
       )
@@ -2417,6 +2439,8 @@ export const createSynqux = <
     )
     session = subscriptionSession
     cleanups.push(() => endSubscriptionSession(subscriptionSession))
+    channelEngine.attachSession(sessionMode)
+    cleanups.push(() => channelEngine.detachSession())
 
     const restoreFromLatestSnapshot = async (): Promise<void> => {
       recoveryInFlight = true
@@ -2806,6 +2830,8 @@ export const createSynqux = <
     unsubscribe,
     dispatchAndWait,
     setRole,
+    channel: <TValue>(name: string, options?: SynquxChannelOptions) =>
+      channelEngine.channel(name, options) as SynquxChannel<TValue>,
   }
 }
 
