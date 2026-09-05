@@ -1,9 +1,10 @@
-import type {
-  ChannelValueHandlers,
-  Peer,
-  RequestEnvelope,
-  SnapshotFence,
-  SynquxTransport,
+import {
+  acceptsResponse,
+  type ChannelValueHandlers,
+  type Peer,
+  type RequestEnvelope,
+  type SnapshotFence,
+  type SynquxTransport,
 } from '../core/types.js'
 
 export type FaultTarget = {
@@ -556,7 +557,7 @@ export function createMemoryHub(): MemoryHub {
         return { id }
       },
 
-      async respondRequest(id, patch) {
+      async respondRequest(id, patch, expected) {
         const { group } = assertConnected()
         const index = group.requests.findIndex((request) => request.id === id)
         if (index === -1) {
@@ -568,6 +569,10 @@ export function createMemoryHub(): MemoryHub {
         }
 
         const current = group.requests[index]
+        // 契約 18: 観測していない裁定の上書きは書かずに現在値を返す
+        if (!acceptsResponse(current, patch, expected)) {
+          return { committed: false, current: clone(current) }
+        }
         const updated: RequestEnvelope = {
           ...current,
           epoch: patch.epoch,
@@ -600,6 +605,7 @@ export function createMemoryHub(): MemoryHub {
         }
 
         await new Promise<void>((resolve) => resolveAckNextTick(id, resolve))
+        return { committed: true }
       },
 
       async pruneRequests(beforeSeq) {

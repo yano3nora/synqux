@@ -213,4 +213,29 @@ describe('createOrdering (ADR-0002)', () => {
       expect(ordering.beginHosting()).toBe(4)
     })
   })
+
+  describe('発行と観測の分離 (ADR-0029)', () => {
+    it('retractIssue は自分の発行だけを畳み、観測済みの seq (gap の証拠) は残す', () => {
+      const ordering = createOrdering()
+      ordering.observe({ epoch: 1, seq: 5 })
+      expect(ordering.issueSeq()).toBe(1)
+      expect(ordering.hasPendingIssue()).toBe(true)
+      expect(ordering.maxSeenSeq()).toBe(5)
+
+      ordering.retractIssue()
+      expect(ordering.hasPendingIssue()).toBe(false)
+      expect(ordering.maxSeenSeq()).toBe(5)
+    })
+
+    it('観測した seq は発行の可否に影響せず、maxSeenSeq は両者の max', () => {
+      const ordering = createOrdering()
+      expect(ordering.issueSeq()).toBe(1)
+      ordering.observe({ seq: 3 })
+      expect(ordering.maxSeenSeq()).toBe(3)
+      ordering.markApplied(1, 'req-1')
+      expect(ordering.hasPendingIssue()).toBe(false)
+      expect(ordering.issueSeq()).toBe(2)
+      expect(ordering.maxSeenSeq()).toBe(3)
+    })
+  })
 })

@@ -66,6 +66,10 @@ const arrangeDualHostEarlyApply = async () => {
   await settle(10)
 
   b.store.dispatch(synquxActions.peerRemoved('peer-3'))
+  // ADR-0029 の catch-up barrier は「他 host の耐久化済み fence」に追いつくまで
+  // 裁定を止める。b (誤認 host) の snapshot を保留し、c が同 seq を裁定できる
+  // dual-host 窓 (snapshot 耐久化前) を再現する
+  hub.faults.holdSnapshot('peer-2')
   const delayedLoserToCanonicalHost = hub.faults.delay({
     requestId: '000000000001',
     to: 'peer-3',
@@ -161,6 +165,7 @@ describe('sync auto recovery', () => {
     await settle(10)
 
     b.store.dispatch(synquxActions.peerRemoved('peer-3'))
+    hub.faults.holdSnapshot('peer-2') // dual-host 窓の再現 (arrangeDualHostEarlyApply と同じ)
     const delayedLoserToCanonicalHost = hub.faults.delay({
       requestId: '000000000001',
       to: 'peer-3',
@@ -231,10 +236,11 @@ describe('sync auto recovery', () => {
       JSON.parse(hub.inspect.snapshot(GROUP_ID)!).ordering.appliedSeq,
     ).toBe(2)
 
+    // ADR-0029 以降、耐久化済み水位 (c の seq 2 snapshot) も gap の証拠になるため
+    // gap の開始が早まり、段階の切り替わり時刻はここでは固定できない。
+    // 「再購読だけでは治らない」ことは前の test が検証している
     await advanceToResubscribe()
     await settle(10)
-    expect(a.store.getState().game.log).toEqual(['increment:1'])
-
     await advanceToRestore()
     await settle(20)
 
@@ -263,6 +269,7 @@ describe('sync auto recovery', () => {
 
     // b だけが c の離脱を誤認し、request X を seq 1 として早期裁定する。
     b.store.dispatch(synquxActions.peerRemoved('peer-3'))
+    hub.faults.holdSnapshot('peer-2') // dual-host 窓の再現 (arrangeDualHostEarlyApply と同じ)
     const delayedXToCanonicalHost = hub.faults.delay({
       requestId: '000000000001',
       to: 'peer-3',
@@ -327,6 +334,44 @@ describe('sync auto recovery', () => {
     expect(a.store.getState().game.log).toEqual(c.store.getState().game.log)
     expect(a.store.getState().game.log).toEqual(['increment:10', 'increment:1'])
     expect(selectSyncHealth(a.store.getState()).phase).toBe('ok')
+  })
+
+  it('changed の欠落が再購読でも治らないとき、耐久化済み水位を証拠に snapshot restore で追いつく (ADR-0029)', async () => {
+    const hub = createMemoryHub()
+    const a = createTrackedClient(hub)
+    const b = createHubClient(hub, { stallAfterMs: STALL_AFTER_MS })
+
+    await a.sync.subscribe({ store: a.store, groupId: GROUP_ID })
+    await b.sync.subscribe({ store: b.store, groupId: GROUP_ID })
+    await settle(10)
+
+    // 唯一の裁定の changed を失い、後続 seq の観測もない。再購読の一括再配送
+    // (裁定済みのまま added で届く) も落とす
+    hub.faults.drop({
+      requestId: '000000000001',
+      to: 'peer-1',
+      event: 'changed',
+    })
+    b.store.dispatch({ type: 'game/increment', payload: 1 })
+    await settle(10)
+    hub.faults.drop({
+      requestId: '000000000001',
+      to: 'peer-1',
+      event: 'added',
+    })
+    expect(a.store.getState().game.count).toBe(0)
+
+    await advanceToResubscribe()
+    await settle(10)
+    expect(a.store.getState().game.count).toBe(0)
+    expect(selectSyncHealth(a.store.getState()).phase).toBe('recovering')
+
+    await advanceToRestore()
+    await settle(20)
+
+    expect(a.store.getState().game.log).toEqual(['increment:1'])
+    expect(selectSyncHealth(a.store.getState()).phase).toBe('ok')
+    expect(a.loadSnapshot).toHaveBeenCalledTimes(2)
   })
 
   it('回復中の重複・順序入れ替えでも各 request を高々 1 回だけ適用する', async () => {

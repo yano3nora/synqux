@@ -50,3 +50,8 @@
 - `src/testing/memory-hub.ts` に respondRequest / saveSnapshot の failure injection を追加し、各失敗点で SPEC 不変条件 2〜4 を固定する
 - 裁定成功パスの挙動は不変 (既存テストは green を維持する)
 - SPEC-0001 の「対策済み」表と host fork の記述を本 ADR の内容へ更新する
+
+## Amendment (2026-09-05): 別 host による確定済み response の置換を storage で拒否する (ADR-0029)
+
+Decision 1 の「確定後は内容を変更しない」は同一 host の後処理に限った契約で、**別 host** (裁定の changed が未着のまま昇格した遅れ端末) が同じ request を未裁定として再裁定し、確定済み response を置き換える経路が残っていた。ADR-0029 で `respondRequest` を「caller が観測している response との CAS」(契約 18) にし、この置換を storage が拒否する。Decision 2 の再送冪等は adapter 側の「同一 `(epoch, seq, responsedBy)` の再送は受理」で保証され、Alternatives の「read-back 方式」は棄却時 (`committed: false`) に限って採用した (changed が drop 済みでも追いつくため)。
+

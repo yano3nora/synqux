@@ -36,6 +36,7 @@ synqux は、consumer が認証・認可した**協調的な非敵対クライ�
     - → tab freeze 等で「presence は生きているが host が沈黙する」停止 (TASK-260812 で実測再現) が、閾値経過で自動的に migration へ倒れる。`hostLiveness: false` で無効化できる
 - **各端末の request 処理 fork** — `src/core/create-synqux.ts` (`requestListener`)
     - 全端末が request ごとに fork を持ち、「自分が host か」を監視し続ける。fork は request が適用されるまで生存し、dual-host 窓の敗者の再裁定も引き受ける (ADR-0002)。待機はイベント駆動 (state 変化の notify) で、ポーリングは安全網のみ
+    - host は「未適用の裁定済み request が残る間」と「自分の appliedSeq が耐久化済み水位 (snapshot fence) より遅れている間」は裁定しない (直列裁定ゲート + catch-up barrier、ADR-0029)。水位は昇格直後に snapshot を読み直して確定し、fence 購読で最新に保つ。裁定の書き込みは観測済み response との CAS で、他 host の確定済み裁定は置換できず、棄却時は返された現在値を採用する
     - → host 不在・migration 中に届いた request も、誰かが host に昇格した時点で処理される。キュー処理のような排他制御を分散環境で実現している
 - **順序保証 (host 採番 seq)** — `src/core/ordering.ts`, `src/core/create-synqux.ts` (`responseListener`)
     - transport のイベント順序も request id (端末時計) も信頼せず、host が裁定時に連番 `(epoch, seq)` を封筒へ焼き込む。全端末は「appliedSeq + 1 の seq を適用する」規則で適用順を線形化する。同一 seq の衝突 (dual-host 窓) は (epoch 降順, responsedBy 辞書順降順) の決定的 tiebreak で全端末が同じ勝者に合意する
@@ -113,6 +114,7 @@ tutorial は instance の `synqux.unsubscribe()` で現在の購読を破棄し�
 | ①′ responseListener の二重 dispatch 窓: check-then-act (isApplied チェック → dispatch → await → markApplied) の窓に同一 changed の同時二重配送が入ると二重適用され、**非冪等 action が静かに壊れる** | dispatch 直前に同期的な処理中ガード (`ordering.beginProcessing`) を立て、markApplied 後 finally で解放 (synqux Phase 1 で修正)。失敗時は解放して再配送での retry 余地を残す | `src/core/create-synqux.ts` (responseListener) / `src/core/ordering.ts`、再現テスト: `src/core/characterization.test.ts` |
 | response 永久欠落 / dual-host 早期適用による seq gap | sync health で検知し、requests 再購読 → snapshot restore を 1 巡。失敗時だけ unrecoverable を通知 (ADR-0004) | `src/core/create-synqux.ts`、再現テスト: `src/core/recovery.test.ts` |
 | respondRequest の失敗 / ack 喪失・saveSnapshot の失敗 | response 封筒を裁定時に凍結し ack まで同一内容を再送。snapshot 失敗は log のみで prune をスキップし、確定済み response を上書きしない (ADR-0010) | `src/core/create-synqux.ts` (`spawnHostFork`)、再現テスト: `src/core/host-adjudication.test.ts` |
+| 適用が遅れた端末 (裁定 changed が未着) の host 昇格による確定済み response の上書き・使用済み seq の再発行 | `respondRequest` を観測済み response との CAS (契約 18) にして置換を storage で拒否し、棄却時は返された現在値で追いつく (read-back)。昇格した host は耐久化済み水位に追いつくまで裁定しない (catch-up barrier)。水位は sync health の gap 証拠にも数える (ADR-0029) | `src/core/create-synqux.ts` (`spawnHostFork` / health) / transport adapter、再現テスト: `src/core/automations.test.ts` (多段依存チェーン) / `src/core/host-adjudication.test.ts` |
 | 旧 host の遅延 saveSnapshot による保存済み snapshot の巻き戻し | `(epoch, appliedSeq)` 辞書順 fence の条件付き書き込みで棄却し、fenced-out 時は prune もスキップ (ADR-0011) | `src/core/create-synqux.ts` / transport adapter、再現テスト: `src/core/snapshot-fencing.test.ts` |
 | requests の無限成長 | snapshot ack 後、既存仕様ですでに破棄対象となる適用窓の外だけを host が prune (ADR-0005) | `src/core/create-synqux.ts` / transport adapter、再現テスト: `src/core/retention.test.ts` |
 | 購読の黙殺死 (permission denied 等で transport 購読が打ち切られても core が正常と誤認する) | transport 契約 8 の `onError` で検知し `unrecoverable` を提示。自動リトライせず unsubscribe → 再 subscribe の判断を consumer に委ねる (ADR-0012) | `src/core/create-synqux.ts` / transport adapter、再現テスト: `src/core/transport-failure.test.ts` |
@@ -122,7 +124,7 @@ tutorial は instance の `synqux.unsubscribe()` で現在の購読を破棄し�
 
 ### 既知トレードオフ (仕様として明文化)
 
-- **dual-host 窓の一時分岐**: presence 遅延で 2 端末が host を自認した窓 (host は最新接続端末のため、新規参加のたびに短時間開く) で、異なる request が同一 seq を得ることがある。正史 (host + snapshot + 封筒の seq) は常に一本道で壊れず、未適用の端末は決定的 tiebreak で同じ勝者に合意し、敗者は再裁定で救済される。ただし**勝者到着前に敗者を適用してしまった端末**は、勝者を適用する機会を失い、敗者の再裁定 seq も適用済み扱いで破棄して stall する。この端末が host に昇格すると直列裁定ゲートにより群全体の裁定も止まる。sync health の snapshot restore は ordering を正史で完全置換して裁定済み envelope を再評価するため、再裁定 seq が restore snapshot より先にある場合も正史へ追いつき、群の裁定を再開する (再現: `src/core/recovery.test.ts`)
+- **dual-host 窓の一時分岐**: presence 遅延で 2 端末が host を自認した窓 (host は最新接続端末のため、新規参加のたびに短時間開く) で、異なる request が同一 seq を得ることがある。窓は概ね「相手 host の snapshot が耐久化される前」に狭まる (catch-up barrier は best-effort、ADR-0029)。同一 request への同時応答は先勝ちで、後手は保存済み裁定を採用する (契約 18)。正史 (host + snapshot + 封筒の seq) は常に一本道で壊れず、未適用の端末は決定的 tiebreak で同じ勝者に合意し、敗者は再裁定で救済される。ただし**勝者到着前に敗者を適用してしまった端末**は、勝者を適用する機会を失い、敗者の再裁定 seq も適用済み扱いで破棄して stall する。この端末が host に昇格すると直列裁定ゲートにより群全体の裁定も止まる。sync health の snapshot restore は ordering を正史で完全置換して裁定済み envelope を再評価するため、再裁定 seq が restore snapshot より先にある場合も正史へ追いつき、群の裁定を再開する (再現: `src/core/recovery.test.ts`)
 - **敗者救済の範囲は直近適用窓 (200 件) まで**: 窓より古い敗者は正史との区別記録がなく、適用済み扱いで破棄される (v1 は敗者救済ゼロだったため純増の改善)
 - **回復不能な seq gap はリロードが必要**: 配送欠落は requests 再購読、dual-host 早期適用は snapshot restore で自動回復する (ADR-0004)。各段階は 1 gap エピソードにつき 1 回だけで、snapshot が無い・自端末以下など 1 巡で戻れない場合は `unrecoverable` となる。この場合だけ consumer がリロードを案内する。遅着で gap が自然解消すれば `unrecoverable` からも `ok` へ戻る
 

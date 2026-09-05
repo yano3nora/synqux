@@ -29,7 +29,7 @@ export type Ordering = {
    * snapshot の正史へ復元する (TASK-260719):
    * - appliedSeq / appliedWindow / appliedIds: snapshot で完全置換
    * - maxSeenEpoch: fencing を後退させないよう観測最大を維持
-   * - myEpoch: beginHosting の世代、maxIssuedSeq: 発行高水位として維持
+   * - myEpoch: beginHosting の世代、myIssuedSeq / maxObservedSeq: 発行高水位・観測最大として維持
    * - seenAddedIds: 再購読の責務、processing: 同期的処理ガードとして維持
    */
   restore(state: OrderingState): void
@@ -37,7 +37,7 @@ export type Ordering = {
   /**
    * 新規 session の起点として順序状態を初期化する (subscribe の seedSynced 用)。
    * restore が同一購読中の snapshot 回復用に維持する transient 群
-   * (seenAddedIds / maxIssuedSeq / myEpoch / processing) も含めて初期値へ戻す —
+   * (seenAddedIds / myIssuedSeq / maxObservedSeq / myEpoch / processing) も含めて初期値へ戻す —
    * 引き継ぐと synced 復帰時の backlog replay が added guard で破棄されたり、
    * 発行高水位の残留 (hasPendingIssue) で host 裁定が詰まる。
    * maxSeenEpoch だけは維持する (fencing を後退させない)
@@ -49,7 +49,7 @@ export type Ordering = {
 
   appliedSeq(): number
 
-  /** この端末が観測した裁定済み envelope の最大 seq */
+  /** 観測済み最大 seq と自分の発行高水位の max (gap 検知・購読 barrier の目標)。ADR-0029 */
   maxSeenSeq(): number
 
   /** 受信 envelope の裁定印を報告する (epoch/seq の観測最大値の追跡) */
@@ -120,7 +120,10 @@ export const createOrdering = (): Ordering => {
   let appliedSeq = 0
   let myEpoch: number | null = null
   let maxSeenEpoch = 0
-  let maxIssuedSeq = 0
+  /** 観測済み最大 seq (他 host の裁定を含む)。gap の証拠なので retract で消さない */
+  let maxObservedSeq = 0
+  /** 自分の発行高水位。retractIssue はこれだけを戻す (ADR-0029) */
+  let myIssuedSeq = 0
 
   /** 直近適用窓。snapshot restore でも埋まる */
   const appliedWindow = new Map<number, RequestEnvelope['id']>()
@@ -148,7 +151,7 @@ export const createOrdering = (): Ordering => {
      * snapshot の正史へ復元する (TASK-260719):
      * - appliedSeq / appliedWindow / appliedIds: snapshot で完全置換
      * - maxSeenEpoch: fencing を後退させないよう観測最大を維持
-     * - myEpoch: beginHosting の世代、maxIssuedSeq: 発行高水位として維持
+     * - myEpoch: beginHosting の世代、myIssuedSeq / maxObservedSeq: 発行高水位・観測最大として維持
      * - seenAddedIds: 再購読の責務、processing: 同期的処理ガードとして維持
      */
     restore(state) {
@@ -166,7 +169,8 @@ export const createOrdering = (): Ordering => {
     reset() {
       appliedSeq = 0
       myEpoch = null
-      maxIssuedSeq = 0
+      maxObservedSeq = 0
+      myIssuedSeq = 0
       appliedWindow.clear()
       appliedIds.clear()
       seenAddedIds.clear()
@@ -187,7 +191,7 @@ export const createOrdering = (): Ordering => {
     },
 
     maxSeenSeq() {
-      return maxIssuedSeq
+      return Math.max(maxObservedSeq, myIssuedSeq)
     },
 
     observe(stamp) {
@@ -195,7 +199,7 @@ export const createOrdering = (): Ordering => {
         maxSeenEpoch = Math.max(maxSeenEpoch, stamp.epoch)
       }
       if (stamp.seq !== undefined) {
-        maxIssuedSeq = Math.max(maxIssuedSeq, stamp.seq)
+        maxObservedSeq = Math.max(maxObservedSeq, stamp.seq)
       }
     },
 
@@ -210,23 +214,24 @@ export const createOrdering = (): Ordering => {
     },
 
     issueSeq() {
-      if (maxIssuedSeq > appliedSeq) {
+      if (myIssuedSeq > appliedSeq) {
         // 直列裁定の前提: 発行済みが未適用のうちは次を発行しない (呼び出し側バグ)
         throw new Error(
-          `issueSeq called with pending issue (applied=${String(appliedSeq)}, issued=${String(maxIssuedSeq)})`,
+          `issueSeq called with pending issue (applied=${String(appliedSeq)}, issued=${String(myIssuedSeq)})`,
         )
       }
 
-      maxIssuedSeq = appliedSeq + 1
-      return maxIssuedSeq
+      myIssuedSeq = appliedSeq + 1
+      return myIssuedSeq
     },
 
     hasPendingIssue() {
-      return maxIssuedSeq > appliedSeq
+      return myIssuedSeq > appliedSeq
     },
 
     retractIssue() {
-      maxIssuedSeq = appliedSeq
+      // 自分の発行だけを畳む。観測済み seq (gap の証拠) は残す
+      myIssuedSeq = appliedSeq
     },
 
     stateWith(seq, id) {

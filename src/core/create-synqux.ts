@@ -44,6 +44,7 @@ import {
   type Peer,
   type PeerRole,
   type RequestEnvelope,
+  type RespondExpectation,
   type Result,
   type SnapshotFence,
   type SnapshotStore,
@@ -134,6 +135,22 @@ type SessionSyncState = {
    */
   persistedWatermark: SnapshotFence
 
+  /**
+   * 耐久化済み appliedSeq の単調 max (ADR-0029)。persistedWatermark は辞書順
+   * (epoch 優先) のため、高 epoch・低 seq の fence で appliedSeq が後退し得る。
+   * catch-up barrier と gap 検知は「群が到達した位置」を忘れてはいけないので
+   * seq 単独の max を別に持つ
+   */
+  maxPersistedAppliedSeq: number
+
+  /**
+   * host 昇格後に最新 snapshot の fence を読み直したか (ADR-0029 Decision 3)。
+   * 降格で false に戻し、次の昇格で再度読み直す。読み直し中は共有 promise を
+   * 全 fork が待つ
+   */
+  hostWatermarkRefreshed: boolean
+  hostWatermarkRefresh: Promise<void> | null
+
   /** watermark 待ちの `fire: 'persisted'` effect queue */
   pendingPersistedEffects: Set<PendingPersistedEffect>
 
@@ -158,6 +175,9 @@ const createSessionSyncState = (): SessionSyncState => ({
   barrierPassed: false,
   observedSyncEvidence: false,
   persistedWatermark: { epoch: 0, appliedSeq: 0 },
+  maxPersistedAppliedSeq: 0,
+  hostWatermarkRefreshed: false,
+  hostWatermarkRefresh: null,
   pendingPersistedEffects: new Set(),
   pendingStandalonePersisted: [],
   checkpointRunning: false,
@@ -168,6 +188,10 @@ const updatePersistedWatermark = (
   syncState: SessionSyncState,
   fence: SnapshotFence,
 ): void => {
+  syncState.maxPersistedAppliedSeq = Math.max(
+    syncState.maxPersistedAppliedSeq,
+    fence.appliedSeq,
+  )
   if (compareFence(fence, syncState.persistedWatermark) <= 0) {
     return
   }
@@ -1448,6 +1472,57 @@ export const createSynqux = <
    */
   const hostForkActive = new Set<RequestEnvelope['id']>()
 
+  /**
+   * 昇格直後の水位読み直し (ADR-0029 Decision 3)。load できた snapshot の fence は
+   * 耐久化済みの事実 (情報源 (c) と同じ)。読めなくても hosting は止めない —
+   * fence 購読と自端末の persist が水位の主経路で、これは昇格時の補強
+   */
+  const refreshHostWatermark = async (
+    target: SubscriptionSession,
+  ): Promise<void> => {
+    try {
+      const payload = await transport.loadSnapshot(target.groupId)
+      if (payload && session === target) {
+        const envelope = parseSnapshotPayload(payload)
+        updatePersistedWatermark(target.syncState, {
+          epoch: envelope.ordering.epoch,
+          appliedSeq: envelope.ordering.appliedSeq,
+        })
+      }
+    } catch (error) {
+      console.error(error)
+    } finally {
+      // 読み直し中に降格していたら完了扱いにしない (次の昇格で再度読み直す)
+      if (session === target && isSelfHost(target.store.getState())) {
+        target.syncState.hostWatermarkRefreshed = true
+      }
+      target.syncState.hostWatermarkRefresh = null
+    }
+  }
+
+  /**
+   * 裁定済み request を changed の受信と同じ経路で取り込む (ADR-0029)。
+   * CAS 棄却時の read-back と、ack 後の自己反映 (Amendment) が共有する
+   */
+  const ingestResponded = (
+    target: SubscriptionSession,
+    request: PendingRequest,
+  ): void => {
+    if (!request.responsedBy) {
+      return
+    }
+    target.syncState.replayDeliveredIds.delete(request.id)
+    ordering.observe({ epoch: request.epoch, seq: request.seq })
+    target.store.dispatch(synquxActions.requestChanged({ request }))
+  }
+
+  /** 降格を観測したら次の昇格で水位を読み直す (fork が走っていない間の降格も拾う) */
+  const resetHostRefreshIfDemoted = (root: TRoot): void => {
+    if (session !== null && !isSelfHost(root)) {
+      session.syncState.hostWatermarkRefreshed = false
+    }
+  }
+
   const spawnHostFork = (
     listener: {
       getState: () => unknown
@@ -1489,7 +1564,26 @@ export const createSynqux = <
 
           // host 昇格するまでは判定を行わない
           if (!selectIsHost(current)) {
+            // 次の昇格で耐久化済み水位を読み直す (ADR-0029 Decision 3)
+            if (adjudicationSession !== null) {
+              adjudicationSession.syncState.hostWatermarkRefreshed = false
+            }
             await waker.wait(WAKE_FALLBACK_MS)
+            continue
+          }
+
+          // 昇格直後は最新 snapshot の fence を読み直す (ADR-0029 Decision 3)。
+          // barrier は best-effort (読み直しと裁定は原子的でなく、load 失敗は
+          // fail-open)。同一 request の置換は CAS が塞ぎ、別 request との seq 衝突は
+          // ADR-0002 の tiebreak / 再裁定 / restore が収束させる
+          if (
+            adjudicationSession !== null &&
+            adjudicationSession.mode !== 'standalone' &&
+            !adjudicationSession.syncState.hostWatermarkRefreshed
+          ) {
+            adjudicationSession.syncState.hostWatermarkRefresh ??=
+              refreshHostWatermark(adjudicationSession)
+            await adjudicationSession.syncState.hostWatermarkRefresh
             continue
           }
 
@@ -1520,10 +1614,28 @@ export const createSynqux = <
             (pending) =>
               pending.seq !== undefined && pending.seq > ordering.appliedSeq(),
           )
-          if (hasInflight || ordering.hasPendingIssue()) {
+          // catch-up barrier (ADR-0029): 群が耐久化済みの位置 (persisted watermark)
+          // に自分が追いつくまで裁定しない。裁定 (changed) が未着のまま昇格すると、
+          // 未裁定に見える request の再裁定や、既に使われた seq の再発行が起きる。
+          // 追いつけない (changed 欠落) 場合は sync health が watermark を gap の
+          // 証拠として回復する
+          const watermarkSeq =
+            adjudicationSession?.syncState.maxPersistedAppliedSeq ?? 0
+          if (
+            hasInflight ||
+            ordering.hasPendingIssue() ||
+            ordering.appliedSeq() < watermarkSeq
+          ) {
             await waker.wait(WAKE_FALLBACK_MS)
             continue
           }
+
+          // 契約 18 の expected: 未裁定なら null、確定敗者の再裁定なら観測済みの
+          // 旧 (epoch, seq)。保存値がこれと違えば他 host の裁定が確定している
+          const expected: RespondExpectation =
+            entity.epoch !== undefined && entity.seq !== undefined
+              ? { epoch: entity.epoch, seq: entity.seq }
+              : null
 
           const epoch = ordering.beginHosting()
           const seq = ordering.issueSeq()
@@ -1602,9 +1714,34 @@ export const createSynqux = <
           }
 
           let abandonedDelivery = false
+          let adoptedStored = false
           while (true) {
             try {
-              await transport.respondRequest(id, frozenResponse)
+              const outcome = await transport.respondRequest(
+                id,
+                frozenResponse,
+                expected,
+              )
+              if (!outcome.committed) {
+                // 契約 18: 自分が観測していない裁定が保存済み。自分の裁定を捨て、
+                // 返ってきた現在値を changed の到着として扱う (read-back)。元の
+                // changed が drop 済みでもここで追いつく。session が替わっていたら
+                // ordering は新 session の進行なので触らない (発行の巻き戻し禁止)
+                adjudicationSession?.syncState.expectedSyncedByRequest.delete(
+                  id,
+                )
+                if (
+                  adjudicationSession !== null &&
+                  session === adjudicationSession
+                ) {
+                  ordering.retractIssue()
+                  ingestResponded(
+                    adjudicationSession,
+                    parseEnvelope(outcome.current),
+                  )
+                }
+                adoptedStored = true
+              }
               break
             } catch (respondError) {
               console.error(respondError)
@@ -1619,8 +1756,11 @@ export const createSynqux = <
                 !selectIsHost(latest)
               ) {
                 // 復帰後に同じ state から再裁定しても決定的に同値となり、
-                // 二重発行時は fencing の tiebreak が収束させる (ADR-0002)
-                ordering.retractIssue()
+                // 二重発行時は fencing の tiebreak が収束させる (ADR-0002)。
+                // session が替わっていたら ordering は新 session の進行なので触らない
+                if (session === adjudicationSession) {
+                  ordering.retractIssue()
+                }
                 abandonedDelivery = true
                 break
               }
@@ -1629,9 +1769,28 @@ export const createSynqux = <
             }
           }
 
-          if (abandonedDelivery) {
+          if (abandonedDelivery || adoptedStored) {
             // fork は終了せず、外側の既存分岐で host / entity / 適用を再評価する
             continue
+          }
+
+          // ack = CAS が commit した耐久化済みの確定。server 経由の changed 到着を
+          // 待たずに凍結済み response を自己反映し、直列裁定ゲートを解く
+          // (ADR-0029 Amendment)。applyLocally: false で失った local echo の代替で、
+          // 内容は server の保持値と同一のため幻の echo にならない。後から届く
+          // server の changed は適用済みガードが捨てる
+          if (adjudicationSession !== null && session === adjudicationSession) {
+            ingestResponded(adjudicationSession, {
+              ...entity,
+              epoch,
+              seq,
+              responsedBy,
+              responsed,
+              result:
+                frozenResponse.result === null
+                  ? undefined
+                  : (JSON.parse(frozenResponse.result) as Result),
+            })
           }
 
           // 裁定元 session が生きているときだけ後処理へ進む。respondRequest の
@@ -1718,6 +1877,7 @@ export const createSynqux = <
     actionCreator: synquxActions.peerUpserted,
     effect: (_action, listener) => {
       waker.notify()
+      resetHostRefreshIfDemoted(listener.getState() as TRoot)
       maybeCheckpoint(listener.getState() as TRoot)
     },
   })
@@ -1725,6 +1885,7 @@ export const createSynqux = <
     actionCreator: synquxActions.peerRemoved,
     effect: (_action, listener) => {
       waker.notify()
+      resetHostRefreshIfDemoted(listener.getState() as TRoot)
       maybeCheckpoint(listener.getState() as TRoot)
     },
   })
@@ -2528,6 +2689,14 @@ export const createSynqux = <
     channelEngine.attachSession(sessionMode)
     cleanups.push(() => channelEngine.detachSession())
 
+    /**
+     * gap の証拠となる「群が到達した seq」(ADR-0029)。観測済み最大 seq に加え、
+     * 耐久化済み水位も数える — 裁定 (changed) が欠落した端末は seq を観測できず、
+     * catch-up barrier で止まったままになるため。health と restore の再判定で共有する
+     */
+    const gapTargetSeq = (): number =>
+      Math.max(ordering.maxSeenSeq(), syncState.maxPersistedAppliedSeq)
+
     const restoreFromLatestSnapshot = async (): Promise<void> => {
       recoveryInFlight = true
       const appliedBeforeLoad = ordering.appliedSeq()
@@ -2541,7 +2710,7 @@ export const createSynqux = <
         }
 
         const applied = ordering.appliedSeq()
-        const maxSeen = ordering.maxSeenSeq()
+        const maxSeen = gapTargetSeq()
 
         // await 中に欠落 envelope が遅着した場合は自然回復を優先する。
         // 古い snapshot でその進行を上書きしないため、必ず await 後に再判定する。
@@ -2620,7 +2789,7 @@ export const createSynqux = <
         return
       }
 
-      const maxSeen = ordering.maxSeenSeq()
+      const maxSeen = gapTargetSeq()
       const now = Date.now()
 
       if (applied > lastAppliedSeq || maxSeen <= applied) {

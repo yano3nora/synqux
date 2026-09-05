@@ -93,8 +93,12 @@ describe('dispatchAndWait', () => {
 
   it('裁定配送が delay されている間は待機し、release 後に resolve する', async () => {
     const hub = createMemoryHub()
+    // 依頼者は非 host (host は ack 後に自己反映するため、配送待ちの窓が作れない)
     const client = createHubClient(hub)
+    const host = createHubClient(hub)
     await client.sync.subscribe({ store: client.store, groupId: GROUP_ID })
+    await host.sync.subscribe({ store: host.store, groupId: GROUP_ID })
+    await settle(5)
     const delayed = hub.faults.delay({
       requestId: '000000000001',
       to: 'peer-1',
@@ -123,6 +127,8 @@ describe('dispatchAndWait', () => {
       store: aborting.store,
       groupId: 'abort',
     })
+    // 単独 host は ack 後に自己反映するため、ack も止めて pending の窓を作る
+    const heldAbortAck = hub.faults.holdAck('000000000001')
     const delayedAbort = hub.faults.delay({
       requestId: '000000000001',
       to: 'peer-1',
@@ -136,6 +142,7 @@ describe('dispatchAndWait', () => {
     await settle(5)
     controller.abort(new Error('consumer aborted'))
     await expect(aborted).rejects.toThrow('consumer aborted')
+    heldAbortAck.release()
     delayedAbort.release()
     await settle()
     await unsubscribeAborting()
@@ -145,6 +152,7 @@ describe('dispatchAndWait', () => {
       store: unsubscribing.store,
       groupId: 'unsubscribe',
     })
+    hub.faults.holdAck('000000000002')
     hub.faults.delay({
       requestId: '000000000002',
       to: 'peer-2',

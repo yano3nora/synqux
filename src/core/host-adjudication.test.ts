@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { createMemoryHub } from '../testing/memory-hub.js'
-import { selectIsHost } from './selectors.js'
+import { selectIsHost, selectSyncHealth } from './selectors.js'
 import { synquxActions } from './slice.js'
 import {
   createClient,
@@ -85,6 +85,179 @@ describe('host 裁定 lifecycle', () => {
     expect(a.store.getState().game.count).toBe(2)
     expect(b.store.getState().game.count).toBe(2)
     expect(hub.inspect.requests(GROUP_ID)[1]?.seq).toBe(2)
+  })
+
+  it('前 host が snapshot 前に落ち、裁定 (changed) を失った端末が昇格しても、CAS の read-back で確定済み裁定を採用する', async () => {
+    const hub = createMemoryHub()
+    const a = createHubClient(hub)
+    const b = createHubClient(hub)
+    const c = createHubClient(hub)
+    await a.sync.subscribe({ store: a.store, groupId: GROUP_ID })
+    await b.sync.subscribe({ store: b.store, groupId: GROUP_ID })
+    await c.sync.subscribe({ store: c.store, groupId: GROUP_ID })
+    await settle(5)
+    expect(selectIsHost(c.store.getState())).toBe(true)
+
+    // c の snapshot は着地しない (respond ack 後・checkpoint 前の死) ので、
+    // b の catch-up barrier は効かず、b は #1 を未裁定として裁定に入る
+    hub.faults.holdSnapshot('peer-3')
+    hub.faults.drop({
+      requestId: '000000000001',
+      to: 'peer-2',
+      event: 'changed',
+    })
+    a.store.dispatch({ type: 'game/increment', payload: 1 })
+    await settle(10)
+    expect(a.store.getState().game.count).toBe(1)
+    expect(b.store.getState().game.count).toBe(0)
+    const frozen = hub.inspect.requests(GROUP_ID)[0]
+    expect(frozen?.responsedBy).toBe('peer-3')
+
+    hub.faults.disconnect('peer-3')
+    await settle(20)
+    expect(selectIsHost(b.store.getState())).toBe(true)
+
+    // 契約 18: b の裁定は棄却され、返ってきた確定済み裁定を適用して追いつく
+    expect(hub.inspect.requests(GROUP_ID)[0]).toMatchObject({
+      epoch: frozen?.epoch,
+      seq: frozen?.seq,
+      responsedBy: 'peer-3',
+      responsed: frozen?.responsed,
+    })
+    expect(b.store.getState().game.count).toBe(1)
+
+    // 以後は通常どおり次の seq で裁定する
+    a.store.dispatch({ type: 'game/increment', payload: 10 })
+    await settle(20)
+    expect(hub.inspect.requests(GROUP_ID)[1]).toMatchObject({
+      seq: 2,
+      responsedBy: 'peer-2',
+    })
+    expect(a.store.getState().game.log).toEqual(['increment:1', 'increment:10'])
+    expect(b.store.getState().game.log).toEqual(['increment:1', 'increment:10'])
+  })
+
+  it('裁定 (changed) を失った端末が昇格すると、耐久化済み水位まで裁定を止め、sync health の再購読で追いついてから裁定する', async () => {
+    const STALL_AFTER_MS = 2000
+    const hub = createMemoryHub()
+    const a = createHubClient(hub, { stallAfterMs: STALL_AFTER_MS })
+    const b = createHubClient(hub, { stallAfterMs: STALL_AFTER_MS })
+    const c = createHubClient(hub, { stallAfterMs: STALL_AFTER_MS })
+    await a.sync.subscribe({ store: a.store, groupId: GROUP_ID })
+    await b.sync.subscribe({ store: b.store, groupId: GROUP_ID })
+    await c.sync.subscribe({ store: c.store, groupId: GROUP_ID })
+    await settle(5)
+
+    hub.faults.drop({
+      requestId: '000000000001',
+      to: 'peer-2',
+      event: 'changed',
+    })
+    a.store.dispatch({ type: 'game/increment', payload: 1 })
+    await settle(10)
+    expect(hub.inspect.snapshotFence(GROUP_ID)?.appliedSeq).toBe(1)
+    expect(b.store.getState().game.count).toBe(0)
+
+    hub.faults.disconnect('peer-3')
+    await settle(5)
+    expect(selectIsHost(b.store.getState())).toBe(true)
+
+    // 水位 (seq 1) に追いつくまで新規 request を裁定しない (再裁定も seq 再発行もしない)
+    a.store.dispatch({ type: 'game/increment', payload: 10 })
+    await settle(10)
+    expect(hub.inspect.requests(GROUP_ID)[0]?.responsedBy).toBe('peer-3')
+    expect(hub.inspect.requests(GROUP_ID)[1]?.responsedBy).toBeUndefined()
+    expect(b.store.getState().game.count).toBe(0)
+
+    // 水位が gap の証拠になり、再購読で失った裁定を取り直して追いつく
+    await vi.advanceTimersByTimeAsync(STALL_AFTER_MS + 1000)
+    await settle(30)
+    expect(b.store.getState().game.log).toEqual(['increment:1', 'increment:10'])
+    expect(a.store.getState().game.log).toEqual(['increment:1', 'increment:10'])
+    expect(hub.inspect.requests(GROUP_ID)[1]?.responsedBy).toBe('peer-2')
+    expect(selectSyncHealth(b.store.getState()).phase).toBe('ok')
+  })
+
+  it('fence 購読を持たない adapter でも、昇格時に snapshot を読み直して耐久化済み水位まで裁定を止める', async () => {
+    const STALL_AFTER_MS = 2000
+    const hub = createMemoryHub()
+    const a = createHubClient(hub, { stallAfterMs: STALL_AFTER_MS })
+    // 契約 13 (subscribeSnapshotFence) 未実装の adapter を模す
+    const bTransport = hub.createTransport()
+    const b = createClient(
+      { ...bTransport, subscribeSnapshotFence: undefined },
+      { stallAfterMs: STALL_AFTER_MS },
+    )
+    const c = createHubClient(hub, { stallAfterMs: STALL_AFTER_MS })
+    await a.sync.subscribe({ store: a.store, groupId: GROUP_ID })
+    await b.sync.subscribe({ store: b.store, groupId: GROUP_ID })
+    await c.sync.subscribe({ store: c.store, groupId: GROUP_ID })
+    await settle(5)
+
+    hub.faults.drop({
+      requestId: '000000000001',
+      to: 'peer-2',
+      event: 'changed',
+    })
+    a.store.dispatch({ type: 'game/increment', payload: 1 })
+    await settle(10)
+    expect(hub.inspect.snapshotFence(GROUP_ID)?.appliedSeq).toBe(1)
+    expect(b.store.getState().game.count).toBe(0)
+
+    hub.faults.disconnect('peer-3')
+    await settle(5)
+    expect(selectIsHost(b.store.getState())).toBe(true)
+
+    // fence 配送がなくても昇格時の読み直しで水位 1 を知り、追いつくまで裁定しない
+    a.store.dispatch({ type: 'game/increment', payload: 10 })
+    await settle(10)
+    expect(hub.inspect.requests(GROUP_ID)[0]?.responsedBy).toBe('peer-3')
+    expect(hub.inspect.requests(GROUP_ID)[1]?.responsedBy).toBeUndefined()
+
+    await vi.advanceTimersByTimeAsync(STALL_AFTER_MS + 1000)
+    await settle(30)
+    expect(b.store.getState().game.log).toEqual(['increment:1', 'increment:10'])
+    expect(hub.inspect.requests(GROUP_ID)[1]).toMatchObject({
+      seq: 2,
+      responsedBy: 'peer-2',
+    })
+    expect(selectSyncHealth(b.store.getState()).phase).toBe('ok')
+  })
+
+  it('ack 後は server の changed を待たずに自己反映し、次の裁定へ進む (ADR-0029 Amendment)', async () => {
+    const hub = createMemoryHub()
+    const a = createHubClient(hub)
+    const b = createHubClient(hub)
+    await a.sync.subscribe({ store: a.store, groupId: GROUP_ID })
+    await b.sync.subscribe({ store: b.store, groupId: GROUP_ID })
+    await settle(5)
+    expect(selectIsHost(b.store.getState())).toBe(true)
+
+    // host 自身への changed 配送を止めても、ack 後の自己反映で適用が進む
+    const heldEcho = hub.faults.delay({
+      to: 'peer-2',
+      requestId: '000000000001',
+      event: 'changed',
+    })
+    a.store.dispatch({ type: 'game/increment', payload: 1 })
+    await settle(10)
+    expect(b.store.getState().game.log).toEqual(['increment:1'])
+    expect(a.store.getState().game.log).toEqual(['increment:1'])
+
+    // 直列ゲートが解けているので次の request も裁定される
+    a.store.dispatch({ type: 'game/increment', payload: 10 })
+    await settle(10)
+    expect(b.store.getState().game.log).toEqual(['increment:1', 'increment:10'])
+    expect(hub.inspect.requests(GROUP_ID)[1]).toMatchObject({
+      seq: 2,
+      responsedBy: 'peer-2',
+    })
+
+    // 遅れて届いた server の changed は二重適用しない
+    heldEcho.release()
+    await settle(10)
+    expect(b.store.getState().game.log).toEqual(['increment:1', 'increment:10'])
+    expect(b.store.getState().game.count).toBe(11)
   })
 
   it('ack 喪失時も凍結済み success response だけを再送して全端末が収束する', async () => {

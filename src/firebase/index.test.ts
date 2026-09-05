@@ -42,7 +42,10 @@ const h = vi.hoisted(() => {
       ) => {
         const current = transactionValues.shift() ?? null
         const next = updater(current)
-        return { committed: next !== undefined }
+        return {
+          committed: next !== undefined,
+          snapshot: { val: () => (next === undefined ? current : next) },
+        }
       },
     ),
     getMock: vi.fn(
@@ -478,30 +481,125 @@ describe('firebaseTransport', () => {
     expect('root' in value.action.meta).toBe(false)
   })
 
-  it('respondRequest: requests/{groupId}/{id} へ (epoch, seq) patch を update する (null はキー削除として渡す)', async () => {
+  it('respondRequest: runTransaction で expected と保存済み response を比較して書く (契約 18)', async () => {
     h.pushKeys.push('conn-1')
     const { transport } = await connect()
-
-    await transport.respondRequest('req-9', {
+    const patch = {
       epoch: 1,
       seq: 5,
       responsedBy: 'conn-1',
       responsed: 1,
       result: null,
-    })
+    }
 
-    const [target, patch] = h.updateMock.mock.calls[0] as unknown as [
+    // 初回試行は cache 済みの封筒で commit する
+    h.transactionValues.push({
+      v: 1,
+      action: { type: 'x' },
+      requestedBy: 'conn-2',
+    })
+    await expect(
+      transport.respondRequest('req-9', patch, null),
+    ).resolves.toEqual({ committed: true })
+    const [target, updater, options] = h.runTransactionMock.mock
+      .calls[0] as unknown as [
       { path: string },
-      Record<string, unknown>,
+      (current: unknown) => unknown,
+      { applyLocally: boolean },
     ]
     expect(target.path).toBe(`requests/${GROUP_ID}/req-9`)
-    expect(patch).toEqual({
+    // abort で巻き戻る楽観 local echo を購読へ流さない (saveSnapshot と同じ)
+    expect(options).toEqual({ applyLocally: false })
+
+    // null (cache に無い / 実在しない) では patch だけの孤児 node を作らず abort する
+    expect(updater(null)).toBeUndefined()
+
+    // 未裁定の封筒には response を merge する。result: null はキー削除に揃える
+    expect(
+      updater({
+        v: 1,
+        action: { type: 'x' },
+        requestedBy: 'conn-2',
+        result: 'old',
+      }),
+    ).toEqual({
+      v: 1,
+      action: { type: 'x' },
+      requestedBy: 'conn-2',
       epoch: 1,
       seq: 5,
       responsedBy: 'conn-1',
       responsed: 1,
-      result: null,
     })
+    // 観測していない裁定が保存済みなら abort する
+    expect(
+      updater({
+        v: 1,
+        requestedBy: 'conn-2',
+        epoch: 1,
+        seq: 5,
+        responsedBy: 'conn-9',
+      }),
+    ).toBeUndefined()
+
+    // null abort 後は get() で存在を確かめ、無ければ Unknown request
+    const getCallsBefore = h.getMock.mock.calls.length
+    await expect(
+      transport.respondRequest('req-9', patch, null),
+    ).rejects.toThrow('Unknown request: req-9')
+    expect(h.getMock).toHaveBeenCalledTimes(getCallsBefore + 1)
+
+    // 存在するなら cache が温まった前提で 1 度だけ再試行して commit する
+    h.getMock.mockResolvedValueOnce({
+      exists: () => true,
+      val: () => ({ v: 1, requestedBy: 'conn-2' }),
+    })
+    h.transactionValues.push(null, { v: 1, requestedBy: 'conn-2' })
+    await expect(
+      transport.respondRequest('req-9', patch, null),
+    ).resolves.toEqual({ committed: true })
+
+    // abort 時は保存済み封筒を current として返す
+    h.transactionValues.push({
+      v: 1,
+      requestedBy: 'conn-2',
+      epoch: 1,
+      seq: 5,
+      responsedBy: 'conn-9',
+      responsed: 7,
+    })
+    await expect(
+      transport.respondRequest('req-9', patch, null),
+    ).resolves.toEqual({
+      committed: false,
+      current: {
+        v: 1,
+        id: 'req-9',
+        requestedBy: 'conn-2',
+        epoch: 1,
+        seq: 5,
+        responsedBy: 'conn-9',
+        responsed: 7,
+      },
+    })
+  })
+
+  it('respondRequest: 存在確認の await 中に session が替わったら再試行しない', async () => {
+    h.pushKeys.push('conn-1')
+    const { transport } = await connect()
+    h.getMock.mockImplementationOnce(async () => {
+      await transport.disconnect()
+      return { exists: () => true, val: () => ({ v: 1 }) }
+    })
+
+    await expect(
+      transport.respondRequest(
+        'req-9',
+        { epoch: 1, seq: 5, responsedBy: 'conn-1', responsed: 1, result: null },
+        null,
+      ),
+    ).rejects.toThrow('session changed')
+    expect(h.runTransactionMock).toHaveBeenCalledTimes(1)
   })
 
   it('subscribeRequests: after 指定時のみ startAfter クエリを構成する', async () => {

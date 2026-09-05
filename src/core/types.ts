@@ -241,6 +241,60 @@ export type SnapshotEnvelope<TSynced> = {
  * parse せず fence と並べて保存する。transport の snapshot API と standalone
  * mode の localSnapshots が本契約を共有する
  */
+/** respondRequest が封筒へ焼く response フィールド */
+export type RespondPatch = {
+  epoch: number
+  seq: number
+  responsedBy: Peer['id']
+  /** serverNow() 基準の裁定時刻 (ADR-0008)。そのまま封筒へ焼く */
+  responsed: number
+  /** 直列化済み result。null は「result なし」(既存値の除去)。undefined は不可 (firebase が throw する) */
+  result: NonNullable<RequestEnvelope['result']> | null
+}
+
+/**
+ * respondRequest の CAS 条件 (契約 18): caller が観測している response の
+ * (epoch, seq)。未裁定として観測しているなら null
+ */
+export type RespondExpectation = { epoch: number; seq: number } | null
+
+/**
+ * respondRequest の結果。committed: false は「保存済み response が expected と
+ * 不一致」で、adapter は何も書かず現在の封筒を返す (core はこれを裁定の到着と
+ * して扱う = read-back)
+ */
+export type RespondOutcome =
+  | { committed: true }
+  | { committed: false; current: RequestEnvelope }
+
+/**
+ * 契約 18 の判定 (adapter 共通の純粋関数)。stored は保存済み封筒の response 部分。
+ * 1. 未裁定 (seq なし) なら expected === null のときだけ受理
+ * 2. 裁定済みなら expected が保存値と一致するときだけ受理 (敗者の再裁定)
+ * 3. 同一 (epoch, seq, responsedBy) の再送は冪等として受理 (ADR-0010 Decision 2)
+ */
+export const acceptsResponse = (
+  stored: Pick<RequestEnvelope, 'epoch' | 'seq' | 'responsedBy'>,
+  patch: Pick<RespondPatch, 'epoch' | 'seq' | 'responsedBy'>,
+  expected: RespondExpectation,
+): boolean => {
+  if (stored.seq === undefined || stored.epoch === undefined) {
+    return expected === null
+  }
+  if (
+    expected !== null &&
+    stored.epoch === expected.epoch &&
+    stored.seq === expected.seq
+  ) {
+    return true
+  }
+  return (
+    stored.epoch === patch.epoch &&
+    stored.seq === patch.seq &&
+    stored.responsedBy === patch.responsedBy
+  )
+}
+
 export type SnapshotFence = { epoch: number; appliedSeq: number }
 
 export type SnapshotStore = {
@@ -342,6 +396,17 @@ export type SnapshotStore = {
  *    届くと entities の key が 'undefined' になり、connected を欠くと host 導出の
  *    sort が NaN で壊れる。残骸の物理削除は契約 11 と同じく data lifecycle
  *    (consumer 責務) に含まれる
+ * 18.【respond CAS (ADR-0029)】respondRequest は expected (caller が観測している
+ *    response の (epoch, seq)。未裁定なら null) と保存済み response を原子的に
+ *    比較し、一致するときだけ書き込んで `{ committed: true }` を返すこと。
+ *    不一致なら何も書かず (changed も配送せず) `{ committed: false, current }`
+ *    で現在の封筒を返すこと。同一 (epoch, seq, responsedBy) の再送は冪等として
+ *    受理する。判定は `acceptsResponse` を使うこと。これにより「未裁定として
+ *    観測した caller は保存済み response を置換できない」不変条件を storage が
+ *    保証し、遅れた端末の host 昇格による確定済み裁定の上書きを防ぐ。
+ *    NOTE: 昇格時の catch-up barrier (ADR-0029 Decision 3) は best-effort で、
+ *    昇格直後の loadSnapshot と契約 13 (fence 配送) で耐久化済み水位を知る。
+ *    契約 13 未実装・購読停止中は昇格後の水位更新が止まる (CAS の不変条件は不変)
  */
 export type SynquxTransport = SnapshotStore & {
   /** presence 登録。selfId は transport が採番する */
@@ -384,18 +449,16 @@ export type SynquxTransport = SnapshotStore & {
     envelope: Omit<RequestEnvelope, 'id'>,
   ): Promise<{ id: RequestEnvelope['id'] }>
 
-  /** host の裁定を request へ焼き込む。(epoch, seq) が適用順の正になる (ADR-0002) */
+  /**
+   * host の裁定を request へ焼き込む。(epoch, seq) が適用順の正になる (ADR-0002)。
+   * 書き込みは expected との CAS (契約 18、ADR-0029): 保存済み response が
+   * expected と一致するときだけ書き、不一致なら書かずに現在値を返す
+   */
   respondRequest(
     id: RequestEnvelope['id'],
-    patch: {
-      epoch: number
-      seq: number
-      responsedBy: Peer['id']
-      /** serverNow() 基準の裁定時刻 (ADR-0008)。そのまま封筒へ焼く */
-      responsed: number
-      result: RequestEnvelope['result'] | null
-    },
-  ): Promise<void>
+    patch: RespondPatch,
+    expected: RespondExpectation,
+  ): Promise<RespondOutcome>
 
   /**
    * 適用窓より古い requests の削除 (retention、ADR-0005)。optional —

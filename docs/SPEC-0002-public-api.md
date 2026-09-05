@@ -817,7 +817,8 @@ NOTE: 専用の `createSimulation` ハーネスは**公開しない** (実装時
  * 1. pushRequest の id 採番は「group 内で一意かつ不変」であること。順序性は要求しない —
  *    適用順は host 採番の seq だけが担う (ADR-0002)。firebase push id のような
  *    挿入順辞書順単調 id は要件を満たす一例 (after オプション対応の前提)
- * 2. respondRequest は永続化 ack で resolve すること (楽観 resolve 禁止)
+ * 2. respondRequest は永続化 ack で resolve すること (楽観 resolve 禁止)。書き込みは
+ *    expected との CAS (契約 18、ADR-0029)。詳細列挙は src/core/types.ts
  * 3. 配送は at-least-once。重複・遅延・順序入れ替えは core 側が吸収するので
  *    adapter で頑張って直列化しなくてよい (素朴に流す)
  * 4. 【retention 契約】pruneRequests は「数値 seq < beforeSeq」のみ requests から
@@ -865,11 +866,17 @@ export type SynquxTransport = SnapshotStore & {
 
   pushRequest(envelope: Omit<RequestEnvelope, 'id'>): Promise<{ id: string }>
 
-  /** host の裁定を request へ焼き込む。(epoch, seq) が適用順の正になる (ADR-0002) */
+  /**
+   * host の裁定を request へ焼き込む。(epoch, seq) が適用順の正になる (ADR-0002)。
+   * expected (caller が観測している response の (epoch, seq)。未裁定なら null) と
+   * 保存済み response を原子的に比較し、一致するときだけ書く CAS (契約 18、ADR-0029)。
+   * 不一致なら書かずに現在の封筒を返す。判定は core の acceptsResponse を使う
+   */
   respondRequest(
     id: string,
     patch: { epoch: number; seq: number; responsedBy: Peer['id']; responsed: number; result: string | null },
-  ): Promise<void>
+    expected: { epoch: number; seq: number } | null,
+  ): Promise<{ committed: true } | { committed: false; current: RequestEnvelope }>
 
   /** 数値 seq < beforeSeq だけを requests から取り除く。未実装でも correctness は不変 */
   pruneRequests?(beforeSeq: number): Promise<void>
@@ -908,7 +915,7 @@ export type SynquxTransport = SnapshotStore & {
 | `demotePeer` | 対象 presence ref の存在確認後に `update({ role: 'guest' })` (update は消えた path を再生成するため。競合で生まれる {role} だけの孤児は guest role のため host 候補にならず不活性) | なし (ADR-0016 で新設) |
 | `serverNow` | `.info/serverTimeOffset` 補正 | `currentServerTimestamp()` |
 | `pushRequest` | `push()` (push id = 挿入順辞書順単調・端末時計依存) | `create-request.ts` |
-| `respondRequest` | `update()` (ack で resolve — local echo が先に発火する点が既知の問題①の再現条件) | `response-to-request.ts` |
+| `respondRequest` | `runTransaction()` で expected と保存済み response を比較して node 全体を書く (`applyLocally: false`、abort 時は現在値を返す。契約 18、ADR-0029)。ack で resolve | `response-to-request.ts` |
 | `pruneRequests` | `orderByChild('seq').endBefore(beforeSeq)` で取得し、seq なしをコード側で除外。既定は requests から物理削除、`archivePrunedRequests` 有効時は root-level multi-path `update()` で `logs/` へ原子的に退避 | なし |
 | `subscribeRequests` | `onChildAdded` / `onChildChanged` + `orderByKey().startAfter(after)` | `subscribe-requests.ts` / `game-requests-query.ts` |
 | `saveSnapshot` | `set(ref, payload)` (payload は文字列なので undefined 落ち・空配列消失が起きない) | `update-game-state.ts` |
@@ -964,7 +971,7 @@ type SnapshotEnvelope<TSynced> = {
 
 | subpath | 主な export | 対象 |
 | --- | --- | --- |
-| `synqux` | `createSynqux` / `createSynquxRootReducer` / `keepAcrossHmr` (HMR 一式の片割れ: hot.data への instance 保持。`replaceReducers` と対、TASK-260904) / `synquxReducer` / `synquxRestored` / reducer helpers / `generateActionHash` / `defineSynqux` (定義フェーズ。creator registry / 配線 factory を持ち、`createSyncedAction` / `createSyncedSlice` / `isMySucceededResult` はこの戻りからのみ提供、ADR-0026) / `buildCreateLocalSlice` (locals slice の meta.root 型付け。TRoot が配線フェーズ生成物のため定義非経由の standalone、ADR-0027) / `isDeliveredSyncedAction` / `isSynquxAction` / `isResultForPeer` / `isSucceededResult` / peer・phase・health selectors / `localStorageSnapshotStore` / 契約型 (`SyncedActionMeta` / `SyncedAction` / `LocalAction` / `LocalActionOf` / `SyncedActionHash` / `SynquxChannel` / `SynquxChannelOptions` / `SynquxChannelHandlers` 含む。channel handle 自体は instance の `synqux.channel()` から取得、ADR-0028) | セットアップ層 + reducer ヘルパー + consumer 型語彙 |
+| `synqux` | `createSynqux` / `createSynquxRootReducer` / `keepAcrossHmr` (HMR 一式の片割れ: hot.data への instance 保持。`replaceReducers` と対、TASK-260904) / `synquxReducer` / `synquxRestored` / reducer helpers / `generateActionHash` / `defineSynqux` (定義フェーズ。creator registry / 配線 factory を持ち、`createSyncedAction` / `createSyncedSlice` / `isMySucceededResult` はこの戻りからのみ提供、ADR-0026) / `buildCreateLocalSlice` (locals slice の meta.root 型付け。TRoot が配線フェーズ生成物のため定義非経由の standalone、ADR-0027) / `isDeliveredSyncedAction` / `isSynquxAction` / `isResultForPeer` / `isSucceededResult` / peer・phase・health selectors / `localStorageSnapshotStore` / `acceptsResponse` (transport 契約 18 の CAS 判定。adapter 実装者向け、ADR-0029) / 契約型 (`SyncedActionMeta` / `SyncedAction` / `LocalAction` / `LocalActionOf` / `SyncedActionHash` / `SynquxChannel` / `SynquxChannelOptions` / `SynquxChannelHandlers` 含む。channel handle 自体は instance の `synqux.channel()` から取得、ADR-0028) | セットアップ層 + reducer ヘルパー + consumer 型語彙 |
 | `synqux/react` | `useSynquxSubscription` のみ (読み取りは core selectors を typed useAppSelector へ。ADR-0022 / ADR-0023) | ゲーム開発者層 |
 | `synqux/testing` | `createMemoryHub` / `verifyActionIdempotency` / `assertActionIdempotency` / `createTestRootState` | consumer CI / 本 repo の simulation test |
 | `synqux/firebase` | `firebaseTransport(db, options?: { archivePrunedRequests?: boolean })` | Phase 2 で実装 |

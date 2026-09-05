@@ -110,13 +110,17 @@ describe('createMemoryHub', () => {
     expect(addedA[0]).toEqual(addedB[0])
     expect(addedA[0]?.id).toBe(id)
 
-    const response = a.respondRequest(id, {
-      epoch: 1,
-      seq: 1,
-      responsedBy: aId,
-      responsed: 1,
-      result: '{"type":"success"}',
-    })
+    const response = a.respondRequest(
+      id,
+      {
+        epoch: 1,
+        seq: 1,
+        responsedBy: aId,
+        responsed: 1,
+        result: '{"type":"success"}',
+      },
+      null,
+    )
     await flushDeliveries()
     await response
 
@@ -183,13 +187,17 @@ describe('createMemoryHub', () => {
   it('responsedBy 付き既存 request も restore 模擬として onAdded で届く', async () => {
     const { a, b, aId } = await connectTwo()
     const { id } = await a.pushRequest(createEnvelope({ requestedBy: aId }))
-    const response = a.respondRequest(id, {
-      epoch: 1,
-      seq: 1,
-      responsedBy: aId,
-      responsed: 1,
-      result: '{"ok":true}',
-    })
+    const response = a.respondRequest(
+      id,
+      {
+        epoch: 1,
+        seq: 1,
+        responsedBy: aId,
+        responsed: 1,
+        result: '{"ok":true}',
+      },
+      null,
+    )
     await flushDeliveries()
     await response
 
@@ -238,13 +246,17 @@ describe('createMemoryHub', () => {
     const expectedId = '000000000001'
     hub.faults.duplicate({ requestId: expectedId, to: bId, event: 'changed' })
     const { id } = await a.pushRequest(createEnvelope({ requestedBy: aId }))
-    const response = a.respondRequest(id, {
-      epoch: 1,
-      seq: 1,
-      responsedBy: aId,
-      responsed: 1,
-      result: '{"ok":true}',
-    })
+    const response = a.respondRequest(
+      id,
+      {
+        epoch: 1,
+        seq: 1,
+        responsedBy: aId,
+        responsed: 1,
+        result: '{"ok":true}',
+      },
+      null,
+    )
     await flushDeliveries()
     await response
 
@@ -412,13 +424,17 @@ describe('createMemoryHub', () => {
     const hold = hub.faults.holdAck(id)
     let resolved = false
     const response = a
-      .respondRequest(id, {
-        epoch: 1,
-        seq: 1,
-        responsedBy: aId,
-        responsed: 1,
-        result: '{"ok":true}',
-      })
+      .respondRequest(
+        id,
+        {
+          epoch: 1,
+          seq: 1,
+          responsedBy: aId,
+          responsed: 1,
+          result: '{"ok":true}',
+        },
+        null,
+      )
       .then(() => {
         resolved = true
       })
@@ -452,17 +468,17 @@ describe('createMemoryHub', () => {
     }
     hub.faults.failRespond(id, { times: 2 })
 
-    await expect(a.respondRequest(id, patch)).rejects.toThrow(
+    await expect(a.respondRequest(id, patch, null)).rejects.toThrow(
       'Injected respondRequest failure',
     )
-    await expect(a.respondRequest(id, patch)).rejects.toThrow(
+    await expect(a.respondRequest(id, patch, null)).rejects.toThrow(
       'Injected respondRequest failure',
     )
     expect(hub.inspect.requests(GROUP_ID)[0]).not.toHaveProperty('seq')
     await flushDeliveries()
     expect(changed).toEqual([])
 
-    const response = a.respondRequest(id, patch)
+    const response = a.respondRequest(id, patch, null)
     await flushDeliveries()
     await response
     expect(hub.inspect.requests(GROUP_ID)[0]).toMatchObject(patch)
@@ -489,14 +505,14 @@ describe('createMemoryHub', () => {
     }
     hub.faults.loseAck(id)
 
-    await expect(a.respondRequest(id, patch)).rejects.toThrow(
+    await expect(a.respondRequest(id, patch, null)).rejects.toThrow(
       'Injected respondRequest ack loss',
     )
     await flushDeliveries()
     expect(hub.inspect.requests(GROUP_ID)[0]).toMatchObject(patch)
     expect(changed).toHaveLength(1)
 
-    const response = a.respondRequest(id, patch)
+    const response = a.respondRequest(id, patch, null)
     await flushDeliveries()
     await response
     expect(changed).toHaveLength(2)
@@ -586,27 +602,95 @@ describe('createMemoryHub', () => {
     expect(hub.inspect.snapshot('snapshot')).toBe('second')
   })
 
+  it('respondRequest: expected と保存済み response の不一致を書かずに棄却し、現在値を返す (契約 18)', async () => {
+    const { hub, a, b, aId, bId } = await connectTwo()
+    const changed: RequestEnvelope[] = []
+    b.subscribeRequests(
+      {},
+      {
+        onAdded: () => undefined,
+        onChanged: (envelope) => changed.push(envelope),
+      },
+    )
+    const { id } = await a.pushRequest(createEnvelope({ requestedBy: aId }))
+
+    const first = a.respondRequest(
+      id,
+      { epoch: 1, seq: 1, responsedBy: aId, responsed: 1, result: null },
+      null,
+    )
+    await flushDeliveries()
+    await expect(first).resolves.toEqual({ committed: true })
+    expect(changed).toHaveLength(1)
+
+    // 未裁定として観測した別 host の裁定は棄却され、changed も配送されない
+    const stale = b.respondRequest(
+      id,
+      { epoch: 2, seq: 1, responsedBy: bId, responsed: 2, result: null },
+      null,
+    )
+    await flushDeliveries()
+    await expect(stale).resolves.toMatchObject({
+      committed: false,
+      current: { id, epoch: 1, seq: 1, responsedBy: aId },
+    })
+    expect(hub.inspect.requests(GROUP_ID)[0]?.responsedBy).toBe(aId)
+    expect(changed).toHaveLength(1)
+
+    // 同一 (epoch, seq, responsedBy) の再送は冪等に受理する (ADR-0010 Decision 2)
+    const resend = a.respondRequest(
+      id,
+      { epoch: 1, seq: 1, responsedBy: aId, responsed: 1, result: null },
+      null,
+    )
+    await flushDeliveries()
+    await expect(resend).resolves.toEqual({ committed: true })
+
+    // 観測済みの旧 response を expected に渡す敗者の再裁定は受理する
+    const readjudicated = b.respondRequest(
+      id,
+      { epoch: 2, seq: 2, responsedBy: bId, responsed: 3, result: null },
+      { epoch: 1, seq: 1 },
+    )
+    await flushDeliveries()
+    await expect(readjudicated).resolves.toEqual({ committed: true })
+    expect(hub.inspect.requests(GROUP_ID)[0]).toMatchObject({
+      epoch: 2,
+      seq: 2,
+      responsedBy: bId,
+    })
+  })
+
   it('respondRequest の result: null は RTDB の update 同様に既存 result を除去する', async () => {
     const { hub, a, aId, bId } = await connectTwo()
     const { id } = await a.pushRequest(createEnvelope({ requestedBy: aId }))
-    const first = a.respondRequest(id, {
-      epoch: 1,
-      seq: 1,
-      responsedBy: aId,
-      responsed: 1,
-      result: '{"ok":true}',
-    })
+    const first = a.respondRequest(
+      id,
+      {
+        epoch: 1,
+        seq: 1,
+        responsedBy: aId,
+        responsed: 1,
+        result: '{"ok":true}',
+      },
+      null,
+    )
     await flushDeliveries()
     await first
 
-    // dual-host 窓で 2 つ目の host が result なしで応答し直すケースの模擬
-    const second = a.respondRequest(id, {
-      epoch: 2,
-      seq: 1,
-      responsedBy: bId,
-      responsed: 1,
-      result: null,
-    })
+    // 敗者の再裁定 (観測済みの旧 response を expected に渡す) で result なしに
+    // 応答し直すケースの模擬
+    const second = a.respondRequest(
+      id,
+      {
+        epoch: 2,
+        seq: 1,
+        responsedBy: bId,
+        responsed: 1,
+        result: null,
+      },
+      { epoch: 1, seq: 1 },
+    )
     await flushDeliveries()
     await second
 
@@ -626,20 +710,28 @@ describe('createMemoryHub', () => {
       createEnvelope({ requestedBy: aId, type: 'pending' }),
     )
 
-    const firstResponse = a.respondRequest(first.id, {
-      epoch: 1,
-      seq: 1,
-      responsedBy: aId,
-      responsed: 1,
-      result: null,
-    })
-    const secondResponse = a.respondRequest(second.id, {
-      epoch: 1,
-      seq: 3,
-      responsedBy: aId,
-      responsed: 1,
-      result: null,
-    })
+    const firstResponse = a.respondRequest(
+      first.id,
+      {
+        epoch: 1,
+        seq: 1,
+        responsedBy: aId,
+        responsed: 1,
+        result: null,
+      },
+      null,
+    )
+    const secondResponse = a.respondRequest(
+      second.id,
+      {
+        epoch: 1,
+        seq: 3,
+        responsedBy: aId,
+        responsed: 1,
+        result: null,
+      },
+      null,
+    )
     await flushDeliveries()
     await Promise.all([firstResponse, secondResponse])
 
@@ -728,13 +820,17 @@ describe('createMemoryHub', () => {
       transport.pushRequest(createEnvelope({ requestedBy: 'peer-x' })),
     ).rejects.toThrow('not connected')
     await expect(
-      transport.respondRequest('000000000001', {
-        epoch: 1,
-        seq: 1,
-        responsedBy: 'peer-x',
-        responsed: 1,
-        result: null,
-      }),
+      transport.respondRequest(
+        '000000000001',
+        {
+          epoch: 1,
+          seq: 1,
+          responsedBy: 'peer-x',
+          responsed: 1,
+          result: null,
+        },
+        null,
+      ),
     ).rejects.toThrow('not connected')
     await expect(transport.pruneRequests!(2)).rejects.toThrow('not connected')
     expect(() =>

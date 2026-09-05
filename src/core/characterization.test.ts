@@ -42,7 +42,8 @@ const createStubTransport = () => {
         responsed: number
         result: string | null
       },
-    ) => undefined,
+      _expected: { epoch: number; seq: number } | null,
+    ): Promise<{ committed: true }> => ({ committed: true }),
   )
   const saveSnapshot = vi.fn(
     async (_key: string, _payload: string, _fence: SnapshotFence) => true,
@@ -165,6 +166,7 @@ const echoResponses = (fixture: Fixture, options?: { ackDelayMs?: number }) => {
     if (options?.ackDelayMs) {
       await new Promise((resolve) => setTimeout(resolve, options.ackDelayMs))
     }
+    return { committed: true }
   }) as never)
 }
 
@@ -249,8 +251,10 @@ describe('host 裁定 fork (requestListener)', () => {
       },
     })
 
-    // 試し実行は store を書き換えない。適用は response 受信側の責務
-    expect(store.getState().game.count).toBe(0)
+    // 試し実行は store を書き換えない。適用は response 受信側の責務だが、ack 後は
+    // 凍結済み response を自己反映して直列ゲートを解く (ADR-0029 Amendment)。
+    // stub は changed を echo しないので、この 1 はその自己反映による
+    expect(store.getState().game.count).toBe(1)
 
     // snapshot には試し実行後 (= 適用後) の state と順序状態が載る
     expect(saveSnapshot).toHaveBeenCalledTimes(1)
@@ -270,9 +274,14 @@ describe('host 裁定 fork (requestListener)', () => {
   it('validation NG の action は error result として response する', async () => {
     const { store, respondRequest } = await setupSelfAsHost()
     const request = makeRequest({ type: 'game/forbidden' })
+    // ack 後の自己反映で log 専用 error の log が自端末宛てに出力される (ADR-0008)
+    const errorLog = vi
+      .spyOn(console, 'error')
+      .mockImplementation(() => undefined)
 
     store.dispatch(synquxActions.requestAdded({ request }))
     await vi.advanceTimersByTimeAsync(10)
+    expect(errorLog).toHaveBeenCalledWith('forbidden')
 
     const raw = respondRequest.mock.calls[0]?.[1].result
     const result = raw ? (JSON.parse(raw) as Result) : null
@@ -311,7 +320,8 @@ describe('host 裁定 fork (requestListener)', () => {
     )
     await vi.advanceTimersByTimeAsync(500)
 
-    expect(store.getState().game.count).toBe(11)
+    // seq 3 の裁定は ack 後に自己反映されるため 100 も加わる (ADR-0029 Amendment)
+    expect(store.getState().game.count).toBe(111)
     expect(respondRequest).toHaveBeenCalledTimes(1)
     expect(respondRequest.mock.calls[0]?.[1].seq).toBe(3)
   })

@@ -20,12 +20,13 @@ import {
   type Database,
   type Query,
 } from 'firebase/database'
-import type {
-  Peer,
-  PeerRole,
-  RequestEnvelope,
-  SnapshotFence,
-  SynquxTransport,
+import {
+  acceptsResponse,
+  type Peer,
+  type PeerRole,
+  type RequestEnvelope,
+  type SnapshotFence,
+  type SynquxTransport,
 } from '../core/types.js'
 
 type StoredSnapshot = { fence: SnapshotFence; payload: string }
@@ -483,18 +484,78 @@ export const firebaseTransport = (
       return { id: pushed.key! }
     },
 
-    async respondRequest(id, patch) {
-      const { groupId } = requireSession()
+    async respondRequest(id, patch, expected) {
+      const currentSession = requireSession()
+      const { groupId } = currentSession
 
-      // update の null 値はキー削除として働く (result: null)
-      // resolve はサーバ ack (契約 2)。local echo の onChildChanged が先に届く
-      await update(ref(db, `${requestsPath(groupId)}/${id}`), {
-        epoch: patch.epoch,
-        seq: patch.seq,
-        responsedBy: patch.responsedBy,
-        responsed: patch.responsed,
-        result: patch.result,
-      })
+      const withResponse = (
+        stored: Record<string, unknown>,
+      ): Record<string, unknown> => {
+        const next: Record<string, unknown> = {
+          ...stored,
+          epoch: patch.epoch,
+          seq: patch.seq,
+          responsedBy: patch.responsedBy,
+          responsed: patch.responsed,
+          result: patch.result,
+        }
+        // update() の null 指定と同じくキー削除に揃える (transaction は node 全体を書く)
+        if (patch.result === null) {
+          delete next.result
+        }
+        return next
+      }
+
+      // 契約 18: expected と保存済み response を transaction で原子的に比較する。
+      // applyLocally: false は abort で巻き戻る楽観 local echo を購読へ流さない
+      // ための指定 (saveSnapshot と同じ)。resolve はサーバ ack (契約 2)
+      const requestRef = ref(db, `${requestsPath(groupId)}/${id}`)
+      const attempt = () =>
+        runTransaction(
+          requestRef,
+          (current: unknown) => {
+            // null = local cache に無い (host は requests 購読済みのため通常は cache
+            // にある) か、prune 済みで実在しない。patch だけの孤児 node を作らないよう
+            // abort し、存在確認してから再試行する (下)
+            if (current === null || typeof current !== 'object') {
+              return undefined
+            }
+            const stored = current as Record<string, unknown> &
+              Pick<RequestEnvelope, 'epoch' | 'seq' | 'responsedBy'>
+            if (!acceptsResponse(stored, patch, expected)) {
+              return undefined
+            }
+            return withResponse(stored)
+          },
+          { applyLocally: false },
+        )
+
+      let outcome = await attempt()
+      if (!outcome.committed && outcome.snapshot.val() === null) {
+        // null で abort した transaction はサーバへ行かない。get() で存在を確定
+        // (= local cache を温める) してから 1 度だけ再試行する
+        const fresh = await get(requestRef)
+        // 待機中に disconnect / 再 connect されていたら、離脱済みの group へ書かない
+        if (currentSession.disposed || session !== currentSession) {
+          throw new Error(
+            `Firebase transport session changed during respondRequest: ${id}`,
+          )
+        }
+        if (!fresh.exists()) {
+          throw new Error(`Unknown request: ${id}`)
+        }
+        outcome = await attempt()
+      }
+
+      if (outcome.committed) {
+        return { committed: true }
+      }
+
+      const stored: unknown = outcome.snapshot.val()
+      if (stored === null || typeof stored !== 'object') {
+        throw new Error(`Unknown request: ${id}`)
+      }
+      return { committed: false, current: toEnvelope(stored, id) }
     },
 
     async pruneRequests(beforeSeq) {

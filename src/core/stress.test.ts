@@ -318,8 +318,17 @@ const expectConverged = (
     ),
   ).toBe(expectedRequestCount)
 
+  // result は「最後に適用された action の通知スロット」(ADR-0008) で、snapshot
+  // restore を経た端末では null に戻る (clearRestoredResult)。回復の有無は端末ごとに
+  // 違ってよいため、収束判定は result を除いた synced で行い、result は両端末に
+  // 残っている場合だけ一致を要求する
+  const { result: referenceResult, ...referenceSynced } = referenceGame
   for (const tracked of [reference, ...others]) {
-    expect(tracked.client.store.getState().game).toEqual(referenceGame)
+    const { result, ...synced } = tracked.client.store.getState().game
+    expect(synced).toEqual(referenceSynced)
+    if (result !== null && referenceResult !== null) {
+      expect(result).toEqual(referenceResult)
+    }
     expect(selectSyncHealth(tracked.client.store.getState()).phase).toBe('ok')
   }
 }

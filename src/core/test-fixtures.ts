@@ -81,7 +81,9 @@ export const gameReducer: Reducer<GameState> = (
       }
 
     // 多段依存チェーン検証用の rejects-repeat action。前段 (count === n - 1) が
-    // 適用済みのときだけ受理し、遅配・重複・stale host の再発行は log 専用で拒否する
+    // 適用済みのときだけ受理し、遅配・重複・stale host の再発行は静かに拒否する
+    // (message も log もなし = dispatch 省略・console 出力なし。automation の
+    // 再発行が拒否されるのは正常系のため、テストの console.error 検査に載せない)
     case 'game/step': {
       const step = action.payload ?? 0
       if (state.count !== step - 1) {
@@ -91,7 +93,6 @@ export const gameReducer: Reducer<GameState> = (
             action,
             type: 'error',
             targets: action.meta?.requestedBy ? [action.meta.requestedBy] : [],
-            log: `step out of order: ${String(step)}`,
           },
         }
       }

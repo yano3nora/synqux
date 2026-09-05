@@ -28,6 +28,9 @@ describe('sync health', () => {
     await c.sync.subscribe({ store: c.store, groupId: GROUP_ID })
     await settle(10)
 
+    // host の snapshot を保留し、耐久化済み水位ではなく「後続 seq の観測」だけで
+    // gap が始まる経路を検証する (水位ベースの検知は別 test)
+    hub.faults.holdSnapshot('peer-3')
     hub.faults.drop({
       requestId: '000000000001',
       to: 'peer-1',
@@ -51,6 +54,40 @@ describe('sync health', () => {
     expect(selectIsSyncStalled(a.store.getState())).toBe(true)
     expect(selectSyncHealth(b.store.getState()).phase).toBe('ok')
     expect(selectSyncHealth(c.store.getState()).phase).toBe('ok')
+  })
+
+  it('耐久化済み水位より遅れた端末は、後続 seq を観測しなくても回復を開始して追いつく (ADR-0029)', async () => {
+    const hub = createMemoryHub()
+    const a = createHubClient(hub, { stallAfterMs: STALL_AFTER_MS })
+    const b = createHubClient(hub, { stallAfterMs: STALL_AFTER_MS })
+
+    await a.sync.subscribe({ store: a.store, groupId: GROUP_ID })
+    await b.sync.subscribe({ store: b.store, groupId: GROUP_ID })
+    await settle(10)
+
+    // 唯一の裁定 (seq 1) の changed を失う。後続 request はなく、seq は観測できない
+    hub.faults.drop({
+      requestId: '000000000001',
+      to: 'peer-1',
+      event: 'changed',
+    })
+    b.store.dispatch({ type: 'game/increment', payload: 1 })
+    await settle(10)
+    expect(hub.inspect.snapshotFence(GROUP_ID)?.appliedSeq).toBe(1)
+    expect(a.store.getState().game.count).toBe(0)
+
+    let sawRecovering = false
+    a.store.subscribe(() => {
+      sawRecovering ||=
+        selectSyncHealth(a.store.getState()).phase === 'recovering'
+    })
+    await vi.advanceTimersByTimeAsync(STALL_AFTER_MS + 1_000)
+    await settle(20)
+
+    // 水位 (seq 1) が gap の証拠になり、再購読で失った裁定を取り直す
+    expect(sawRecovering).toBe(true)
+    expect(a.store.getState().game.count).toBe(1)
+    expect(selectSyncHealth(a.store.getState()).phase).toBe('ok')
   })
 
   it('stallAfterMs 未満の遅配は stalled を通知せず、全端末が収束する', async () => {
@@ -101,6 +138,8 @@ describe('sync health', () => {
     await c.sync.subscribe({ store: c.store, groupId: GROUP_ID })
     await settle(10)
 
+    // 前 test と同じく、水位ではなく後続 seq の観測で gap を始める
+    hub.faults.holdSnapshot('peer-3')
     const delayed = hub.faults.delay({
       requestId: '000000000001',
       to: 'peer-1',
@@ -138,7 +177,10 @@ describe('sync health', () => {
     await settle(10)
 
     // b だけが c の presence を失った視界を作り、b/c の dual-host 窓にする。
+    // b の snapshot は保留する (耐久化されると c の catch-up barrier が同 seq の
+    // 裁定を止め、窓が閉じてしまう。ADR-0029)
     b.store.dispatch(synquxActions.peerRemoved('peer-3'))
+    hub.faults.holdSnapshot('peer-2')
 
     // request 1 は b だけに裁定させ、a は敗者となる action を seq 1 で早期適用。
     // c への added/changed は後でまとめて解放し、正史確定後の敗者救済に回す。

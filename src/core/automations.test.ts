@@ -386,14 +386,12 @@ describe('automations 多段依存チェーン', () => {
   }
 
   /**
-   * 再現テスト (BACKLOG P0「遅れ端末の host 昇格による確定済み response の上書き」):
-   * 新 host は裁定 (changed) が未着の request を「未裁定」とみなして再裁定し、
-   * 自分が観測していない確定済み response を新 epoch で上書きする (ADR-0010
-   * Decision 1 の侵害。移植元系列 consumer の issue と同型)。修正後は it.fails を外す
+   * ADR-0029 の再現テスト (移植元系列 consumer の issue と同型): 新 host は裁定
+   * (changed) が未着の request を「未裁定」とみなして再裁定するが、respond CAS
+   * (契約 18) が自分の観測していない確定済み response の置換を拒否し、catch-up
+   * barrier が耐久化済み位置まで裁定を止める
    */
-  it.fails('適用が遅れた端末が host に昇格しても、前 host の確定済み response を再裁定で上書きしない', async () => {
-    // 再裁定の副作用 (determinism check の誤検知) を黙殺し、封筒だけを検証する
-    vi.spyOn(console, 'error').mockImplementation(() => undefined)
+  it('適用が遅れた端末が host に昇格しても、前 host の確定済み response を再裁定で上書きしない', async () => {
     const { hub, frozen } = await promoteLaggingHost()
 
     // 「未裁定」として観測した caller は、保存済み response を置換できない
@@ -415,9 +413,6 @@ describe('automations 多段依存チェーン', () => {
   })
 
   it('適用が遅れた端末が host に昇格しても、追いついた後にチェーンを完走する', async () => {
-    // 現状は上記の再裁定が起きるため determinism check の誤検知が出る。
-    // BACKLOG P0 の修正で消えるまで黙殺する (完走の検証には影響しない)
-    vi.spyOn(console, 'error').mockImplementation(() => undefined)
     const { hub, a, b, delayed } = await promoteLaggingHost()
 
     delayed.release()

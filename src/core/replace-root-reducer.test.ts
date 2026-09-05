@@ -137,8 +137,10 @@ describe('replaceRootReducer', () => {
     const [host, client] = selectIsHost(a.store.getState()) ? [a, b] : [b, a]
     const hostId = host.store.getState().synqux.connections.selfId!
 
-    // host への changed 配送だけ遅らせる: 試し実行 → respond → snapshot 保存まで
-    // 進むが host 自身の適用は未完 (fork は生存) の窓を作る
+    // host は ack 後に自己反映する (ADR-0029 Amendment) ため、ack を止めて
+    // 「試し実行済み・respond 中で未適用 (fork は生存)」の窓を作る。changed の
+    // 遅延は local echo 経由の適用も止めるため
+    const heldAck = hub.faults.holdAck('000000000001')
     const delayedApply = hub.faults.delay({
       requestId: '000000000001',
       to: hostId,
@@ -157,6 +159,8 @@ describe('replaceRootReducer', () => {
         .count,
     ).toBe(1)
 
+    heldAck.release()
+    await settle()
     delayedApply.release()
     await settle()
 
