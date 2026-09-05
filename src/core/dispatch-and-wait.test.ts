@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { createMemoryHub } from '../testing/memory-hub.js'
+import { selectIsHost } from './selectors.js'
 import { createClient, createHubClient, settle } from './test-fixtures.js'
 
 const GROUP_ID = 'group-dispatch-and-wait'
@@ -217,6 +218,35 @@ describe('dispatchAndWait', () => {
       'increment:1',
       'increment:10',
     ])
+  })
+
+  it('待機中に host が離脱しても、昇格した次点 host の裁定で resolve する', async () => {
+    const hub = createMemoryHub()
+    const a = createHubClient(hub)
+    const b = createHubClient(hub)
+    await a.sync.subscribe({ store: a.store, groupId: GROUP_ID })
+    await b.sync.subscribe({ store: b.store, groupId: GROUP_ID })
+    await settle(5)
+    expect(selectIsHost(b.store.getState())).toBe(true)
+
+    // host (b) には request が届かず、応答されないまま滞留する
+    hub.faults.drop({ requestId: '000000000001', to: 'peer-2', event: 'added' })
+
+    let resolved = false
+    const resultPromise = a.sync
+      .dispatchAndWait({ type: 'game/increment' })
+      .then((result) => {
+        resolved = true
+        return result
+      })
+    await settle(10)
+    expect(resolved).toBe(false)
+
+    hub.faults.disconnect('peer-2')
+    await settle()
+    await expect(resultPromise).resolves.toMatchObject({ type: 'success' })
+    expect(a.store.getState().game.count).toBe(1)
+    expect(hub.inspect.requests(GROUP_ID)[0]?.responsedBy).toBe('peer-1')
   })
 
   it('未 subscribe は throw、非 synced action と canRequest=false は即 reject する', async () => {

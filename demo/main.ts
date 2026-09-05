@@ -4,7 +4,7 @@ import { connectDatabaseEmulator, getDatabase } from 'firebase/database'
 import { selectIsHost, selectPeers, selectSelfId, type PeerRole } from 'synqux'
 import { firebaseTransport } from 'synqux/firebase'
 import { createRig } from './rig'
-import { add, append, demoSlice, set, setLocked } from './slice'
+import { add, append, demoSlice, set, setLocked, stepTo } from './slice'
 import { createSynqux, type DemoAction } from './synqux'
 
 /**
@@ -33,6 +33,8 @@ const role: PeerRole | undefined =
     ? roleParam
     : undefined
 const stormTotal = Number(params.get('storm'))
+const botEnabled = params.get('bot') === '1'
+const BOT_FILL_TARGET = 50
 
 // Wiring phase: the definition's createSynqux wires rootReducer / selectSynced /
 // isSyncedAction internally and derives the root type from syncedKey + locals.
@@ -43,6 +45,24 @@ const synqux = createSynqux({
   transport: firebaseTransport(db, { archivePrunedRequests: true }),
   synced: demoSlice.reducer,
   locals: {},
+  // Bot mode (?bot=1): a host-driven multi-step chain. Every rule derives its
+  // next action from synced state alone, so after host migration the new host
+  // continues the chain with no handover state (ADR-0015). See README "Bot mode".
+  automations: botEnabled
+    ? [
+        {
+          id: 'bot-fill',
+          when: (synced) => synced.count < BOT_FILL_TARGET,
+          action: (synced) => stepTo(synced.count + 1),
+        },
+        {
+          id: 'bot-unlock',
+          when: (synced) =>
+            synced.count === BOT_FILL_TARGET && synced.ledger.locked,
+          action: () => setLocked(false),
+        },
+      ]
+    : [],
 })
 
 // Measurement rig for TASK-260812 Phase A-2 (enable with `?rig=1`). Place the
@@ -119,6 +139,11 @@ const render = (): void => {
   el('ledger-sent').textContent = String(stormSent)
   el('self').textContent = selectSelfId(state) ?? '(connecting...)'
   el('host').textContent = selectIsHost(state) ? 'HOST 👑' : 'client'
+  el('bot').textContent = botEnabled
+    ? selectIsHost(state)
+      ? 'on (this tab drives the chain)'
+      : 'on'
+    : 'off'
   const peers = selectPeers(state)
   const self = peers.find((peer) => peer.id === selectSelfId(state))
   el('role').textContent = self?.role ?? 'player'

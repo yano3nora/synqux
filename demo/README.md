@@ -45,3 +45,27 @@ difference means there is a bug in ordering or exactly-once application.
 Closing a tab during a storm adds host migration. A known tradeoff in the dual-host
 window (SPEC-0001, "Design Tradeoffs") can cause a temporary divergence. Treat a
 mismatch as a bug **only during stable operation without a host change**.
+
+## Bot mode
+
+Open every tab with `?bot=1` to enable a host-driven multi-step chain (`automations`).
+Rules are instance config, so a tab without the flag drives nothing when it becomes
+the host. The chain models a bot that keeps dispatching dependent actions, where
+each step is only valid after the previous one was applied:
+
+1. `bot-fill`: while `count < 50`, request `stepTo(count + 1)`. The reducer accepts
+   only the next value, so a stale or duplicated issue is rejected (log-only).
+2. `bot-unlock`: once `count === 50`, unlock the ledger whenever a storm locks it.
+
+Only the host evaluates the rules, and every rule reads synced state alone, so:
+
+- Close the host tab while the count is climbing. The next host continues from the
+  current count without any handover.
+- Click `reset` to start the chain again from 0.
+- Combine with `?storm=200` in several tabs to mix client requests into the chain.
+
+The test passes when **every tab shows the same count and ledger hash** after the
+chain settles, and the count never skips or repeats a step (watch the console for
+`stepTo out of order` logs, which are the rejected re-issues). The same caveat as
+Stress mode applies to host changes mid-chain: judge only stable operation.
+

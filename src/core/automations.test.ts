@@ -10,6 +10,7 @@ import {
   type GameState,
 } from './test-fixtures.js'
 import type { SynquxAutomation } from './create-synqux.js'
+import type { RequestEnvelope } from './types.js'
 
 const GROUP_ID = 'group-automations'
 const START = new Date('2026-08-11T00:00:00.000Z').getTime()
@@ -229,4 +230,248 @@ describe('automations', () => {
       ).toThrow('SynquxAutomation retryMs must be a positive finite number')
     },
   )
+})
+
+/**
+ * 多段依存チェーン: 移植元系列 consumer の bot (前段の適用結果が次段の発行条件になる
+ * 多段 dispatch を host が回す) を automations で表現したとき、host migration・
+ * 遅配・重複・dual-host を跨いでも各段が 1 回ずつ適用されて完走することを検証する。
+ * 段の間隔を時間で開け、障害を挟む位置を決定的にしている
+ */
+describe('automations 多段依存チェーン', () => {
+  const CHAIN_START = START + 1000
+  const STAGE_MS = 5000
+  const STEPS = [1, 2, 3] as const
+
+  beforeEach(() => {
+    vi.useFakeTimers()
+    vi.setSystemTime(START)
+  })
+
+  afterEach(() => {
+    vi.restoreAllMocks()
+    vi.useRealTimers()
+  })
+
+  const stepChain = (): SynquxAutomation<GameState, GameAction>[] =>
+    STEPS.map((step) => ({
+      id: `step-${String(step)}`,
+      // 評価 tick は min(retryMs) なので、時間ゲートが settle 内で評価される幅にする
+      retryMs: 500,
+      when: (synced, { now }) =>
+        now >= CHAIN_START + (step - 1) * STAGE_MS && synced.count === step - 1,
+      action: () => ({ type: 'game/step', payload: step }),
+    }))
+
+  const stageAt = (step: number): number => CHAIN_START + (step - 1) * STAGE_MS
+
+  const advanceTo = async (time: number): Promise<void> => {
+    await vi.advanceTimersByTimeAsync(Math.max(0, time - Date.now()))
+  }
+
+  const expectCompleted = (
+    client: ReturnType<typeof createHubClient>,
+  ): void => {
+    expect(client.store.getState().game.count).toBe(3)
+    expect(client.store.getState().game.log).toEqual([
+      'step:1',
+      'step:2',
+      'step:3',
+    ])
+  }
+
+  it('host migration・裁定の遅配・added の重複を跨いで各段が 1 回ずつ適用され完走する', async () => {
+    const hub = createMemoryHub()
+    const a = createHubClient(hub, { automations: stepChain() })
+    const b = createHubClient(hub, { automations: stepChain() })
+    const c = createHubClient(hub, { automations: stepChain() })
+
+    await a.sync.subscribe({ store: a.store, groupId: GROUP_ID })
+    await b.sync.subscribe({ store: b.store, groupId: GROUP_ID })
+    await c.sync.subscribe({ store: c.store, groupId: GROUP_ID })
+    await settle(5)
+    expect(selectIsHost(c.store.getState())).toBe(true)
+
+    // a には step-2 の裁定を遅配し、step-3 の added は全端末へ二重配送する
+    const delayed = hub.faults.delay({
+      requestId: '000000000002',
+      to: 'peer-1',
+      event: 'changed',
+    })
+    hub.faults.duplicate({ requestId: '000000000003', event: 'added' })
+
+    await advanceTo(stageAt(1))
+    await settle(10)
+    for (const client of [a, b, c]) {
+      expect(client.store.getState().game.count).toBe(1)
+    }
+
+    // step-1 と step-2 の間で host が落ち、b が state だけから続きを回す
+    hub.faults.disconnect('peer-3')
+    await settle(10)
+    expect(selectIsHost(b.store.getState())).toBe(true)
+
+    await advanceTo(stageAt(2))
+    await settle(10)
+    await advanceTo(stageAt(3))
+    await settle(10)
+
+    // 遅配された a は step-2 待ちで step-3 を先行適用しない (線形化)
+    expect(a.store.getState().game.count).toBe(1)
+    expectCompleted(b)
+
+    delayed.release()
+    await settle()
+    expectCompleted(a)
+
+    const requests = hub.inspect.requests(GROUP_ID)
+    expect(requests).toHaveLength(3)
+    expect(requests.map((request) => request.responsedBy)).toEqual([
+      'peer-3',
+      'peer-2',
+      'peer-2',
+    ])
+  })
+
+  /**
+   * 遅れ端末 (裁定 changed が未着) の host 昇格。再現テストと完走テストに分ける:
+   * it.fails は最初の assertion 失敗で終わるため、封筒の不変条件だけを見る
+   */
+  const promoteLaggingHost = async (): Promise<{
+    hub: ReturnType<typeof createMemoryHub>
+    a: ReturnType<typeof createHubClient>
+    b: ReturnType<typeof createHubClient>
+    delayed: { release(): void }
+    /** 前 host が確定した step-2 の response 封筒 (deep copy) */
+    frozen: RequestEnvelope
+  }> => {
+    const hub = createMemoryHub()
+    const a = createHubClient(hub, { automations: stepChain() })
+    const b = createHubClient(hub, { automations: stepChain() })
+    const c = createHubClient(hub, { automations: stepChain() })
+
+    // b だけ step-2 の裁定が届かない (バックグラウンドタブの適用遅延の模擬)。
+    // step-1 は届いているので、b は epoch 1 を観測済みのまま遅れて昇格する
+    const delayed = hub.faults.delay({
+      requestId: '000000000002',
+      to: 'peer-2',
+      event: 'changed',
+    })
+
+    await a.sync.subscribe({ store: a.store, groupId: GROUP_ID })
+    await b.sync.subscribe({ store: b.store, groupId: GROUP_ID })
+    await c.sync.subscribe({ store: c.store, groupId: GROUP_ID })
+    await settle(5)
+
+    await advanceTo(stageAt(1))
+    await settle(10)
+    await advanceTo(stageAt(2))
+    await settle(10)
+    expect(a.store.getState().game.count).toBe(2)
+    expect(c.store.getState().game.count).toBe(2)
+    expect(b.store.getState().game.count).toBe(1)
+
+    const frozen = hub.inspect.requests(GROUP_ID)[1]
+    if (frozen === undefined) {
+      throw new Error('step-2 request is missing')
+    }
+    expect(frozen).toMatchObject({ responsedBy: 'peer-3', seq: 2 })
+
+    // 遅れたまま b が host 化する
+    hub.faults.disconnect('peer-3')
+    await settle(10)
+    expect(selectIsHost(b.store.getState())).toBe(true)
+
+    return { hub, a, b, delayed, frozen }
+  }
+
+  /**
+   * 再現テスト (BACKLOG P0「遅れ端末の host 昇格による確定済み response の上書き」):
+   * 新 host は裁定 (changed) が未着の request を「未裁定」とみなして再裁定し、
+   * 自分が観測していない確定済み response を新 epoch で上書きする (ADR-0010
+   * Decision 1 の侵害。移植元系列 consumer の issue と同型)。修正後は it.fails を外す
+   */
+  it.fails('適用が遅れた端末が host に昇格しても、前 host の確定済み response を再裁定で上書きしない', async () => {
+    // 再裁定の副作用 (determinism check の誤検知) を黙殺し、封筒だけを検証する
+    vi.spyOn(console, 'error').mockImplementation(() => undefined)
+    const { hub, frozen } = await promoteLaggingHost()
+
+    // 「未裁定」として観測した caller は、保存済み response を置換できない
+    // (観測済み敗者の正当な再裁定とは区別する。ADR-0010 Decision 1)
+    const current = hub.inspect.requests(GROUP_ID)[1]
+    expect({
+      epoch: current?.epoch,
+      seq: current?.seq,
+      responsedBy: current?.responsedBy,
+      responsed: current?.responsed,
+      result: current?.result,
+    }).toEqual({
+      epoch: frozen.epoch,
+      seq: frozen.seq,
+      responsedBy: frozen.responsedBy,
+      responsed: frozen.responsed,
+      result: frozen.result,
+    })
+  })
+
+  it('適用が遅れた端末が host に昇格しても、追いついた後にチェーンを完走する', async () => {
+    // 現状は上記の再裁定が起きるため determinism check の誤検知が出る。
+    // BACKLOG P0 の修正で消えるまで黙殺する (完走の検証には影響しない)
+    vi.spyOn(console, 'error').mockImplementation(() => undefined)
+    const { hub, a, b, delayed } = await promoteLaggingHost()
+
+    delayed.release()
+    await settle(10)
+    await advanceTo(stageAt(3))
+    await settle(10)
+
+    expectCompleted(a)
+    expectCompleted(b)
+    for (const request of hub.inspect.requests(GROUP_ID)) {
+      expect(request.seq).toBeDefined()
+    }
+  })
+
+  it('dual-host 窓の中でも各段の二重発行が 1 回適用へ収束し完走する', async () => {
+    // dual-host 窓ではシナリオ上 determinism check のエラーログが発生するため黙殺する
+    vi.spyOn(console, 'error').mockImplementation(() => undefined)
+    const hub = createMemoryHub()
+    const a = createHubClient(hub, { automations: stepChain() })
+    const b = createHubClient(hub, { automations: stepChain() })
+    const c = createHubClient(hub, { automations: stepChain() })
+
+    await a.sync.subscribe({ store: a.store, groupId: GROUP_ID })
+    await b.sync.subscribe({ store: b.store, groupId: GROUP_ID })
+    await c.sync.subscribe({ store: c.store, groupId: GROUP_ID })
+    await settle(5)
+
+    // b だけが c の presence を失った観測窓を作り、b/c が同時に host を自認する
+    b.store.dispatch(synquxActions.peerRemoved('peer-3'))
+    expect(selectIsHost(b.store.getState())).toBe(true)
+    expect(selectIsHost(c.store.getState())).toBe(true)
+
+    for (const step of STEPS) {
+      await advanceTo(stageAt(step))
+      await settle(20)
+    }
+
+    // 各段が両 host から発行され (二重発行)、それでも各段 1 回の適用へ収束する
+    for (const step of STEPS) {
+      const issuers = hub.inspect
+        .requests(GROUP_ID)
+        .filter(
+          (request) => JSON.parse(String(request.action.payload)) === step,
+        )
+        .map((request) => request.requestedBy)
+      expect(issuers).toEqual(expect.arrayContaining(['peer-2', 'peer-3']))
+    }
+    // 敗者 request も裁定済み (未裁定の滞留なし) で収束する
+    for (const request of hub.inspect.requests(GROUP_ID)) {
+      expect(request.seq).toBeDefined()
+      expect(request.responsedBy).toBeDefined()
+    }
+    for (const client of [a, b, c]) {
+      expectCompleted(client)
+    }
+  })
 })

@@ -74,7 +74,20 @@ export const demoSlice = createSyncedSlice({
     setLocked: (state, action: SyncedAction<boolean>) => {
       state.ledger.locked = action.payload
     },
+
+    // Bot mode (main.ts): a rejects-repeat step. Only the next value is accepted,
+    // so re-issues from a stale host or a dual-host window are rejected (log-only)
+    // and a multi-step chain still applies each step exactly once.
+    stepTo: (state, action: SyncedAction<number>) => {
+      if (state.count !== action.payload - 1) {
+        return withErrorResult({ ...state }, action, {
+          log: `stepTo out of order: ${String(action.payload)}`,
+        })
+      }
+
+      state.count = action.payload
+    },
   },
 })
 
-export const { add, append, set, setLocked } = demoSlice.actions
+export const { add, append, set, setLocked, stepTo } = demoSlice.actions

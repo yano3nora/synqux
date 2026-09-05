@@ -80,6 +80,28 @@ export const gameReducer: Reducer<GameState> = (
         log: state.log.concat('increment-once'),
       }
 
+    // 多段依存チェーン検証用の rejects-repeat action。前段 (count === n - 1) が
+    // 適用済みのときだけ受理し、遅配・重複・stale host の再発行は log 専用で拒否する
+    case 'game/step': {
+      const step = action.payload ?? 0
+      if (state.count !== step - 1) {
+        return {
+          ...state,
+          result: {
+            action,
+            type: 'error',
+            targets: action.meta?.requestedBy ? [action.meta.requestedBy] : [],
+            log: `step out of order: ${String(step)}`,
+          },
+        }
+      }
+      return {
+        ...state,
+        count: step,
+        log: state.log.concat(`step:${String(step)}`),
+      }
+    }
+
     // toggle 系 action: 二重適用で「クリックが無かったこと」になる非冪等 action の代表
     case 'game/toggle':
       return {

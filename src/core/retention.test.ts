@@ -10,6 +10,10 @@ import {
   type GameState,
 } from './test-fixtures.js'
 
+// prune 稼働の simulation は fake timers 下でも CPU 実行時間が 4〜5 秒かかり、
+// vitest デフォルト 5000ms では並列実行時に margin 不足で timeout する (stress.test.ts と同じ)。
+vi.setConfig({ testTimeout: 30_000 })
+
 const GROUP_ID = 'group-retention'
 const STALL_AFTER_MS = 5_000
 
