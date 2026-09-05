@@ -185,7 +185,8 @@ export const createClient = (
   })
 
   const store = configureStore({
-    reducer: rootReducer,
+    // 推奨配線と同じく instance の echo を渡す (replaceRootReducer へ追従する)
+    reducer: sync.rootReducer,
     middleware: (getDefaultMiddleware) =>
       getDefaultMiddleware().prepend(...sync.middlewares),
   })

@@ -206,6 +206,37 @@ describe('defineSynqux (end-to-end)', () => {
     expectTypeOf(definition).not.toHaveProperty('withTypes')
   })
 
+  it('replaceReducers は instance と store を生かしたまま synced reducer を差し替える', async () => {
+    const hub = createMemoryHub()
+    const a = createClient(hub)
+    const b = createClient(hub)
+    await a.sync.subscribe({ store: a.store, groupId: GROUP_ID })
+    await b.sync.subscribe({ store: b.store, groupId: GROUP_ID })
+    await settle()
+
+    // HMR で再評価された reducer module 相当 (payload を 2 倍で適用する)
+    const doubled: Reducer<CountState> = (state, action) =>
+      definition.isSyncedAction(action)
+        ? countReducer(state, { ...action, payload: action.payload * 2 })
+        : countReducer(state, action)
+    a.sync.replaceReducers({ synced: doubled, locals: {} })
+    b.sync.replaceReducers({ synced: doubled, locals: {} })
+
+    a.store.dispatch(increment(2))
+    await settle()
+
+    // store.replaceReducer なし: 配線済みの echo が委譲先の変更へ追従する
+    expect(a.store.getState().game.count).toBe(4)
+    expect(b.store.getState().game.count).toBe(4)
+
+    // 素材の型は配線 config と同じ (synced の型と locals の key 集合は配線時に
+    // 固定。root の形を変える差し替えは対象外で instance を作り直す)
+    expectTypeOf(a.sync.replaceReducers)
+      .parameter(0)
+      .toHaveProperty('synced')
+      .toMatchTypeOf<Reducer<CountState>>()
+  })
+
   it('creator は locals の LocalAction 注釈 (導出 root) の addCase と両立する', () => {
     const sync = definition.createSynqux({
       transport: createMemoryHub().createTransport(),

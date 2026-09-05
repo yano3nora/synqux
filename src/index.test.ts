@@ -36,6 +36,7 @@ describe('package smoke test', () => {
         'isResultForPeer',
         'isSucceededResult',
         'isSynquxAction',
+        'keepAcrossHmr',
         'localStorageSnapshotStore',
         'selectIsHost',
         'selectIsLive',

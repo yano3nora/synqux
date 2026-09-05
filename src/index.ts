@@ -54,6 +54,8 @@ export {
   type SynquxListenerContext,
   type SynquxSubscribeOptions,
 } from './core/create-synqux.js'
+// HMR 一式の片割れ (instance 保持)。replaceReducers と対で使う (TASK-260904)
+export { keepAcrossHmr, type HotContextLike } from './core/hmr.js'
 export {
   createSynquxRootReducer,
   type SynquxRootState,

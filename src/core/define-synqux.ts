@@ -255,7 +255,12 @@ export type SynquxDefinition<T extends SynquxTypes, TKey extends string> = {
    * `ReturnType<typeof synqux.rootReducer>` で得る (手書き root 不要)。
    *
    * group を跨ぐときは instance を作り直す契約 (core と同じ) のため、
-   * singleton ではなく都度呼べる factory になっている
+   * singleton ではなく都度呼べる factory になっている。
+   *
+   * 戻りの instance は core の Synqux に加えて素材単位の `replaceReducers`
+   * を持つ (core の replaceRootReducer を配線と同じ素材で包んだもの。dev の
+   * HMR で reducer module が再評価されたとき、instance と store を生かした
+   * まま判定器を差し替える口)。root の形 (locals の key) は配線時のまま
    */
   createSynqux: <TLocals extends Record<string, unknown>>(
     config: DefinedCreateSynquxConfig<
@@ -268,7 +273,19 @@ export type SynquxDefinition<T extends SynquxTypes, TKey extends string> = {
     SynquxRootState<TKey, T['synced'], TLocals>,
     SyncedActionOf<T>,
     T['synced']
-  >
+  > & {
+    replaceReducers: (
+      reducers: Pick<
+        DefinedCreateSynquxConfig<
+          SynquxRootState<TKey, T['synced'], TLocals>,
+          T['synced'] & SynquxSynced<SyncedActionOf<T>>,
+          SyncedActionOf<T>,
+          TLocals
+        >,
+        'synced' | 'locals'
+      >,
+    ) => void
+  }
 
   /** Result を組む helper (domain 型束縛済み) */
   generateResult: typeof generateResult<SyncedActionOf<T>, MessageOf<T>>
@@ -483,18 +500,31 @@ export const defineSynqux = <TKey extends string>(config: {
       locals: Record<string, Reducer<unknown>>
     }) => {
       const { synced, locals, ...rest } = instanceConfig
-
-      return createSynqux({
-        ...rest,
-        ...createSynquxRootReducer({
+      const wire = (reducers: {
+        synced: Reducer<SynquxSynced>
+        locals: Record<string, Reducer<unknown>>
+      }) =>
+        createSynquxRootReducer({
           isSyncedAction: isSyncedAction as (
             action: Action,
           ) => action is Action,
           syncedKey: config.syncedKey,
-          synced,
-          locals,
-        }),
+          ...reducers,
+        })
+
+      const instance = createSynqux({
+        ...rest,
+        ...wire({ synced, locals }),
       } as never)
+
+      return {
+        ...instance,
+        // 素材単位の差し替え (core の replaceRootReducer を配線と同じ手順で包む)
+        replaceReducers: (reducers: {
+          synced: Reducer<SynquxSynced>
+          locals: Record<string, Reducer<unknown>>
+        }) => instance.replaceRootReducer(wire(reducers).rootReducer as never),
+      }
     },
 
     generateResult,

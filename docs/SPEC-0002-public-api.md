@@ -209,7 +209,11 @@ export type LocalActionOf<C, P = void> // 束縛済み CreateLocalSlice → Loca
  *   内部化され、root 型は SynquxRootState<TKey, TSynced, TLocals> として導出される
  *   — consumer の RootState は `ReturnType<typeof synqux.rootReducer>` で得る
  *   (手書き root と SynquxState import は不要)。group を跨ぐときは instance を
- *   作り直す契約 (core と同じ) のため factory
+ *   作り直す契約 (core と同じ) のため factory。戻りの instance は core の Synqux
+ *   に加えて素材単位の `replaceReducers({ synced, locals })` を持つ (core の
+ *   replaceRootReducer を配線と同じ手順で包んだもの。dev の HMR で reducer module
+ *   が再評価されたとき、instance と store を生かしたまま判定器を差し替える口。
+ *   素材の型は配線 config と同じで、root の形は配線時のまま。TASK-260904)
  * - generateResult / withResult / withErrorResult / withTransaction の束縛済み版
  *
  * creators の meta.root は型付けない (any) — root は配線フェーズまで未知で、
@@ -406,6 +410,30 @@ export type Synqux<TRoot, TAction = Action, TSynced = never> = {
   reducer: Reducer<SynquxState>
 
   /**
+   * store 構築用の rootReducer。config の echo ではなく「現在の判定器へ委譲する
+   * 安定関数」で、参照は instance 生涯で不変 (replaceRootReducer 後も委譲先だけ変わる)。
+   * これを configureStore に配線していれば、裁定側 (host 試し実行) と適用側 (store)
+   * が構造的に同じ reducer を使う
+   */
+  rootReducer: Reducer<TRoot>
+
+  /**
+   * 判定器を instance を生かしたまま差し替える (TASK-260904)。以後の host 試し実行 /
+   * standalone の seed teardown / rootReducer echo が next を使う。用途は dev の HMR
+   * (reducer module の再評価) で、session・順序状態・middlewares・automations・
+   * listeners は据え置き。root の形 (syncedKey / locals の key) を変える差し替えは
+   * 対象外 (instance を作り直す)。store 側の replaceReducer は新 slice 初期化目的で任意。
+   * host として試し実行済み・未適用の裁定が残る間は反映を保留し、捌けた時点で反映する
+   * (host 自身の試し実行の結果 = snapshot / determinism の期待値と、host 自身の実適用を
+   * 同世代に保つ)。保証は host ローカルに限る — 各端末は配達された response をその時点の
+   * 自分の reducer で適用するため、差し替え窓を跨ぐ request は端末間で世代がずれ得る
+   * (端末ごとに反映される hot-swap の本質的な skew。determinism check は host 自身の
+   * 試し実行と適用の比較なのでこの skew は検出できない — 挙動を変える編集を跨いだ
+   * 疑いがあれば reload で正史へ復帰する dev 前提)。最後に渡した next だけが反映される
+   */
+  replaceRootReducer(next: Reducer<TRoot>): void
+
+  /**
    * presence 登録 → snapshot restore → requests 購読を開始する
    * standalone 時は transport に触れず localSnapshots から restore する
    * 返り値で購読破棄 + presence 解除。初期化中・購読中・teardown 中の再 subscribe は throw
@@ -465,6 +493,26 @@ export type SynquxChannelHandlers<TValue> = {
 export function createSynqux<TRoot, TSynced, TAction>(
   config: CreateSynquxConfig<TRoot, TSynced, TAction>,
 ): Synqux<TRoot, TAction, TSynced>
+
+// ============================================================
+// keepAcrossHmr (HMR 一式の片割れ、TASK-260904)
+// ============================================================
+
+/**
+ * bundler の hot context の data に singleton (instance / store) を保持し、module
+ * 再評価を跨いで同じものを返す。hot が undefined (本番 / HMR 無効) なら毎回 create。
+ * replaceReducers と対で使う (保持しなければ差し替え先がなく、差し替えなければ
+ * 保持した instance が旧 reducer のまま)。差し替えられるのは reducer のみで、
+ * middlewares / automations / listeners / transport の module 変更は hot.invalidate()
+ * で full reload させる (consumer 規約)。
+ * synqux 固有の知識を持たない汎用 util だが、consumer の HMR 定型を README で説明する
+ * 代わりに一式として配る (責務超過は承知の上、private 寄りライブラリとして許容)。
+ * bundler 固有型は import せず `{ data }` の構造型で受ける (Vite の ViteHotContext は
+ * data: any のためそのまま渡る)。前提は Vite の import.meta.hot のみ — webpack の
+ * module.hot は data が初回 undefined で引き継ぎも dispose 経由のため対象外
+ */
+export type HotContextLike = { data: Record<string, unknown> } | undefined
+export function keepAcrossHmr<T>(hot: HotContextLike, key: string, create: () => T): T
 
 // ============================================================
 // createSynquxRootReducer (Decision 8)
@@ -900,7 +948,7 @@ type SnapshotEnvelope<TSynced> = {
 
 | subpath | 主な export | 対象 |
 | --- | --- | --- |
-| `synqux` | `createSynqux` / `createSynquxRootReducer` / `synquxReducer` / `synquxRestored` / reducer helpers / `generateActionHash` / `defineSynqux` (定義フェーズ。creator registry / 配線 factory を持ち、`createSyncedAction` / `createSyncedSlice` / `isMySucceededResult` はこの戻りからのみ提供、ADR-0026) / `buildCreateLocalSlice` (locals slice の meta.root 型付け。TRoot が配線フェーズ生成物のため定義非経由の standalone、ADR-0027) / `isDeliveredSyncedAction` / `isSynquxAction` / `isResultForPeer` / `isSucceededResult` / peer・phase・health selectors / `localStorageSnapshotStore` / 契約型 (`SyncedActionMeta` / `SyncedAction` / `LocalAction` / `LocalActionOf` / `SyncedActionHash` / `SynquxChannel` / `SynquxChannelOptions` / `SynquxChannelHandlers` 含む。channel handle 自体は instance の `synqux.channel()` から取得、ADR-0028) | セットアップ層 + reducer ヘルパー + consumer 型語彙 |
+| `synqux` | `createSynqux` / `createSynquxRootReducer` / `keepAcrossHmr` (HMR 一式の片割れ: hot.data への instance 保持。`replaceReducers` と対、TASK-260904) / `synquxReducer` / `synquxRestored` / reducer helpers / `generateActionHash` / `defineSynqux` (定義フェーズ。creator registry / 配線 factory を持ち、`createSyncedAction` / `createSyncedSlice` / `isMySucceededResult` はこの戻りからのみ提供、ADR-0026) / `buildCreateLocalSlice` (locals slice の meta.root 型付け。TRoot が配線フェーズ生成物のため定義非経由の standalone、ADR-0027) / `isDeliveredSyncedAction` / `isSynquxAction` / `isResultForPeer` / `isSucceededResult` / peer・phase・health selectors / `localStorageSnapshotStore` / 契約型 (`SyncedActionMeta` / `SyncedAction` / `LocalAction` / `LocalActionOf` / `SyncedActionHash` / `SynquxChannel` / `SynquxChannelOptions` / `SynquxChannelHandlers` 含む。channel handle 自体は instance の `synqux.channel()` から取得、ADR-0028) | セットアップ層 + reducer ヘルパー + consumer 型語彙 |
 | `synqux/react` | `useSynquxSubscription` のみ (読み取りは core selectors を typed useAppSelector へ。ADR-0022 / ADR-0023) | ゲーム開発者層 |
 | `synqux/testing` | `createMemoryHub` / `verifyActionIdempotency` / `assertActionIdempotency` / `createTestRootState` | consumer CI / 本 repo の simulation test |
 | `synqux/firebase` | `firebaseTransport(db, options?: { archivePrunedRequests?: boolean })` | Phase 2 で実装 |

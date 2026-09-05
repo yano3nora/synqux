@@ -519,11 +519,27 @@ export type Synqux<
   reducer: Reducer<SynquxState>
 
   /**
-   * store 構築用の rootReducer (config で渡したものの echo)
+   * store 構築用の rootReducer (現在の判定器へ委譲する安定関数)
    * createSynquxRootReducer の spread 方式だと consumer の手元に rootReducer が
-   * 残らないため、configureStore への配線材料を instance 1 個に纏める
+   * 残らないため、configureStore への配線材料を instance 1 個に纏める。
+   * 参照は instance 生涯で不変で、replaceRootReducer 後も委譲先だけが変わる
+   * (この関数を store に配線していれば裁定側と適用側が構造的に同じ reducer を使う)
    */
   rootReducer: Reducer<TRoot>
+
+  /**
+   * 判定器 (rootReducer) を instance を生かしたまま差し替える。以後の host 試し
+   * 実行 / standalone の seed teardown / rootReducer echo が next を使う。
+   * 用途は dev の HMR (reducer module の再評価) — session・順序状態・middlewares・
+   * automations・listeners は据え置きで、差し替わるのは reducer だけ。
+   * root の形 (syncedKey / locals の key) を変える差し替えは対象外 (instance を
+   * 作り直す)。store 側の `replaceReducer` は新 slice の初期化目的で任意
+   * (echo を配線済みなら適用側は自動で追従する)。
+   * host として試し実行済み・未適用の裁定が残る間は反映を保留し、それらが
+   * 捌けた時点で反映する (試し実行の結果 = snapshot / determinism の期待値と、
+   * 実適用の reducer を同世代に保つため)。最後に渡した next だけが反映される
+   */
+  replaceRootReducer: (next: Reducer<TRoot>) => void
 
   /**
    * presence 登録 → snapshot restore → requests 購読を開始する
@@ -583,6 +599,20 @@ export const createSynqux = <
   config: CreateSynquxConfig<TRoot, TSynced, TAction>,
 ): Synqux<TRoot, TAction, TSynced> => {
   const { transport } = config
+  // 判定器は差し替え可能 (replaceRootReducer)。closure 内の全参照はこの変数経由。
+  // host の裁定は「試し実行 → respond (await) → snapshot 保存 (await) → 自端末
+  // 適用」と await を跨ぐため、その途中で差し替えると試し実行 (snapshot /
+  // determinism の期待値) と実適用の reducer が乖離する。試し実行済みで未適用の
+  // 裁定が残る間は差し替えを保留し、全て捌けた時点で反映する
+  let rootReducer: Reducer<TRoot> = config.rootReducer
+  let pendingRootReducer: Reducer<TRoot> | null = null
+  const inflightAdjudications = new Set<RequestEnvelope['id']>()
+  const settleRootReducer = (): void => {
+    if (inflightAdjudications.size === 0 && pendingRootReducer) {
+      rootReducer = pendingRootReducer
+      pendingRootReducer = null
+    }
+  }
   const channelEngine = createChannelEngine(transport)
   const instanceMode = config.mode ?? 'synced'
   const canRequest = config.canRequest ?? (() => true)
@@ -1488,9 +1518,12 @@ export const createSynqux = <
             delivery,
           )
 
+          // ここから fork 終了 (自端末適用 or 離脱) まで判定器の差し替えを保留する
+          inflightAdjudications.add(id)
+
           try {
             // reducer が唯一の判定器: rootReducer の試し実行で成否を判定する
-            const next = config.rootReducer(current, adjudicatedAction)
+            const next = rootReducer(current, adjudicatedAction)
             const result = config.selectSynced(next).result
 
             // snapshot へ載せる順序状態を ack await の「前」に評価固定する
@@ -1621,6 +1654,8 @@ export const createSynqux = <
         }
       } finally {
         hostForkActive.delete(id)
+        inflightAdjudications.delete(id)
+        settleRootReducer()
       }
     })
   }
@@ -2157,7 +2192,7 @@ export const createSynqux = <
           store.dispatch(
             synquxRestored({
               synced: config.selectSynced(
-                config.rootReducer(undefined, { type: 'synqux/seedProbe' }),
+                rootReducer(undefined, { type: 'synqux/seedProbe' }),
               ),
             }),
           )
@@ -2825,7 +2860,12 @@ export const createSynqux = <
       actionRequestMiddleware,
     ],
     reducer: synquxReducer,
-    rootReducer: config.rootReducer,
+    // 委譲 echo: store に配線される関数は不変のまま、差し替えは委譲先だけ変える
+    rootReducer: (state, action) => rootReducer(state, action),
+    replaceRootReducer: (next) => {
+      pendingRootReducer = next
+      settleRootReducer()
+    },
     subscribe,
     unsubscribe,
     dispatchAndWait,

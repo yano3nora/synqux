@@ -391,6 +391,35 @@ const unsubscribe = cursors.subscribe({
 - `cleanup: 'disconnect'` keys should be publisher-unique (typically the peer id). Default `'none'` retains values for the group's lifetime — deleting them when a group is discarded is the consumer's data lifecycle, like `connections/` and `requests/`.
 - Requires a transport with channel support (the bundled firebase transport and MemoryHub have it); a synced subscribe fails fast otherwise.
 
+### Hot-swap reducers in dev (`keepAcrossHmr` + `replaceReducers`)
+
+**Concept.** The host adjudicates with the reducer the instance holds, so re-creating the instance on every reducer edit (what naive Vite HMR does to a singleton `store.ts`) leaves a ghost session behind and forces a reload. The fix is a pair: `keepAcrossHmr(hot, key, create)` keeps the instance and the store in the bundler's `hot.data` across module re-evaluation, and `replaceReducers({ synced, locals })` swaps the judge in place — the session, ordering state, middlewares, automations, and listeners stay; only the reducer changes. `synqux.rootReducer` is a stable function that delegates to the current judge, so a store wired with it follows the swap automatically. While the host still has adjudications in flight (trial-run but not yet applied locally), the swap is held back and lands once they are applied, so on the host the trial result (the persisted snapshot and the determinism expectation) and the local application come from the same reducer generation. That guarantee is host-local: every device applies a delivered response with whatever reducer it holds at that moment, so a response adjudicated before the swap can still be applied by a not-yet-swapped (or already-swapped) client with the other generation — an inherent skew of hot-swapping across devices, not something the gate can close.
+
+```ts
+// store.ts — keep the singletons across HMR, swap only the reducers
+import { keepAcrossHmr } from 'synqux'
+
+export const synqux = keepAcrossHmr(import.meta.hot, 'synqux', () =>
+  createSynqux({ transport, synced: counterSlice.reducer, locals: { scenes: scenesReducer } }),
+)
+export const store = keepAcrossHmr(import.meta.hot, 'store', () =>
+  configureStore({ reducer: synqux.rootReducer, /* ... */ }),
+)
+
+if (import.meta.hot) {
+  // no-op on the first evaluation; on re-evaluation swaps in the freshly imported reducers.
+  // No store.replaceReducer needed: synqux.rootReducer delegates to the current judge
+  synqux.replaceReducers({ synced: counterSlice.reducer, locals: { scenes: scenesReducer } })
+  import.meta.hot.accept()
+}
+```
+
+**Behavior.**
+
+- Only the reducer is swappable. Edits to middlewares / automations / listeners / transport still need a full reload (`import.meta.hot.invalidate()` from the module that owns them is the honest way to say so).
+- The root shape (`syncedKey` and the `locals` keys) is fixed at wiring; adding or removing a local slice means re-creating the instance (reload). The `replaceReducers` input type is the same as the wiring config, so this is enforced statically.
+- Every device must run the same reducer version for adjudication and application to agree — that is a dev-only convenience, not a runtime upgrade path. Vite pushes one HMR update to every connected tab, but the swap still lands per device; a request that crosses that window with a behavior-changing edit can leave devices silently diverged (the determinism check only compares the host's own trial and application, so it cannot see this) — reload the tabs when in doubt. The core primitive is `synqux.replaceRootReducer(rootReducer)` for hand-wired stores.
+
 ### Run without sync (standalone)
 
 **Concept.** Standalone mode (`mode: 'standalone'`) runs the exact same reducers and dispatch flow on a single device, so a solo mode or an offline title screen needs no separate code path.
@@ -521,8 +550,9 @@ Setup layer (touched only by the single setup file in your template):
 
 | export | description |
 | --- | --- |
-| `createSynqux(config)` | Creates a sync instance (core / primitive form — the definition's wiring factory wraps this). Returns `middlewares` / `rootReducer` / `reducer` / `subscribe` / `unsubscribe` / `setRole` / `dispatchAndWait` / `channel` |
+| `createSynqux(config)` | Creates a sync instance (core / primitive form — the definition's wiring factory wraps this). Returns `middlewares` / `rootReducer` (a stable function delegating to the current judge) / `replaceRootReducer` (swap the judge in place, dev HMR) / `reducer` / `subscribe` / `unsubscribe` / `setRole` / `dispatchAndWait` / `channel` |
 | `createSynquxRootReducer({ isSyncedAction, syncedKey, synced, locals })` | Serial rootReducer helper ("synced is pure, locals see earlier stages"). Primitive-style helper — the definition's wiring phase calls this internally; use directly only with hand-wired stores. Takes a `syncedKey` plus a single synced reducer, auto-stamps a default success result on synced actions (ADR-0013), and returns `rootReducer` / `selectSynced` / `isSyncedAction` to spread into the core `createSynqux` config |
+| `keepAcrossHmr(hot, key, create)` | Keeps a singleton (the instance, the store) in the bundler's `hot.data` across module re-evaluation; creates it every time when `hot` is undefined (production). The other half of the dev HMR pair with `replaceReducers` — only reducers are swappable, other modules must `hot.invalidate()`. Takes a `{ data }` object structurally (Vite's `import.meta.hot`; webpack's `module.hot` is not supported — its `data` starts undefined and persists only via `dispose`) |
 | `localStorageSnapshotStore()` | Default browser persistence for standalone mode. Pass to `localSnapshots` to use or replace explicitly |
 | `synquxReducer` | Internal slice reducer mounted at the reserved key `state.synqux` (for the primitive wiring style) |
 | `synquxRestored` | Internal snapshot-restore action. Match it in a primitive-style rootReducer to swap in the full synced state (**never dispatch from a consumer**) |
@@ -532,7 +562,7 @@ Reducer helpers (game-developer layer; identical with or without sync):
 
 | export | description |
 | --- | --- |
-| `defineSynqux({ syncedKey }).withTypes<{ synced, message? }>()` | The definition phase (call once per app; `syncedKey` tells it — once — where the synced state mounts, and the root type is derived at wiring). Returns typed helpers plus the creator registry: `createSyncedSlice` (a `createSlice` whose actions are all synced actions) and `createSyncedAction` (a `createAction` for standalone / cross-slice actions) — both stamp `hash` (ulid) / `dispatched` at creation time, type `meta` as required, and register the type (the only ways to define synced actions, ADR-0024 / ADR-0026) — plus pre-bound result predicates, result helpers, and the wiring factory `createSynqux({ transport, synced, locals, ... })` |
+| `defineSynqux({ syncedKey }).withTypes<{ synced, message? }>()` | The definition phase (call once per app; `syncedKey` tells it — once — where the synced state mounts, and the root type is derived at wiring). Returns typed helpers plus the creator registry: `createSyncedSlice` (a `createSlice` whose actions are all synced actions) and `createSyncedAction` (a `createAction` for standalone / cross-slice actions) — both stamp `hash` (ulid) / `dispatched` at creation time, type `meta` as required, and register the type (the only ways to define synced actions, ADR-0024 / ADR-0026) — plus pre-bound result predicates, result helpers, and the wiring factory `createSynqux({ transport, synced, locals, ... })` (its instance adds `replaceReducers({ synced, locals })` for dev HMR — same input types as the wiring config) |
 | `buildCreateLocalSlice<TRoot, TMeta>()` | `createSlice` factory for locals slices (ADR-0027). Runtime is RTK `createSlice` untouched; the type work makes `extraReducers` see `action.meta.root` (the post-apply root state) by **replacing** the meta's `root` (an intersection would collapse against the creators' `root?: any`). Bound once in the setup layer — `TRoot` is derived at wiring, so the definition structurally cannot supply it. Declared builder subset: `addCase` (creator / type string), `addMatcher` (guard / boolean), `addDefaultCase`; no `addAsyncThunk`. `TMeta` fields are not injected by synqux — declare them optional |
 | `isSucceededResult(synced)` / `isMySucceededResult(root)` | State predicates for "did the last applied synced action succeed / was it my request". `isSucceededResult` works in both synced (extraReducers matcher) and locals contexts — no hand-written hash comparison needed inside the same rootReducer chain. `isMySucceededResult` (from `defineSynqux` only) needs the root (`selfId` / mode), so it is structurally impossible to call from a synced reducer (determinism boundary). Pass the action being applied itself to `withResult` / `withErrorResult` / `generateResult` — the predicates rely on that contract |
 | `isDeliveredSyncedAction(action)` | Checks whether an action carries the complete request/response delivery metadata. Combine with the consumer's synced-domain matcher when needed |
