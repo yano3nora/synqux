@@ -530,8 +530,9 @@ export type Synqux<
   /**
    * 判定器 (rootReducer) を instance を生かしたまま差し替える。以後の host 試し
    * 実行 / standalone の seed teardown / rootReducer echo が next を使う。
-   * 用途は dev の HMR (reducer module の再評価) — session・順序状態・middlewares・
-   * automations・listeners は据え置きで、差し替わるのは reducer だけ。
+   * 用途は dev の HMR (reducer module の再評価) — session・順序状態・middlewares
+   * は据え置きで、ここで差し替わるのは reducer だけ (automations / listeners は
+   * replaceRules)。
    * root の形 (syncedKey / locals の key) を変える差し替えは対象外 (instance を
    * 作り直す)。store 側の `replaceReducer` は新 slice の初期化目的で任意
    * (echo を配線済みなら適用側は自動で追従する)。
@@ -540,6 +541,24 @@ export type Synqux<
    * 実適用の reducer を同世代に保つため)。最後に渡した next だけが反映される
    */
   replaceRootReducer: (next: Reducer<TRoot>) => void
+
+  /**
+   * automations / listeners を instance を生かしたまま差し替える (dev の HMR 用、
+   * TASK-260905)。省略した側は据え置き。validation (id 重複・retryMs・mode・
+   * scope・fire) は createSynqux と同じで、失敗は throw し何も差し替えない。
+   * - automations: session が live なら engine を再起動する。rule id ごとの
+   *   発行時刻は引き継ぐ (retryMs 内の再発行を避ける)。再起動直後に when を
+   *   満たす rule が発行され得るのは rejects-repeat 契約 (ADR-0007) の範囲内
+   * - listeners: 次の適用から新 rule 群で発火する。fire: 'persisted' で待機中の
+   *   効果は捕捉済みの旧 closure が 1 回走る
+   * middlewares / transport は据え置き (consumer 側で full reload に落とす)。
+   * method 記法なのは TSynced の variance 互換 (TSynced 省略 = never の注釈へ
+   * 代入可能) を保つため — property 記法だと引数の TSynced が反変で衝突する
+   */
+  replaceRules(next: {
+    automations?: SynquxAutomation<TSynced, TAction>[]
+    listeners?: SynquxListener<TSynced, TAction>[]
+  }): void
 
   /**
    * presence 登録 → snapshot restore → requests 購読を開始する
@@ -617,11 +636,68 @@ export const createSynqux = <
   const instanceMode = config.mode ?? 'synced'
   const canRequest = config.canRequest ?? (() => true)
   const stallAfterMs = config.stallAfterMs ?? 30_000
-  const automations = config.automations ?? []
-  const listeners = config.listeners ?? []
-  const hasAllScopeListeners = listeners.some(
+  // automations / listeners は差し替え可能 (replaceRules)。閉包内の参照は全て
+  // この変数経由。validation は create 時と差し替え時で同じ関数を通す
+  const validateAutomations = (
+    list: SynquxAutomation<TSynced, TAction>[],
+  ): void => {
+    const ids = new Set<string>()
+    for (const automation of list) {
+      if (ids.has(automation.id)) {
+        throw new Error(`Duplicate SynquxAutomation id: ${automation.id}`)
+      }
+      ids.add(automation.id)
+
+      if (
+        automation.retryMs !== undefined &&
+        (!Number.isFinite(automation.retryMs) || automation.retryMs <= 0)
+      ) {
+        throw new Error(
+          `SynquxAutomation retryMs must be a positive finite number: ${automation.id}`,
+        )
+      }
+    }
+  }
+  const validateListeners = (
+    list: SynquxListener<TSynced, TAction>[],
+  ): void => {
+    const ids = new Set<string>()
+    for (const listener of list) {
+      if (ids.has(listener.id)) {
+        throw new Error(`Duplicate SynquxListener id: ${listener.id}`)
+      }
+      ids.add(listener.id)
+
+      if (listener.mode !== 'host-only' && listener.mode !== 'everyone') {
+        throw new Error(`Invalid SynquxListener mode: ${String(listener.mode)}`)
+      }
+
+      if (
+        listener.scope !== undefined &&
+        listener.scope !== 'synced' &&
+        listener.scope !== 'all'
+      ) {
+        throw new Error(
+          `Invalid SynquxListener scope: ${String(listener.scope)}`,
+        )
+      }
+
+      if (
+        listener.fire !== undefined &&
+        listener.fire !== 'applied' &&
+        listener.fire !== 'persisted'
+      ) {
+        throw new Error(`Invalid SynquxListener fire: ${String(listener.fire)}`)
+      }
+    }
+  }
+  let automations = config.automations ?? []
+  let listeners = config.listeners ?? []
+  let hasAllScopeListeners = listeners.some(
     (listener) => listener.scope === 'all',
   )
+  validateAutomations(automations)
+  validateListeners(listeners)
   const instanceLocalSnapshots = (() => {
     if (config.localSnapshots === false) {
       return undefined
@@ -649,53 +725,6 @@ export const createSynqux = <
       return undefined
     }
   })()
-  const automationIds = new Set<string>()
-
-  for (const automation of automations) {
-    if (automationIds.has(automation.id)) {
-      throw new Error(`Duplicate SynquxAutomation id: ${automation.id}`)
-    }
-    automationIds.add(automation.id)
-
-    if (
-      automation.retryMs !== undefined &&
-      (!Number.isFinite(automation.retryMs) || automation.retryMs <= 0)
-    ) {
-      throw new Error(
-        `SynquxAutomation retryMs must be a positive finite number: ${automation.id}`,
-      )
-    }
-  }
-
-  const listenerIds = new Set<string>()
-
-  for (const listener of listeners) {
-    if (listenerIds.has(listener.id)) {
-      throw new Error(`Duplicate SynquxListener id: ${listener.id}`)
-    }
-    listenerIds.add(listener.id)
-
-    if (listener.mode !== 'host-only' && listener.mode !== 'everyone') {
-      throw new Error(`Invalid SynquxListener mode: ${String(listener.mode)}`)
-    }
-
-    if (
-      listener.scope !== undefined &&
-      listener.scope !== 'synced' &&
-      listener.scope !== 'all'
-    ) {
-      throw new Error(`Invalid SynquxListener scope: ${String(listener.scope)}`)
-    }
-
-    if (
-      listener.fire !== undefined &&
-      listener.fire !== 'applied' &&
-      listener.fire !== 'persisted'
-    ) {
-      throw new Error(`Invalid SynquxListener fire: ${String(listener.fire)}`)
-    }
-  }
-
   const hostLiveness =
     config.hostLiveness === false
       ? (false as const)
@@ -873,6 +902,8 @@ export const createSynqux = <
   // action 適用 middleware から、現在の subscribe session に属する engine だけを
   // 起こす。未 subscribe / unsubscribe 後は no-op に戻して session leak を防ぐ。
   let evaluateAutomationsAfterApply: () => void = () => undefined
+  // 起動中の automation engine。replaceRules が rule 群の差し替え後に再起動する
+  let automationEngine: { stop: () => void; restart: () => void } | null = null
 
   /** automations / listeners が共有する presence 由来の host 判定。 */
   const isSelfHost = (root: TRoot): boolean => {
@@ -1913,12 +1944,9 @@ export const createSynqux = <
      */
     const startAutomationEngine = (
       subscriptionSession: SubscriptionSession,
+      // replaceRules の再起動では発行時刻を引き継ぎ、retryMs 内の二重発行を避ける
+      lastIssuedAt = new Map<string, number>(),
     ): void => {
-      if (automations.length === 0) {
-        return
-      }
-
-      const lastIssuedAt = new Map<string, number>()
       let active = true
 
       const evaluate = async (): Promise<void> => {
@@ -2010,19 +2038,42 @@ export const createSynqux = <
       }
       evaluateAutomationsAfterApply = evaluateAfterApply
 
-      const tickMs = Math.min(
-        ...automations.map((automation) => automation.retryMs ?? 1000),
-      )
-      const timer = setInterval(() => void evaluate(), tickMs)
+      // rule 0 件でも engine は起動しておく (replaceRules で後から増えたとき
+      // evaluateAfterApply 経路で評価される)。interval だけ張らない
+      const timer =
+        automations.length === 0
+          ? null
+          : setInterval(
+              () => void evaluate(),
+              Math.min(
+                ...automations.map((automation) => automation.retryMs ?? 1000),
+              ),
+            )
 
-      cleanups.push(() => {
+      const stop = (): void => {
         // serverNow await 中の evaluation も、再開時の active 検査で発行を止める。
         active = false
-        clearInterval(timer)
-        lastIssuedAt.clear()
+        if (timer !== null) {
+          clearInterval(timer)
+        }
         if (evaluateAutomationsAfterApply === evaluateAfterApply) {
           evaluateAutomationsAfterApply = () => undefined
         }
+        if (automationEngine?.stop === stop) {
+          automationEngine = null
+        }
+      }
+      automationEngine = {
+        stop,
+        restart: () => {
+          stop()
+          startAutomationEngine(subscriptionSession, lastIssuedAt)
+        },
+      }
+
+      cleanups.push(() => {
+        stop()
+        lastIssuedAt.clear()
       })
     }
 
@@ -2865,6 +2916,26 @@ export const createSynqux = <
     replaceRootReducer: (next) => {
       pendingRootReducer = next
       settleRootReducer()
+    },
+    replaceRules: (next) => {
+      // 両方を先に検証してから差し替える (片側だけ入れ替わる中途半端を作らない)
+      if (next.automations) {
+        validateAutomations(next.automations)
+      }
+      if (next.listeners) {
+        validateListeners(next.listeners)
+      }
+      if (next.listeners) {
+        listeners = next.listeners
+        hasAllScopeListeners = listeners.some(
+          (listener) => listener.scope === 'all',
+        )
+      }
+      if (next.automations) {
+        automations = next.automations
+        // engine は session の live 遷移後にだけ存在する。未起動なら次の起動が新 rule 群を読む
+        automationEngine?.restart()
+      }
     },
     subscribe,
     unsubscribe,

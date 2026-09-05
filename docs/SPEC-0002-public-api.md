@@ -434,6 +434,20 @@ export type Synqux<TRoot, TAction = Action, TSynced = never> = {
   replaceRootReducer(next: Reducer<TRoot>): void
 
   /**
+   * automations / listeners を instance を生かしたまま差し替える (dev の HMR 用、TASK-260905)。
+   * 省略した側は据え置き。validation は createSynqux と同じで、失敗は throw し何も差し替えない。
+   * automations は session が live なら engine を再起動する (rule id ごとの発行時刻は引き継ぎ、
+   * retryMs 内の再発行を避ける。再起動直後に when を満たす rule が発行され得るのは
+   * rejects-repeat 契約 ADR-0007 の範囲内)。listeners は次の適用から新 rule 群で発火する
+   * (fire: 'persisted' で待機中の効果は捕捉済みの旧 closure が 1 回走る)。
+   * middlewares / transport は据え置き (consumer 側で full reload に落とす)
+   */
+  replaceRules(next: {
+    automations?: SynquxAutomation<TSynced, TAction>[]
+    listeners?: SynquxListener<TSynced, TAction>[]
+  }): void
+
+  /**
    * presence 登録 → snapshot restore → requests 購読を開始する
    * standalone 時は transport に触れず localSnapshots から restore する
    * 返り値で購読破棄 + presence 解除。初期化中・購読中・teardown 中の再 subscribe は throw
@@ -503,8 +517,10 @@ export function createSynqux<TRoot, TSynced, TAction>(
  * 再評価を跨いで同じものを返す。hot が undefined (本番 / HMR 無効) なら毎回 create。
  * replaceReducers と対で使う (保持しなければ差し替え先がなく、差し替えなければ
  * 保持した instance が旧 reducer のまま)。差し替えられるのは reducer のみで、
- * middlewares / automations / listeners / transport の module 変更は hot.invalidate()
- * で full reload させる (consumer 規約)。
+ * reducer は replaceReducers、automations / listeners は replaceRules で差し替え、
+ * middlewares / transport の module 変更は consumer 側 (bundler の server hook 等) で
+ * full reload に落とす (hot.invalidate() は importer へ伝播し直すだけで、self-accept の
+ * 配線 module で止まり full reload にならない)。
  * synqux 固有の知識を持たない汎用 util だが、consumer の HMR 定型を README で説明する
  * 代わりに一式として配る (責務超過は承知の上、private 寄りライブラリとして許容)。
  * bundler 固有型は import せず `{ data }` の構造型で受ける (Vite の ViteHotContext は

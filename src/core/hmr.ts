@@ -21,9 +21,11 @@ export type HotContextLike = { data: Record<string, unknown> } | undefined
  * hot.data[key] があればそれを、なければ create() して保持したうえで返す。
  *
  * 契約:
- * - 差し替えられるのは reducer だけ (`replaceReducers`)。middlewares / automations /
- *   listeners / transport を持つ module の変更は保持した instance に反映されない —
- *   その module では `hot.invalidate()` で full reload させること
+ * - 差し替えられるのは reducer (`replaceReducers`) と automations / listeners
+ *   (`replaceRules`)。middlewares / transport を持つ module の変更は保持した instance
+ *   に反映されない — consumer 側 (bundler の server hook 等) で full reload に落とすこと
+ *   (`hot.invalidate()` は importer へ伝播し直すだけで、self-accept の配線 module で
+ *   止まり full reload にならない)
  * - key は module 内で一意にする (hot.data は module 単位の名前空間)
  */
 export const keepAcrossHmr = <T>(

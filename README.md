@@ -400,23 +400,31 @@ const unsubscribe = cursors.subscribe({
 import { keepAcrossHmr } from 'synqux'
 
 export const synqux = keepAcrossHmr(import.meta.hot, 'synqux', () =>
-  createSynqux({ transport, synced: counterSlice.reducer, locals: { scenes: scenesReducer } }),
+  createSynqux({
+    transport,
+    synced: counterSlice.reducer,
+    locals: { scenes: scenesReducer },
+    automations: createAutomations(),
+    listeners: createListeners(),
+  }),
 )
 export const store = keepAcrossHmr(import.meta.hot, 'store', () =>
   configureStore({ reducer: synqux.rootReducer, /* ... */ }),
 )
 
 if (import.meta.hot) {
-  // no-op on the first evaluation; on re-evaluation swaps in the freshly imported reducers.
-  // No store.replaceReducer needed: synqux.rootReducer delegates to the current judge
+  // On the first evaluation this re-installs what createSynqux just received; on
+  // re-evaluation it swaps in the freshly imported modules. No store.replaceReducer
+  // needed: synqux.rootReducer delegates to the current judge
   synqux.replaceReducers({ synced: counterSlice.reducer, locals: { scenes: scenesReducer } })
+  synqux.replaceRules({ automations: createAutomations(), listeners: createListeners() })
   import.meta.hot.accept()
 }
 ```
 
 **Behavior.**
 
-- Only the reducer is swappable. Edits to middlewares / automations / listeners / transport still need a full reload (`import.meta.hot.invalidate()` from the module that owns them is the honest way to say so).
+- Reducers, automations, and listeners are swappable. `replaceRules` validates like `createSynqux` (throws and swaps nothing on a bad rule set), restarts the automation engine while a session is live (carrying each rule's last-issued time so nothing re-fires inside its `retryMs`), and applies the new listeners from the next applied action. Middlewares and the transport are baked into the store / instance — edits there still need a full reload. A server-side `hotUpdate` hook in `vite.config.ts` that sends `full-reload` for those files is the honest way to say so (an `import.meta.hot.invalidate()` only re-propagates to importers and stops at the next accepting boundary).
 - The root shape (`syncedKey` and the `locals` keys) is fixed at wiring; adding or removing a local slice means re-creating the instance (reload). The `replaceReducers` input type is the same as the wiring config, so this is enforced statically.
 - Every device must run the same reducer version for adjudication and application to agree — that is a dev-only convenience, not a runtime upgrade path. Vite pushes one HMR update to every connected tab, but the swap still lands per device; a request that crosses that window with a behavior-changing edit can leave devices silently diverged (the determinism check only compares the host's own trial and application, so it cannot see this) — reload the tabs when in doubt. The core primitive is `synqux.replaceRootReducer(rootReducer)` for hand-wired stores.
 
@@ -550,9 +558,9 @@ Setup layer (touched only by the single setup file in your template):
 
 | export | description |
 | --- | --- |
-| `createSynqux(config)` | Creates a sync instance (core / primitive form — the definition's wiring factory wraps this). Returns `middlewares` / `rootReducer` (a stable function delegating to the current judge) / `replaceRootReducer` (swap the judge in place, dev HMR) / `reducer` / `subscribe` / `unsubscribe` / `setRole` / `dispatchAndWait` / `channel` |
+| `createSynqux(config)` | Creates a sync instance (core / primitive form — the definition's wiring factory wraps this). Returns `middlewares` / `rootReducer` (a stable function delegating to the current judge) / `replaceRootReducer` (swap the judge in place, dev HMR) / `replaceRules({ automations?, listeners? })` (swap rule sets in place, dev HMR) / `reducer` / `subscribe` / `unsubscribe` / `setRole` / `dispatchAndWait` / `channel` |
 | `createSynquxRootReducer({ isSyncedAction, syncedKey, synced, locals })` | Serial rootReducer helper ("synced is pure, locals see earlier stages"). Primitive-style helper — the definition's wiring phase calls this internally; use directly only with hand-wired stores. Takes a `syncedKey` plus a single synced reducer, auto-stamps a default success result on synced actions (ADR-0013), and returns `rootReducer` / `selectSynced` / `isSyncedAction` to spread into the core `createSynqux` config |
-| `keepAcrossHmr(hot, key, create)` | Keeps a singleton (the instance, the store) in the bundler's `hot.data` across module re-evaluation; creates it every time when `hot` is undefined (production). The other half of the dev HMR pair with `replaceReducers` — only reducers are swappable, other modules must `hot.invalidate()`. Takes a `{ data }` object structurally (Vite's `import.meta.hot`; webpack's `module.hot` is not supported — its `data` starts undefined and persists only via `dispose`) |
+| `keepAcrossHmr(hot, key, create)` | Keeps a singleton (the instance, the store) in the bundler's `hot.data` across module re-evaluation; creates it every time when `hot` is undefined (production). The holder half of the dev HMR set with `replaceReducers` / `replaceRules` — reducers, automations, and listeners are swappable; middleware / transport modules need a full reload from the bundler side. Takes a `{ data }` object structurally (Vite's `import.meta.hot`; webpack's `module.hot` is not supported — its `data` starts undefined and persists only via `dispose`) |
 | `localStorageSnapshotStore()` | Default browser persistence for standalone mode. Pass to `localSnapshots` to use or replace explicitly |
 | `synquxReducer` | Internal slice reducer mounted at the reserved key `state.synqux` (for the primitive wiring style) |
 | `synquxRestored` | Internal snapshot-restore action. Match it in a primitive-style rootReducer to swap in the full synced state (**never dispatch from a consumer**) |
