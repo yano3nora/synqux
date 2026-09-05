@@ -20,4 +20,4 @@
 - xxx
 
 ### P2 — 文書・consumer 導入・コスト最適化
-- xxx
+- **append-only response による transaction 撤廃の検証** (ADR-0029 の代替案、TASK-260905-respond-cas の計測より)。respond CAS (`runTransaction` + `applyLocally: false` + ack 後の自己反映) は正しさを storage が保証する代わりに、host の裁定が「1 件につき transaction 1 RTT の直列」に律速される (emulator 実測: main の CPU 律速 4ms に対し request→裁定 81ms、上限 ≈17 req/s。実網では概ね 1/RTT)。代替として response を request node のフィールド上書きではなく `responses/{requestId}/{responsedBy}` 相当の子ノードへ plain `set()` で追記し (何も上書きしないので「未裁定として観測した caller が保存済み response を置換する」経路が構造的に消える)、勝者は `responsed: serverTimestamp()` (RTDB が server 時刻へ置換) の先着 + responsedBy tiebreak で読み手が決定的に選ぶ。local echo が戻るため main と同じ 0 RTT 律速に戻る見込み。検証項目: (1) memory hub で同一 request 多重 response の畳み込みと先着決定の simulation test (遅れ host の昇格・dual-host 同時応答・changed drop)、(2) 封筒 schema v4 (複数 response の形、`parseEnvelope` / responseListener / 敗者再裁定 / prune・archive / snapshot fence の再整理)、(3) core の barrier / read-back / 自己反映がそのまま流用できるかの確認、(4) demo storm で main / CAS / append-only の 3 者比較 (手順は TASK-260905-respond-cas)。同一 ms 内の同時応答は tiebreak に落ちる (既存 dual-host トレードオフと同クラス) 点を SPEC に明記できるかも判断する。core 側の変更が transport 契約に閉じるなら 0.x minor で差し替え可能
