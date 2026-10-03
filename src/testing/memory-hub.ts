@@ -1,6 +1,7 @@
 import {
   acceptsResponse,
   type ChannelValueHandlers,
+  type InspectionRecord,
   type Peer,
   type RequestEnvelope,
   type SnapshotFence,
@@ -57,6 +58,10 @@ export type MemoryHub = {
     peers(groupId: string): Peer[]
     snapshot(key: string): string | null
     snapshotFence(key: string): SnapshotFence | null
+    /** inspectResponse の記録 (契約 19)。responsed は hub の時計 */
+    inspections(
+      groupId: string,
+    ): (InspectionRecord & { id: RequestEnvelope['id']; responsed: number })[]
     /** channel の現在値 (key → payload 文字列)。ADR-0028 */
     channel(groupId: string, channel: string): Record<string, string>
   }
@@ -105,10 +110,14 @@ type Subscriber = PeerSubscriber | RequestSubscriber | ChannelSubscriber
 /** channel value の格納形。cleanupOwner は cleanup 'disconnect' の削除主 (契約 15) */
 type ChannelValue = { payload: string; cleanupOwner: Peer['id'] | null }
 
+/** inspectResponse の格納形。responsed は hub の時計で付ける (契約 19) */
+type StoredInspection = InspectionRecord & { responsed: number }
+
 type GroupState = {
   peers: Peer[]
   requests: RequestEnvelope[]
   channels: Map<string, Map<string, ChannelValue>>
+  inspections: Map<RequestEnvelope['id'], StoredInspection>
   peerSubscribers: PeerSubscriber[]
   requestSubscribers: RequestSubscriber[]
   channelSubscribers: ChannelSubscriber[]
@@ -238,6 +247,7 @@ export function createMemoryHub(): MemoryHub {
       peers: [],
       requests: [],
       channels: new Map(),
+      inspections: new Map(),
       peerSubscribers: [],
       requestSubscribers: [],
       channelSubscribers: [],
@@ -693,6 +703,11 @@ export function createMemoryHub(): MemoryHub {
         return snapshots.get(key)?.payload ?? null
       },
 
+      async inspectResponse(id, record) {
+        const { group } = assertConnected()
+        group.inspections.set(id, { ...clone(record), responsed: Date.now() })
+      },
+
       subscribeSnapshotFence(key, handler) {
         assertConnected()
         const subscriber: FenceSubscriber = { key, handler, active: true }
@@ -927,6 +942,13 @@ export function createMemoryHub(): MemoryHub {
       snapshotFence(key) {
         const stored = snapshots.get(key)
         return stored === undefined ? null : clone(stored.fence)
+      },
+
+      inspections(groupId) {
+        return [...getGroup(groupId).inspections].map(([id, record]) => ({
+          id,
+          ...clone(record),
+        }))
       },
 
       channel(groupId, channel) {

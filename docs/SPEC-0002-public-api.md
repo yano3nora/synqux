@@ -881,6 +881,13 @@ export type SynquxTransport = SnapshotStore & {
   /** 数値 seq < beforeSeq だけを requests から取り除く。未実装でも correctness は不変 */
   pruneRequests?(beforeSeq: number): Promise<void>
 
+  /**
+   * 裁定到達の調査記録 (契約 19、ADR-0030)。optional。request とは別の場所へ plain write し、
+   * responsed をサーバ採番時刻で付ける (端末時計・transaction 内の解決値は不可)。
+   * requests 購読へイベントを流さない。prune 対象外。失敗は reject してよく core が握りつぶす
+   */
+  inspectResponse?(id: string, record: { requested: number; responsedBy: Peer['id']; epoch: number; seq: number; snapshotBytes: number }): Promise<void>
+
   subscribeRequests(
     options: { after?: string },  // NOTE: core は v2 (seq 順序) では使わない。prune 済み transport 向けに残置 (ADR-0002 Decision 5)
     handlers: {
@@ -919,6 +926,7 @@ export type SynquxTransport = SnapshotStore & {
 | `pruneRequests` | `orderByChild('seq').endBefore(beforeSeq)` で取得し、seq なしをコード側で除外。既定は requests から物理削除、`archivePrunedRequests` 有効時は root-level multi-path `update()` で `logs/` へ原子的に退避 | なし |
 | `subscribeRequests` | `onChildAdded` / `onChildChanged` + `orderByKey().startAfter(after)` | `subscribe-requests.ts` / `game-requests-query.ts` |
 | `saveSnapshot` | `set(ref, payload)` (payload は文字列なので undefined 落ち・空配列消失が起きない) | `update-game-state.ts` |
+| `inspectResponse` | `inspections/{groupId}/{requestId}` へ `set({ ...record, responsed: serverTimestamp() })`。購読中の request node には書かない (サーバ採番値は推定値と確定値で changed を二重配送する)。契約 19、ADR-0030 | なし (移植元は暫定措置として同型の `inspections/` を後付け) |
 | `publishChannel` / `subscribeChannel` | `channels/{groupId}/{channel}/{key}` へ `set()` (cleanup 'disconnect' は set より先に `onDisconnect().remove()` を確定)。購読は `onChildAdded` / `onChildChanged` を onChanged へ畳み、`onChildRemoved` を onRemoved へ | `cursor-self.tsx` / `cursor-other.tsx` (RTDB 直書き) の一般化 (ADR-0028) |
 
 移植元で `subscribe-requests.ts` (firebase 層) に置かれていた at-least-once 対応 (added 重複破棄・裁定済み added の changed 振り分け) は、**core の受信ルーティングへ移した** (どの transport でも起きうる普遍的な問題のため)。prev チェーン由来の対応 (prevKey 補完等) は seq 化 (ADR-0002) で不要になり消滅
@@ -971,7 +979,7 @@ type SnapshotEnvelope<TSynced> = {
 
 | subpath | 主な export | 対象 |
 | --- | --- | --- |
-| `synqux` | `createSynqux` / `createSynquxRootReducer` / `keepAcrossHmr` (HMR 一式の片割れ: hot.data への instance 保持。`replaceReducers` と対、TASK-260904) / `synquxReducer` / `synquxRestored` / reducer helpers / `generateActionHash` / `defineSynqux` (定義フェーズ。creator registry / 配線 factory を持ち、`createSyncedAction` / `createSyncedSlice` / `isMySucceededResult` はこの戻りからのみ提供、ADR-0026) / `buildCreateLocalSlice` (locals slice の meta.root 型付け。TRoot が配線フェーズ生成物のため定義非経由の standalone、ADR-0027) / `isDeliveredSyncedAction` / `isSynquxAction` / `isResultForPeer` / `isSucceededResult` / peer・phase・health selectors / `localStorageSnapshotStore` / `acceptsResponse` (transport 契約 18 の CAS 判定。adapter 実装者向け、ADR-0029) / 契約型 (`SyncedActionMeta` / `SyncedAction` / `LocalAction` / `LocalActionOf` / `SyncedActionHash` / `SynquxChannel` / `SynquxChannelOptions` / `SynquxChannelHandlers` 含む。channel handle 自体は instance の `synqux.channel()` から取得、ADR-0028) | セットアップ層 + reducer ヘルパー + consumer 型語彙 |
+| `synqux` | `createSynqux` / `createSynquxRootReducer` / `keepAcrossHmr` (HMR 一式の片割れ: hot.data への instance 保持。`replaceReducers` と対、TASK-260904) / `synquxReducer` / `synquxRestored` / reducer helpers / `generateActionHash` / `defineSynqux` (定義フェーズ。creator registry / 配線 factory を持ち、`createSyncedAction` / `createSyncedSlice` / `isMySucceededResult` はこの戻りからのみ提供、ADR-0026) / `buildCreateLocalSlice` (locals slice の meta.root 型付け。TRoot が配線フェーズ生成物のため定義非経由の standalone、ADR-0027) / `isDeliveredSyncedAction` / `isSynquxAction` / `isResultForPeer` / `isSucceededResult` / peer・phase・health selectors / `localStorageSnapshotStore` / `acceptsResponse` (transport 契約 18 の CAS 判定。adapter 実装者向け、ADR-0029) / 契約型 (`SyncedActionMeta` / `SyncedAction` / `LocalAction` / `LocalActionOf` / `SyncedActionHash` / `SynquxChannel` / `SynquxChannelOptions` / `SynquxChannelHandlers` / `SynquxSnapshotPolicy` / `InspectionRecord` 含む。channel handle 自体は instance の `synqux.channel()` から取得、ADR-0028) | セットアップ層 + reducer ヘルパー + consumer 型語彙 |
 | `synqux/react` | `useSynquxSubscription` のみ (読み取りは core selectors を typed useAppSelector へ。ADR-0022 / ADR-0023) | ゲーム開発者層 |
 | `synqux/testing` | `createMemoryHub` / `verifyActionIdempotency` / `assertActionIdempotency` / `createTestRootState` | consumer CI / 本 repo の simulation test |
 | `synqux/firebase` | `firebaseTransport(db, options?: { archivePrunedRequests?: boolean })` | Phase 2 で実装 |

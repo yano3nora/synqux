@@ -297,6 +297,22 @@ export const acceptsResponse = (
 
 export type SnapshotFence = { epoch: number; appliedSeq: number }
 
+/**
+ * 裁定到達の調査記録 (契約 19、ADR-0030)。host が respond の commit 後に
+ * transport へ渡し、adapter がサーバ採番の `responsed` を付けて永続化する。
+ * `responsed - requested` が「request 登録から裁定のサーバ到着まで」で、
+ * host の上り socket の待ちを含む。correctness には使わない
+ */
+export type InspectionRecord = {
+  /** 封筒の requested (serverNow 基準の request 登録時刻) */
+  requested: number
+  responsedBy: Peer['id']
+  epoch: number
+  seq: number
+  /** 直前に commit した snapshot payload の byte 数 (未保存なら 0)。帯域の予測用 */
+  snapshotBytes: number
+}
+
 export type SnapshotStore = {
   /**
    * payload を不透明なまま fence と共に保存する条件付き書き込み。
@@ -407,6 +423,13 @@ export type SnapshotStore = {
  *    NOTE: 昇格時の catch-up barrier (ADR-0029 Decision 3) は best-effort で、
  *    昇格直後の loadSnapshot と契約 13 (fence 配送) で耐久化済み水位を知る。
  *    契約 13 未実装・購読停止中は昇格後の水位更新が止まる (CAS の不変条件は不変)
+ * 19.【inspectResponse (ADR-0030)】optional。裁定の調査記録 (InspectionRecord) を
+ *    request とは別の場所へ plain write し、`responsed` をサーバ採番時刻で付けること
+ *    (端末時計・transaction 内の解決値は不可 — 測りたいのは socket の待ちを含む
+ *    サーバ到着時刻)。requests 購読へイベントを流してはならない (購読中 node に
+ *    サーバ採番値を書くと推定値と確定値で changed が二重配送される)。失敗は
+ *    reject してよく、core は握りつぶす。prune の対象外で、物理削除は consumer の
+ *    data lifecycle (契約 15 の 'none' と同じ)
  */
 export type SynquxTransport = SnapshotStore & {
   /** presence 登録。selfId は transport が採番する */
@@ -501,6 +524,15 @@ export type SynquxTransport = SnapshotStore & {
     key: string,
     handler: (fence: SnapshotFence) => void,
   ): Unsubscribe
+
+  /**
+   * 裁定の調査記録の永続化 (契約 19、ADR-0030)。optional —
+   * 遅延の事後調査用で、correctness には使わない
+   */
+  inspectResponse?(
+    id: RequestEnvelope['id'],
+    record: InspectionRecord,
+  ): Promise<void>
 
   /**
    * channel への LWW 書き込み (契約 14-15、ADR-0028)。payload は core 直列化済み

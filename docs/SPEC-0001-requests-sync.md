@@ -48,6 +48,8 @@ synqux は、consumer が認証・認可した**協調的な非敵対クライ�
     - → 成否判定器は reducer ただ一つ。host / client / 同期なし (standalone) でロジックが分岐せず、reducer さえ堅牢なら同期しても壊れない
 - **snapshot と restore** — `src/core/snapshot.ts`, `src/core/create-synqux.ts` (`subscribe` / `persistSnapshot`)
     - host は request を 1 件処理するたびに synced state 全体を canonical JSON の封筒で永続化する (封筒には順序状態 = epoch / appliedSeq / 直近適用窓も載る)。ack 後、適用窓の外 (`seq < appliedSeq - 200`) を fire-and-forget で prune する (ADR-0005)。復帰端末は snapshot を復元してから残存 requests を全量購読し、適用済み分は seq で破棄して追いつく
+    - **保存の間引き** (ADR-0030): `createSynqux({ snapshot: { throttleMs, flushOn } })` で保存を window 内 1 回へ間引ける (既定は間引かない)。snapshot と respond は同じ socket を FIFO で流れるため、snapshot が大きく裁定が頻繁な group では host の上りに snapshot が積み上がり、respond が後ろに並んで非 host 端末の反映が遅れる。間引きは「保存 + 後処理 (watermark / prune)」を 1 run として leading + trailing で行い、後処理は commit した run の orderingState でのみ走る。unsubscribe は保留分を flush してから切断する。有効化の判断は inspections (下記) で行う
+    - **裁定到達の調査記録 (inspections)** (契約 19、ADR-0030): host は respond の commit 後に `transport.inspectResponse` で `{ requested, responsedBy, epoch, seq, snapshotBytes }` を残し、adapter が `responsed` をサーバ採番で付ける。`responsed - requested` が「request 登録から裁定のサーバ到着まで」で host の上りの待ちを含む。既定 on、`inspections: false` で omit。correctness には使わない
     - snapshot 保存は `(epoch, appliedSeq)` の辞書順 fence で原子的に条件書き込みし、旧 host の遅延書き込みを棄却して保存地点の単調性を保証する (ADR-0011)
     - restore は ordering の適用窓・適用済み id 集合を snapshot の内容で完全置換し、残存する未適用の裁定済み envelope を再評価する
     - subscribe 初期化は transactional に行う。途中失敗時は開始済みの presence・購読・Redux session を逆順に cleanup して元の error を rethrow し、同じ instance で再 subscribe できる状態へ戻す。並行初期化は最初の await 前に拒否する
@@ -126,6 +128,7 @@ tutorial は instance の `synqux.unsubscribe()` で現在の購読を破棄し�
 
 - **dual-host 窓の一時分岐**: presence 遅延で 2 端末が host を自認した窓 (host は最新接続端末のため、新規参加のたびに短時間開く) で、異なる request が同一 seq を得ることがある。窓は概ね「相手 host の snapshot が耐久化される前」に狭まる (catch-up barrier は best-effort、ADR-0029)。同一 request への同時応答は先勝ちで、後手は保存済み裁定を採用する (契約 18)。正史 (host + snapshot + 封筒の seq) は常に一本道で壊れず、未適用の端末は決定的 tiebreak で同じ勝者に合意し、敗者は再裁定で救済される。ただし**勝者到着前に敗者を適用してしまった端末**は、勝者を適用する機会を失い、敗者の再裁定 seq も適用済み扱いで破棄して stall する。この端末が host に昇格すると直列裁定ゲートにより群全体の裁定も止まる。sync health の snapshot restore は ordering を正史で完全置換して裁定済み envelope を再評価するため、再裁定 seq が restore snapshot より先にある場合も正史へ追いつき、群の裁定を再開する (再現: `src/core/recovery.test.ts`)
 - **敗者救済の範囲は直近適用窓 (200 件) まで**: 窓より古い敗者は正史との区別記録がなく、適用済み扱いで破棄される (v1 は敗者救済ゼロだったため純増の改善)
+- **snapshot 間引きの代償** (ADR-0030): `snapshot.throttleMs` を有効にすると、`fire: 'persisted'` の listener は window 分遅れて発火し (drop 上限 30s の半分未満に制限)、dual-host 窓は耐久化の遅れぶん伸びる。復帰時の再適用量も増えるが、retention は snapshot の ack 後にしか prune しないため復元不能にはならない。既定で間引かないのはこのため
 - **回復不能な seq gap はリロードが必要**: 配送欠落は requests 再購読、dual-host 早期適用は snapshot restore で自動回復する (ADR-0004)。各段階は 1 gap エピソードにつき 1 回だけで、snapshot が無い・自端末以下など 1 巡で戻れない場合は `unrecoverable` となる。この場合だけ consumer がリロードを案内する。遅着で gap が自然解消すれば `unrecoverable` からも `ok` へ戻る
 
 NOTE: `markApplied` を dispatch **前**へ前倒しする案は不可 (dispatch 失敗時にその seq が永久欠番となり全端末が停止する)。dispatch 直後 (同期) に行うのが正しい位置 — これにより「entity は消えたが appliedSeq が進んでいない」観測窓も消える。①′の処理中ガードは seq 待機ループの途中で立ててはいけない (待機中に fork が死ぬと誰もその request を処理できなくなる)。
@@ -167,7 +170,7 @@ NOTE: `markApplied` を dispatch **前**へ前倒しする案は不可 (dispatch
 3. ~~**host 採番の連番導入**~~ → **Phase 3 で対応済み** (ADR-0002)。②は機構ごと根絶
 4. ~~**同時操作の負荷実測**~~ → **Phase 3 で対応済み** (`src/core/protocol-latency.test.ts`)。イベント駆動化後は直列 2ms/req・migration 回復 10ms (v1 比 ~96x / ~51x)
 5. ~~**seq gap の検知・自動回復・consumer 通知**~~ → **sync health iteration 1 / 2 で対応済み** (ADR-0003 / ADR-0004)
-6. **snapshot 書き込み削減**: 全量 JSON set を N request ごとなどへ (帯域コストが問題化してから。policy 点は `persistSnapshot` に隔離済み)
+6. ~~**snapshot 書き込み削減**: 全量 JSON set を N request ごとなどへ~~ → **ADR-0030 で対応済み** (`snapshot.throttleMs` の時間 window 間引き、既定 off。帯域コストは移植元 consumer の本番で問題化)。1 回の重さ自体を減らす diff snapshot / state 分割は BACKLOG
 
 ## Trouble Shooting: 同期不具合の調査手順
 
@@ -176,10 +179,29 @@ requests / game state の export があれば、端末ログなしで大半を�
 **retention 導入後に requests export だけで遡れるのは「snapshot + 直近適用窓」まで**。既定の物理削除で運用する場合、全履歴が必要な事故調査では発生直後に export を取得すること。Firebase adapter の `archivePrunedRequests` を有効にした場合は、`logs/{groupId}` と `requests/{groupId}` の export を seq 順に結合すれば、prune 後も全量 replay 調査ができる。
 
 1. **requests export と state export を取る** (`requests/{gameId}` と `games/{gameId}`。state は JSON 文字列として格納されている点に注意)
-2. **まず requestedBy / responsedBy を見る**: 誰が操作し、誰が host だったか。複数プレイヤー交錯説・host migration の有無はここで数分で判定できる。`requested` と `responsed` (いずれも serverNow 基準、ADR-0008) の差で「依頼から裁定までの遅延」も export だけで確認できる
+2. **まず requestedBy / responsedBy を見る**: 誰が操作し、誰が host だったか。複数プレイヤー交錯説・host migration の有無はここで数分で判定できる。`requested` と `responsed` (いずれも serverNow 基準、ADR-0008) の差で「依頼から裁定までの遅延」も export だけで確認できる。ただしこの `responsed` は host 側の裁定時刻で、**socket の待ちを含まない**。反映遅延の調査は次の inspections を使う
 3. **封筒の `seq` を実適用順の正として使う**: push id 順や export の並びは信頼しない。seq 順で action を replay し、最終 state と一致するか確認する (一致すれば「記録された action が記録された順に 1 回ずつ適用された」ことが確定する)
 4. **異常データの照合**: 同一 seq の複数 request (→dual-host 窓。epoch/responsedBy で勝者を判定)、responsedBy が無い request (→host 不在で滞留)、`result.type` を確認する
 5. **ユーザ報告と突き合わせる**: UI は controlled で楽観更新なしのため、「画面に見えていた state」=「その端末の同期済み state」。request の payload は「ユーザが物理的に操作した対象」そのものなので、操作列から意図を復元できる
+
+### 反映遅延の調査: inspections の読み方 (ADR-0030)
+
+「全員の反映が数秒遅れる」「リロードした人だけ軽くなる」は host の上り帯域の症状 (リロードした端末は最新接続として host になり、local write の即時反映で遅れを感じなくなる)。`inspections/{groupId}` の export で確定する。
+
+1. `inspections/{groupId}` を export する (firebase console。prune されないので事故後でも残る)
+2. `responsed - requested` の p50 / p95 / max を出す。`responsed` はサーバ採番で、直前 snapshot の後ろに積まれた裁定の到着時刻 = host の上りの待ちを含む
+
+```sh
+python3 -c "
+import json
+d = json.load(open('inspections.json'))
+l = sorted(v['responsed'] - v['requested'] for v in d.values())
+print(len(l), 'p50', l[len(l) // 2], 'p95', l[int(len(l) * 0.95)], 'max', l[-1])
+"
+```
+
+3. **判定の目安**: p95 が 1000ms を越えていれば遅延が増えている。この値には直列裁定ゲートの待ちと時刻補正の誤差も含むため、`snapshotBytes` × 裁定レート (requests export の `requested` の分布) を並べて上り帯域が原因かを切り分ける。移植元 consumer は 160KB × 0.6 件/s ≈ 0.8Mbps で詰まった。**0.3Mbps 級なら `snapshot.throttleMs` の有効化を検討する** (ADR-0030 Decision 2 の代償を consumer が受け入れられる場合)
+4. 時間帯別に見るなら `requested` で分ける。host 交代の集中 (responsedBy の切り替わり) は「参加者がリロードで逃げた」痕跡
 
 ### 事例: reset reload 無限ループ (2026-08 消費 repo、ADR-0021)
 

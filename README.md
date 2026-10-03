@@ -391,6 +391,27 @@ const unsubscribe = cursors.subscribe({
 - `cleanup: 'disconnect'` keys should be publisher-unique (typically the peer id). Default `'none'` retains values for the group's lifetime — deleting them when a group is discarded is the consumer's data lifecycle, like `connections/` and `requests/`.
 - Requires a transport with channel support (the bundled firebase transport and MemoryHub have it); a synced subscribe fails fast otherwise.
 
+### Throttle snapshot writes and read the inspections (`snapshot` / `inspections`)
+
+**Concept.** The host persists the whole synced state as a snapshot after every adjudication. Snapshots and responses share one WebSocket (FIFO): when the snapshot is large and adjudications are frequent, the host's upstream fills with snapshot bytes and every response queues behind them, so **non-host devices see multi-second delays while the host feels instant** (ADR-0030). Two knobs: `inspections` (default on) records how long each adjudication took to reach the server, so you can see the problem coming; `snapshot.throttleMs` (default off) coalesces snapshot writes once you need it.
+
+```ts
+createSynqux({
+  // ...
+  inspections: true, // default. `false` omits the record (transports without inspectResponse skip silently)
+  snapshot: {
+    throttleMs: 5_000, // default 0 = persist on every adjudication. Leading + trailing inside the window
+    flushOn: (action) => action.type.startsWith('game/phase/'), // persist immediately for restore points
+  },
+})
+```
+
+**Behavior.**
+
+- Each inspection is `{ requested, responsed, responsedBy, epoch, seq, snapshotBytes }` where `responsed` is server-stamped on arrival (firebase: `inspections/{groupId}/{requestId}`). `responsed - requested` is the request-to-adjudication latency **including the host's upstream queue**; `snapshotBytes` × adjudication rate tells you how close you are to the host's upstream bandwidth before anyone complains. Reading procedure and thresholds: SPEC-0001 "Trouble Shooting".
+- Inspections are never pruned (a record is ~100 bytes); deleting them when a group is discarded is the consumer's data lifecycle, like `connections/`.
+- Throttling keeps the first write immediate and persists only the latest state at the end of each window; `flushOn` actions persist immediately; `unsubscribe` starts a pending write before disconnecting (it does not wait for the ack). Restore replays the responded requests after the snapshot, so a staler snapshot only means more replay. The cost: `fire: 'persisted'` listeners fire up to `throttleMs` later (hence the limit below half the 30s drop timeout), and the dual-host window widens by the same amount. Keep it off until inspections show a reason.
+
 ### Hot-swap reducers in dev (`keepAcrossHmr` + `replaceReducers`)
 
 **Concept.** The host adjudicates with the reducer the instance holds, so re-creating the instance on every reducer edit (what naive Vite HMR does to a singleton `store.ts`) leaves a ghost session behind and forces a reload. The fix is a pair: `keepAcrossHmr(hot, key, create)` keeps the instance and the store in the bundler's `hot.data` across module re-evaluation, and `replaceReducers({ synced, locals })` swaps the judge in place — the session, ordering state, middlewares, automations, and listeners stay; only the reducer changes. `synqux.rootReducer` is a stable function that delegates to the current judge, so a store wired with it follows the swap automatically. While the host still has adjudications in flight (trial-run but not yet applied locally), the swap is held back and lands once they are applied, so on the host the trial result (the persisted snapshot and the determinism expectation) and the local application come from the same reducer generation. That guarantee is host-local: every device applies a delivered response with whatever reducer it holds at that moment, so a response adjudicated before the swap can still be applied by a not-yet-swapped (or already-swapped) client with the other generation — an inherent skew of hot-swapping across devices, not something the gate can close.
@@ -442,6 +463,7 @@ if (import.meta.hot) {
 - In your RTDB rules, set `".indexOn": ["seq"]` on `requests/$groupId` for the retention query.
 - Design read/write authorization from Authentication and room membership yourself. Anonymous auth alone does not prevent access to other rooms or data tampering.
 - To keep full replay data after pruning, `firebaseTransport(db, { archivePrunedRequests: true })` moves pruned requests to `logs/`. `logs/` grows unbounded — the consumer owns its size and its deletion when a group is discarded.
+- `inspections/{groupId}` (adjudication latency records, ADR-0030) is written by default and never pruned. Export it when players report lag; delete it with the group.
 
 ### Typed `useSelector` / `useDispatch`
 
@@ -610,10 +632,12 @@ Types (all contract types are exported from the main entry):
 | `Synqux` / `CreateSynquxConfig` / `SynquxSubscribeOptions` | `createSynqux` return value / config / `subscribe` options |
 | `SynquxAutomation` | Rule type for the `automations` config (host-driven auto dispatch, ADR-0015) |
 | `SynquxListener` | Rule type for `listeners`; `scope: 'all'` opts into local actions (live-only, ADR-0017 / ADR-0020) |
+| `SynquxSnapshotPolicy` | Type for the `snapshot` config (`throttleMs` / `flushOn`, ADR-0030) |
+| `InspectionRecord` | What the host hands to `transport.inspectResponse` (contract 19, ADR-0030); the adapter adds the server-stamped `responsed` |
 | `SynquxRootState` / `SynquxState` / `PendingRequest` | Composed rootReducer state / internal slice state and pending request |
 | `SynquxChannel` / `SynquxChannelOptions` / `SynquxChannelHandlers` | High-frequency ephemeral channel handle / options / subscription handlers (handles come from the instance's `synqux.channel()`, ADR-0028) |
 | `ChannelCleanup` / `ChannelValueHandlers` | Channel cleanup policy (`'disconnect'` / `'none'`) and the adapter-facing subscription handler contract |
-| `SynquxTransport` / `RequestEnvelope` | Transport abstraction and request envelope (contract for adapter authors; channels add three optional methods) |
+| `SynquxTransport` / `RequestEnvelope` | Transport abstraction and request envelope (contract for adapter authors; channels add three optional methods, inspections one) |
 | `SnapshotStore` / `SnapshotFence` / `SnapshotEnvelope` | Snapshot persistence contract (fenced conditional writes) |
 | `Unsubscribe` | Unsubscribe function |
 

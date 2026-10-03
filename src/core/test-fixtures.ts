@@ -192,6 +192,8 @@ type ClientOptions = Partial<
     | 'onPhaseChanged'
     | 'onSubscribeFailed'
     | 'onUnrecoverable'
+    | 'snapshot'
+    | 'inspections'
   >
 >
 

@@ -65,6 +65,8 @@ const INVALID_GROUP_ID_CHARS = /[.#$/[\]\u0000-\u001f\u007f]/
  * - `logs/{groupId}/{requestId}` — prune 済み request の調査ログ (opt-in)
  * - `games/{groupId}` — fence と canonical JSON snapshot payload
  * - `channels/{groupId}/{channel}/{key}` — 裁定なし LWW KV (契約 14-16、ADR-0028)
+ * - `inspections/{groupId}/{requestId}` — 裁定到達の調査記録 (契約 19、ADR-0030)。
+ *   prune 対象外で、物理削除は consumer の data lifecycle
  *
  * 前提: firebase auth (匿名認証等) は consumer が transport 生成前に済ませること。
  * at-least-once の吸収 (重複・遅延・振り分け) は core の責務のため、この adapter は
@@ -114,6 +116,8 @@ export const firebaseTransport = (
   const requestsPath = (groupId: string) => `requests/${groupId}`
   const logsPath = (groupId: string) => `logs/${groupId}`
   const snapshotPath = (key: string) => `games/${key}`
+  const inspectionPath = (groupId: string, id: string) =>
+    `inspections/${groupId}/${id}`
   const channelValuePath = (groupId: string, channel: string, key: string) =>
     `channels/${groupId}/${channel}/${key}`
 
@@ -725,6 +729,18 @@ export const firebaseTransport = (
       const snap = await get(ref(db, snapshotPath(key)))
       const stored: unknown = snap.exists() ? snap.val() : null
       return isStoredSnapshot(stored) ? stored.payload : null
+    },
+
+    async inspectResponse(id, record) {
+      const { groupId } = requireSession()
+
+      // request node へは書かない (契約 19): 購読中の node にサーバ採番値を書くと
+      // host には推定値と確定値で child_changed が 2 回届く。誰も購読しない node へ
+      // plain set し、`responsed` はサーバ到着時刻で刻む
+      await set(ref(db, inspectionPath(groupId, id)), {
+        ...sanitize(record),
+        responsed: serverTimestamp(),
+      })
     },
 
     subscribeSnapshotFence(key, handler) {

@@ -960,6 +960,38 @@ describe('firebaseTransport', () => {
     )
   })
 
+  it('inspectResponse: inspections/{groupId}/{id} へ record とサーバ採番の responsed を set する (契約 19)', async () => {
+    h.pushKeys.push('conn-1')
+    const { transport, selfId } = await connect()
+
+    await transport.inspectResponse!('req-1', {
+      requested: 1_000,
+      responsedBy: selfId,
+      epoch: 1,
+      seq: 2,
+      snapshotBytes: 345,
+    })
+
+    const [target, value] = h.setMock.mock.calls.at(-1) as unknown as [
+      { path: string },
+      Record<string, unknown>,
+    ]
+    expect(target.path).toBe(`inspections/${GROUP_ID}/req-1`)
+    expect(value).toEqual({
+      requested: 1_000,
+      responsedBy: selfId,
+      epoch: 1,
+      seq: 2,
+      snapshotBytes: 345,
+      responsed: { '.sv': 'timestamp' },
+    })
+    // request node (requests/) へは書かない (購読中 node への二重 changed を避ける)
+    expect(h.updateMock).not.toHaveBeenCalledWith(
+      expect.objectContaining({ path: `requests/${GROUP_ID}/req-1` }),
+      expect.anything(),
+    )
+  })
+
   it('subscribeSnapshotFence: fence child を onValue 購読し、形の valid な値だけを配送する', async () => {
     h.pushKeys.push('conn-1')
     const { transport } = await connect()

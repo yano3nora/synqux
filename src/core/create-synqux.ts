@@ -24,6 +24,7 @@ import { deriveHostId } from './host.js'
 import { localStorageSnapshotStore } from './local-storage.js'
 import { isSynquxAction } from './matchers.js'
 import { selectIsHost, selectSelf } from './selectors.js'
+import { createSnapshotThrottle } from './snapshot-throttle.js'
 import {
   buildSnapshotPayload,
   canonicalStringify,
@@ -84,6 +85,9 @@ const PERSISTED_FIRE_TIMEOUT_MS = 30_000
  * 無限 retry は transport 障害時の帯域消費にしかならない (health 機構と同型の判断)
  */
 const CHECKPOINT_RETRY_DELAYS_MS = [1_000, 2_000, 4_000]
+
+/** snapshot payload の UTF-8 byte 数の計測用 (状態を持たない) */
+const UTF8_ENCODER = new TextEncoder()
 
 /** (epoch, appliedSeq) の辞書順比較。fencing (ADR-0011) と同一の順序 */
 const compareFence = (a: SnapshotFence, b: SnapshotFence): number =>
@@ -168,6 +172,12 @@ type SessionSyncState = {
    * 全量 restore で古い土台の控えを破棄する
    */
   expectedSyncedByRequest: Map<RequestEnvelope['id'], string>
+
+  /**
+   * この session で直前に commit した snapshot payload の UTF-8 byte 数
+   * (inspections の帯域予測用、ADR-0030)。session 寿命 — 別 group の値を持ち込まない
+   */
+  lastSnapshotBytes: number
 }
 
 const createSessionSyncState = (): SessionSyncState => ({
@@ -182,6 +192,7 @@ const createSessionSyncState = (): SessionSyncState => ({
   pendingStandalonePersisted: [],
   checkpointRunning: false,
   expectedSyncedByRequest: new Map(),
+  lastSnapshotBytes: 0,
 })
 
 const updatePersistedWatermark = (
@@ -389,6 +400,34 @@ export type CreateSynquxConfig<
    * dev モードで検出する。既定は NODE_ENV !== 'production'
    */
   devDeterminismCheck?: boolean
+
+  /**
+   * host の snapshot 保存 policy (ADR-0030)。既定は裁定ごとに全量保存。
+   * snapshot が大きく裁定が頻繁な group では、host の上り socket に snapshot が
+   * 積み上がり、同じ socket を通る respond まで遅れる (非 host 端末の反映遅延)。
+   * throttleMs で window 内 1 回へ間引く。有効化の判断は inspections の
+   * `snapshotBytes` × 裁定レートで行う (SPEC-0001 Trouble Shooting)
+   */
+  snapshot?: SynquxSnapshotPolicy<TAction>
+
+  /**
+   * 裁定到達の調査記録 (transport 契約 19、ADR-0030)。既定 true。transport が
+   * inspectResponse を持つときだけ書き、false で omit する
+   */
+  inspections?: boolean
+}
+
+export type SynquxSnapshotPolicy<TAction extends Action> = {
+  /**
+   * 保存を間引く window ms。既定 0 = 間引かない。先頭は即時保存し、window 内の
+   * 後続は最後の state だけを window 終了時に保存する。間引いた分は復帰時の
+   * requests 再適用で追いつく。上限は `fire: 'persisted'` の drop 上限 (30s) の
+   * 半分 — persisted listener の発火が window 分遅れるため
+   */
+  throttleMs?: number
+
+  /** 間引き中でも即時保存する action の述語 (期の確定など、復帰点にしたい裁定) */
+  flushOn?: (action: TAction) => boolean
 }
 
 export type SynquxHostLiveness = {
@@ -792,6 +831,22 @@ export const createSynqux = <
   const devDeterminismCheck =
     config.devDeterminismCheck ??
     (typeof process !== 'undefined' && process.env.NODE_ENV !== 'production')
+
+  // snapshot policy (ADR-0030)。throttle は instance 寿命 — 保留 run は裁定元
+  // session を閉包で捕捉し、session 跨ぎは run 側の同一性検査で無効化する
+  const snapshotThrottleMs = config.snapshot?.throttleMs ?? 0
+  if (
+    !Number.isFinite(snapshotThrottleMs) ||
+    snapshotThrottleMs < 0 ||
+    snapshotThrottleMs >= PERSISTED_FIRE_TIMEOUT_MS / 2
+  ) {
+    throw new Error(
+      `snapshot.throttleMs must be a finite number in [0, ${String(PERSISTED_FIRE_TIMEOUT_MS / 2)})`,
+    )
+  }
+  const snapshotFlushOn = config.snapshot?.flushOn ?? (() => false)
+  const snapshotThrottle = createSnapshotThrottle(snapshotThrottleMs)
+  const inspectionsEnabled = config.inspections ?? true
 
   const formatDivergedValue = (value: unknown): string => {
     const json = JSON.stringify(value)
@@ -1212,14 +1267,23 @@ export const createSynqux = <
       return false
     }
 
-    return transport.saveSnapshot(
-      session.groupId,
-      buildSnapshotPayload({ synced, ordering: orderingState }),
+    const persistingSession = session
+    const payload = buildSnapshotPayload({ synced, ordering: orderingState })
+    const saved = await transport.saveSnapshot(
+      persistingSession.groupId,
+      payload,
       {
         epoch: orderingState.epoch,
         appliedSeq: orderingState.appliedSeq,
       },
     )
+    if (saved) {
+      // 帯域の予測指標なので wire に載る UTF-8 の byte 数で持つ (string.length は
+      // UTF-16 code unit 数で、日本語を含む state では過小になる)
+      persistingSession.syncState.lastSnapshotBytes =
+        UTF8_ENCODER.encode(payload).byteLength
+    }
+    return saved
   }
 
   const persistLocalSnapshot = (root: TRoot): void => {
@@ -1793,6 +1857,26 @@ export const createSynqux = <
             })
           }
 
+          // 調査記録 (契約 19、ADR-0030): commit 済みの裁定だけを残す。snapshot の
+          // 保存より先に socket へ積むので、`responsed` は直前 snapshot の後ろに
+          // 並んだ到着時刻 = respond が受けた待ちの近似になる。失敗は握りつぶす
+          if (
+            inspectionsEnabled &&
+            transport.inspectResponse &&
+            adjudicationSession !== null &&
+            session === adjudicationSession // respond 待機中の再接続で別 group へ書かない
+          ) {
+            void transport
+              .inspectResponse(id, {
+                requested: entity.requested,
+                responsedBy,
+                epoch,
+                seq,
+                snapshotBytes: adjudicationSession.syncState.lastSnapshotBytes,
+              })
+              .catch(console.error)
+          }
+
           // 裁定元 session が生きているときだけ後処理へ進む。respondRequest の
           // await 中に session が替わっていたら、旧 state の保存 (persistSnapshot は
           // 現在の session.groupId へ書く) も watermark 反映も行わない
@@ -1801,43 +1885,62 @@ export const createSynqux = <
             adjudicationSession !== null &&
             session === adjudicationSession
           ) {
-            try {
-              const { next, orderingState } = successfulAdjudication
-              const snapshotSaved = await persistSnapshot(
-                config.selectSynced(next),
-                orderingState,
-              )
+            const { next, orderingState } = successfulAdjudication
+            const synced = config.selectSynced(next)
 
-              // stale snapshot + prune の組は復元不能を作るため、snapshot が
-              // 失敗した場合は同じ try 内の prune まで進めない。fenced-out 時も
-              // 自分の prune 線は保存済み snapshot と無関係に先行し得るため、
-              // 進むと stale snapshot + 封筒削除の復元不能を自ら作ってしまう。
-              // 保存 await 中に session が替わった場合も進めない — pruneRequests は
-              // 現在の transport 接続 (= 新 session の group) に束縛されるため、
-              // 旧裁定の閾値で無関係な group の requests を削ってしまう
-              if (snapshotSaved && session === adjudicationSession) {
-                // persisted watermark の情報源 (a): 自端末の committed resolve
-                // (ADR-0021 Decision 3)。裁定元 session の state にのみ反映する
-                updatePersistedWatermark(adjudicationSession.syncState, {
-                  epoch: orderingState.epoch,
-                  appliedSeq: orderingState.appliedSeq,
-                })
-                const beforeSeq = orderingState.appliedSeq - APPLIED_WINDOW_SIZE
-                if (
-                  beforeSeq > 1 &&
-                  beforeSeq > lastPrunedBeforeSeq &&
-                  transport.pruneRequests
-                ) {
-                  lastPrunedBeforeSeq = beforeSeq
-                  // retention は correctness のクリティカルパスではない。失敗時は
-                  // 後続 snapshot のより新しい閾値で再試行されるため待たない。
-                  void transport.pruneRequests(beforeSeq).catch(console.error)
-                }
+            // 保存 + 後処理を 1 つの run にして policy (間引き) へ渡す。保留中に
+            // 捨てられるのは古い state だけで、後処理は実際に commit した run の
+            // orderingState でのみ走る (trailing の prune 線が snapshot を追い越さない)
+            const commitSnapshot = async (): Promise<void> => {
+              // 保留中に session が替わっていたら旧 state を書かない (persistSnapshot
+              // は現在の session.groupId へ書く)。旧 host の遅延書き込み自体は
+              // fence が棄却する (ADR-0011)
+              if (session !== adjudicationSession) {
+                return
               }
-            } catch (postProcessError) {
-              // 確定済み response は後処理の成否にかかわらず変更しない
-              console.error(postProcessError)
+
+              try {
+                const snapshotSaved = await persistSnapshot(
+                  synced,
+                  orderingState,
+                )
+
+                // stale snapshot + prune の組は復元不能を作るため、snapshot が
+                // 失敗した場合は同じ try 内の prune まで進めない。fenced-out 時も
+                // 自分の prune 線は保存済み snapshot と無関係に先行し得るため、
+                // 進むと stale snapshot + 封筒削除の復元不能を自ら作ってしまう。
+                // 保存 await 中に session が替わった場合も進めない — pruneRequests は
+                // 現在の transport 接続 (= 新 session の group) に束縛されるため、
+                // 旧裁定の閾値で無関係な group の requests を削ってしまう
+                if (snapshotSaved && session === adjudicationSession) {
+                  // persisted watermark の情報源 (a): 自端末の committed resolve
+                  // (ADR-0021 Decision 3)。裁定元 session の state にのみ反映する
+                  updatePersistedWatermark(adjudicationSession.syncState, {
+                    epoch: orderingState.epoch,
+                    appliedSeq: orderingState.appliedSeq,
+                  })
+                  const beforeSeq =
+                    orderingState.appliedSeq - APPLIED_WINDOW_SIZE
+                  if (
+                    beforeSeq > 1 &&
+                    beforeSeq > lastPrunedBeforeSeq &&
+                    transport.pruneRequests
+                  ) {
+                    lastPrunedBeforeSeq = beforeSeq
+                    // retention は correctness のクリティカルパスではない。失敗時は
+                    // 後続 snapshot のより新しい閾値で再試行されるため待たない。
+                    void transport.pruneRequests(beforeSeq).catch(console.error)
+                  }
+                }
+              } catch (postProcessError) {
+                // 確定済み response は後処理の成否にかかわらず変更しない
+                console.error(postProcessError)
+              }
             }
+
+            await snapshotThrottle.schedule(commitSnapshot, {
+              immediate: snapshotFlushOn(entity.action as TAction),
+            })
           }
 
           // changed の適用完了まで fork を生存させ、敗者化も自ら再裁定する
@@ -2864,6 +2967,12 @@ export const createSynqux = <
       }
     }, HEALTH_CHECK_INTERVAL_MS)
     cleanups.push(() => clearInterval(healthTimer))
+
+    // 間引きで保留中の snapshot を、session と接続が生きているうちに transport へ
+    // 書き込み依頼する (ADR-0030)。host が普通に退室したときに最新の復帰点を残す
+    // ため。完了は待たない (従来の裁定ごと保存も teardown は待っていない。offline の
+    // firebase は set が settle せず teardown を塞ぐ)。失敗は run 内で握りつぶす
+    cleanups.push(() => snapshotThrottle.flush())
 
     // 最後に push = 逆順 teardown の先頭で立つ。以後に遅れて届く transport の
     // onError が、破棄済み session の store へ health を書き込むのを防ぐ
