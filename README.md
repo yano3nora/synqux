@@ -289,7 +289,7 @@ const synqux = createSynqux({
 
 - Evaluated at two points: **right after each synced action applies**, and **every `retryMs` (default 1000ms)**. While `when` stays true, the action is re-issued every `retryMs`.
 - `when` sees only synced state and server time. Local presentation state and locals are unavailable by design (blocked at the type level).
-- The engine does not guarantee exactly-once (a dual-host window can double-fire). Make the reducer reject the second application (`assertActionIdempotency` mode `'rejects-repeat'`), and use a message-less `withErrorResult` (log-only) for retry rejections to avoid UI noise.
+- The engine does not guarantee exactly-once (a dual-host window can double-fire). Make the reducer reject the second application (`assertActionIdempotency` mode `'rejects-repeat'`). Define the action with the `{ validate, mutate }` notation and the engine checks `validate` **before issuing**: a retry that would be rejected is never sent (ADR-0031). The engine warns once per rule when `validate` starts suppressing it (and again after it recovers), so a rule whose `when` stays true while `validate` always rejects is visible. The host still adjudicates by trial-running the reducer; the pre-check only filters requests that are already known to fail.
 - Host migration needs no handoff: the new host derives the same conclusion from state. Automations also run in standalone sessions — gate rules you want paused via a predicate on synced state (e.g. a tutorial flag).
 - **Rules are not ordered relative to each other.** One evaluation pass reads the synced state once and issues *all* of the rules whose `when` holds against it. In a synced session each request is then adjudicated on its own and actions apply in the host's `seq` order, but which of the co-issued requests gets a `seq` first is an unspecified race (transport arrival plus async scheduling inside the host). The `automations` array order is evaluation order only — never encode a sequence in it.
 - A rule may only return a synced action (anything else is skipped with a console error). That is the mechanism, not a restriction to work around: rules run on the host alone, so anything the other devices must see has to travel through synced state. Store the durable fact in synced state via a synced action (synced state and its snapshot are the record — request envelopes are pruned, and a device joining later restores from the snapshot without relying on a replay of the complete action history), let each device derive its local state from it deterministically in a locals `extraReducers`, and keep `listeners` (`mode: 'everyone'`) for best-effort live presentation only — listeners are live-phase, non-replayed, and not exactly-once.
@@ -496,7 +496,9 @@ Bind your domain types once in the setup layer, and feature developers write pla
 | `createAction` | `createSyncedAction` | standalone / cross-slice actions, consumed via `extraReducers` (on synced or locals slices) or builder composition |
 | `createSlice` (locals) | `buildCreateLocalSlice<TRoot, TMeta>()` | locals slices — same runtime as `createSlice`, but `extraReducers` sees `action.meta.root` fully typed (ADR-0027; bound once in the setup layer, not distributed by `defineSynqux` — see below) |
 
-Both stamp `hash` (a ulid, unique across all devices — safe to use as a record key in synced state) and `dispatched` **at creation time**, so `builder.addCase` infers `action.meta` as required. One creation = one intent: **never re-dispatch the same action object** — the machinery does not deduplicate it (the same identity would apply twice); call the creator again to retry (`dispatchAndWait` rejects a duplicate pending hash explicitly). `createSyncedSlice` supports plain case reducers and the `{ prepare, reducer }` notation; RTK 2.x callback creators (`create.asyncThunk` etc.) are not supported.
+Both stamp `hash` (a ulid, unique across all devices — safe to use as a record key in synced state) and `dispatched` **at creation time**, so `builder.addCase` infers `action.meta` as required. One creation = one intent: **never re-dispatch the same action object** — the machinery does not deduplicate it (the same identity would apply twice); call the creator again to retry (`dispatchAndWait` rejects a duplicate pending hash explicitly). `createSyncedSlice` supports plain case reducers, the `{ prepare, reducer }` notation, and the `{ validate, mutate }` notation below; RTK 2.x callback creators (`create.asyncThunk` etc.) are not supported.
+
+**Put rejections in `validate`, not in the reducer** (ADR-0031). The `{ validate?, mutate, prepare? }` notation splits a case into a pure rejection check and the mutation. `validate` returns `null` when the action can apply, or a rejection in the same shape as the `withErrorResult` option (`{ message?, log? }`); a plain string is shorthand for `{ log }`. The generated reducer passes that rejection to `withErrorResult` (so a `message` still reaches the UI when a conflicting request loses at adjudication), and runs `mutate` otherwise. The generated creator carries the same `validate`, so your UI disables a button and your playtest bot filters candidates with one function instead of copying the reducer's conditions. `validate` sees exactly the state the case reducer sees (never the root), and gets `meta` only when the host adjudicates or an automation pre-checks, so time-based conditions should read `meta?.dispatched` and pass when `meta` is absent. Locals slices (`buildCreateLocalSlice`) take the same notation with `validate(root, payload)`; such a case requires `meta.root` and throws without it (use `createTestRootState` in unit tests).
 
 The definition also holds the **creator registry**: defining an action via `createSyncedSlice` / `createSyncedAction` registers the type, and the wiring judges "is this a synced action" from that registry — no hand-written prefix predicate, no exclusion list. Two contracts follow:
 
@@ -546,12 +548,37 @@ builder.addCase(launchTalks, (state, action) => {
   action.meta.hash // required — no optional chaining, no custom narrow helper
 })
 
+// validate / mutate notation (ADR-0031): the rejection is callable from outside.
+export const doExperiment = createSyncedAction('game/experiments/do', {
+  validate: (state, payload: ExperimentPayload, meta) => {
+    if (!state.experiments.unlocked) return 'experiments are locked' // log only
+    if (state.experiments.done.includes(payload.id)) {
+      return { message: { text: 'already done' } } // shown when a conflicting request loses
+    }
+    if (meta && meta.dispatched > state.deadline) return 'past the deadline'
+    return null
+  },
+  mutate: (state, action) => {
+    state.experiments.done.push(action.payload)
+  },
+})
+builder.addCase(doExperiment, doExperiment.reducer) // wire it explicitly
+
+// UI and bots read the same function — no copied conditions:
+const rejection = doExperiment.validate(useSelector((s: RootState) => s.game), payload)
+<button disabled={rejection !== null} />
+
 // ...and locals slices follow synced actions with a typed meta.root:
 export const scenesSlice = createLocalSlice({
   name: 'scenes',
   initialState: scenesInitialState,
   reducers: {
     changeScene: (state, action: LocalAction<Scene>) => { /* ... */ },
+    // locals take the same notation; validate reads the root (it needs synced state)
+    openPanel: {
+      validate: (root, panel: PanelKey) => (root.game.phase === 'playing' ? null : 'not playing'),
+      mutate: (state, action) => { state.panel = action.payload },
+    },
   },
   extraReducers: (builder) => {
     builder.addCase(launchTalks, (state, action) => {
@@ -592,7 +619,7 @@ Reducer helpers (game-developer layer; identical with or without sync):
 
 | export | description |
 | --- | --- |
-| `defineSynqux({ syncedKey }).withTypes<{ synced, message? }>()` | The definition phase (call once per app; `syncedKey` tells it — once — where the synced state mounts, and the root type is derived at wiring). Returns typed helpers plus the creator registry: `createSyncedSlice` (a `createSlice` whose actions are all synced actions) and `createSyncedAction` (a `createAction` for standalone / cross-slice actions) — both stamp `hash` (ulid) / `dispatched` at creation time, type `meta` as required, and register the type (the only ways to define synced actions, ADR-0024 / ADR-0026) — plus pre-bound result predicates, result helpers, and the wiring factory `createSynqux({ transport, synced, locals, ... })` (its instance adds `replaceReducers({ synced, locals })` for dev HMR — same input types as the wiring config) |
+| `defineSynqux({ syncedKey }).withTypes<{ synced, message? }>()` | The definition phase (call once per app; `syncedKey` tells it — once — where the synced state mounts, and the root type is derived at wiring). Returns typed helpers plus the creator registry: `createSyncedSlice` (a `createSlice` whose actions are all synced actions) and `createSyncedAction` (a `createAction` for standalone / cross-slice actions) — both stamp `hash` (ulid) / `dispatched` at creation time, type `meta` as required, register the type (the only ways to define synced actions, ADR-0024 / ADR-0026), and accept the `{ validate?, mutate, prepare? }` notation whose creator exposes `validate` for UI / bots and whose automations are pre-checked before issuing (ADR-0031) — plus pre-bound result predicates, result helpers, and the wiring factory `createSynqux({ transport, synced, locals, ... })` (its instance adds `replaceReducers({ synced, locals })` for dev HMR — same input types as the wiring config) |
 | `buildCreateLocalSlice<TRoot, TMeta>()` | `createSlice` factory for locals slices (ADR-0027). Runtime is RTK `createSlice` untouched; the type work makes `extraReducers` see `action.meta.root` (the post-apply root state) by **replacing** the meta's `root` (an intersection would collapse against the creators' `root?: any`). Bound once in the setup layer — `TRoot` is derived at wiring, so the definition structurally cannot supply it. Declared builder subset: `addCase` (creator / type string), `addMatcher` (guard / boolean), `addDefaultCase`; no `addAsyncThunk`. `TMeta` fields are not injected by synqux — declare them optional |
 | `isSucceededResult(synced)` / `isMySucceededResult(root)` | State predicates for "did the last applied synced action succeed / was it my request". `isSucceededResult` works in both synced (extraReducers matcher) and locals contexts — no hand-written hash comparison needed inside the same rootReducer chain. `isMySucceededResult` (from `defineSynqux` only) needs the root (`selfId` / mode), so it is structurally impossible to call from a synced reducer (determinism boundary). Pass the action being applied itself to `withResult` / `withErrorResult` / `generateResult` — the predicates rely on that contract |
 | `isDeliveredSyncedAction(action)` | Checks whether an action carries the complete request/response delivery metadata. Combine with the consumer's synced-domain matcher when needed |

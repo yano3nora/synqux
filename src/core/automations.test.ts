@@ -9,6 +9,7 @@ import {
   type GameAction,
   type GameState,
 } from './test-fixtures.js'
+import type { SyncedActionMeta } from './action.js'
 import type { SynquxAutomation } from './create-synqux.js'
 import type { RequestEnvelope } from './types.js'
 
@@ -206,6 +207,109 @@ describe('automations', () => {
 
     expect(consoleError).toHaveBeenCalledWith(thrown)
     expect(client.store.getState().game.count).toBe(1)
+  })
+
+  it('validatorOf が拒否する間は発行せず lastIssuedAt も進めない。warn は遷移時 1 回だけ (ADR-0031)', async () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined)
+    let blocked = true
+    const validate = vi.fn(
+      (_synced: GameState, _payload: unknown, _meta?: SyncedActionMeta) =>
+        blocked ? 'blocked' : null,
+    )
+    const hub = createMemoryHub()
+    const client = createHubClient(hub, {
+      validatorOf: (type) => (type === 'game/increment' ? validate : undefined),
+      automations: [
+        {
+          id: 'always',
+          // interval を 1000ms にし、適用後の再評価 (evaluateAfterApply) と区別する
+          retryMs: 1000,
+          when: () => true,
+          action: () => ({ type: 'game/increment', payload: 1 }),
+        },
+      ],
+    })
+
+    const unsubscribe = await client.sync.subscribe({
+      store: client.store,
+      groupId: GROUP_ID,
+    })
+    await vi.advanceTimersByTimeAsync(1000)
+    await settle(5)
+
+    // 止まっている: request は流れず、warn は 1 回
+    expect(hub.inspect.requests(GROUP_ID)).toHaveLength(0)
+    expect(warn).toHaveBeenCalledTimes(1)
+    expect(warn.mock.calls[0]?.[0]).toContain('"always"')
+    expect(warn.mock.calls[0]?.[0]).toContain('blocked')
+
+    // pre-check の meta は実 request と同じ生成規則 (hash / dispatched / requestedBy)
+    const meta = validate.mock.lastCall?.[2]
+    expect(typeof meta?.hash).toBe('string')
+    expect(meta?.dispatched).toBe(START + 1000)
+    expect(meta?.requestedBy).toBe(
+      client.store.getState().synqux.connections.selfId,
+    )
+
+    // 止まり続けても warn は増えない
+    await vi.advanceTimersByTimeAsync(500)
+    expect(warn).toHaveBeenCalledTimes(1)
+    expect(hub.inspect.requests(GROUP_ID)).toHaveLength(0)
+
+    // 解除後、user の dispatch 適用で再評価される。止まっていた間に lastIssuedAt が
+    // 進んでいないので、retryMs (1000ms) を待たずに即発行される
+    blocked = false
+    client.store.dispatch({ type: 'game/increment', payload: 0 })
+    await settle(10)
+    expect(hub.inspect.requests(GROUP_ID)).toHaveLength(2)
+    expect(client.store.getState().game.count).toBe(1)
+
+    // 再び止まると、次の評価で遷移としてもう 1 回だけ warn する
+    blocked = true
+    await vi.advanceTimersByTimeAsync(1500)
+    await settle(5)
+    expect(warn).toHaveBeenCalledTimes(2)
+    await vi.advanceTimersByTimeAsync(1000)
+    expect(warn).toHaveBeenCalledTimes(2)
+    expect(hub.inspect.requests(GROUP_ID)).toHaveLength(2)
+
+    await unsubscribe()
+  })
+
+  it('validate が throw する rule は console.error して skip し、他 rule は動く', async () => {
+    const consoleError = vi
+      .spyOn(console, 'error')
+      .mockImplementation(() => undefined)
+    const thrown = new Error('validate failed')
+    const hub = createMemoryHub()
+    const client = createHubClient(hub, {
+      validatorOf: (type) =>
+        type === 'game/broken'
+          ? () => {
+              throw thrown
+            }
+          : undefined,
+      automations: [
+        incrementOnce({
+          id: 'broken',
+          action: () => ({ type: 'game/broken' }),
+        }),
+        incrementOnce(),
+      ],
+    })
+
+    const unsubscribe = await client.sync.subscribe({
+      store: client.store,
+      groupId: GROUP_ID,
+    })
+    await vi.advanceTimersByTimeAsync(100)
+    await settle(20)
+
+    expect(consoleError).toHaveBeenCalledWith(thrown)
+    expect(client.store.getState().game.count).toBe(1)
+    expect(hub.inspect.requests(GROUP_ID)).toHaveLength(1)
+
+    await unsubscribe()
   })
 
   it('automation id が重複していれば createSynqux が同期的に throw する', () => {
@@ -468,5 +572,83 @@ describe('automations 多段依存チェーン', () => {
     for (const client of [a, b, c]) {
       expectCompleted(client)
     }
+  })
+})
+
+describe('automations validate pre-check (ADR-0031)', () => {
+  beforeEach(() => {
+    vi.useFakeTimers()
+    vi.setSystemTime(START)
+  })
+
+  afterEach(() => {
+    vi.restoreAllMocks()
+    vi.useRealTimers()
+  })
+
+  it('standalone でも pre-check の dispatched と適用された action の dispatched が一致する', async () => {
+    const validate = vi.fn(
+      (_synced: GameState, _payload: unknown, _meta?: SyncedActionMeta) => null,
+    )
+    const hub = createMemoryHub()
+    const client = createHubClient(hub, {
+      mode: 'standalone',
+      validatorOf: () => validate,
+      automations: [
+        incrementOnce({
+          // consumer が焼いた古い dispatched は now で上書きされる
+          action: () => ({
+            type: 'game/increment-once',
+            meta: { hash: 'fixed-hash', dispatched: 0 },
+          }),
+        }),
+      ],
+    })
+
+    const unsubscribe = await client.sync.subscribe({
+      store: client.store,
+      groupId: GROUP_ID,
+    })
+    await vi.advanceTimersByTimeAsync(100)
+    await settle(5)
+
+    const game = client.store.getState().game
+    expect(game.count).toBe(1)
+    const applied = game.result?.action.meta
+    expect(applied?.hash).toBe('fixed-hash')
+    expect(applied?.dispatched).toBe(validate.mock.lastCall?.[2]?.dispatched)
+    expect(applied?.dispatched).toBeGreaterThanOrEqual(START)
+
+    await unsubscribe()
+  })
+
+  it('replaceRules で消した rule を同じ id で戻すと、拒否中なら初回 warn が再び出る', async () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined)
+    const hub = createMemoryHub()
+    const rule = incrementOnce({
+      id: 'blocked',
+      when: () => true,
+      action: () => ({ type: 'game/increment', payload: 1 }),
+    })
+    const client = createHubClient(hub, {
+      validatorOf: (type) =>
+        type === 'game/increment' ? () => 'blocked' : undefined,
+      automations: [rule],
+    })
+
+    const unsubscribe = await client.sync.subscribe({
+      store: client.store,
+      groupId: GROUP_ID,
+    })
+    await vi.advanceTimersByTimeAsync(100)
+    expect(warn).toHaveBeenCalledTimes(1)
+
+    client.sync.replaceRules({ automations: [] })
+    client.sync.replaceRules({ automations: [rule] })
+    await vi.advanceTimersByTimeAsync(100)
+    expect(warn).toHaveBeenCalledTimes(2)
+    expect(hub.inspect.requests(GROUP_ID)).toHaveLength(0)
+
+    await unsubscribe()
   })
 })

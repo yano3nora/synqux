@@ -1,5 +1,6 @@
 import type { Reducer } from '@reduxjs/toolkit'
-import { describe, expect, expectTypeOf, it } from 'vitest'
+import { afterEach, describe, expect, expectTypeOf, it, vi } from 'vitest'
+import { createTestRootState } from '../testing/root-state.js'
 import type { LocalAction, SyncedAction } from './action.js'
 import { defineSynqux } from './define-synqux.js'
 import {
@@ -251,5 +252,178 @@ describe('buildCreateLocalSlice', () => {
     expectTypeOf<Derived>().toEqualTypeOf<
       LocalAction<number, TestRoot, TestMeta>
     >()
+  })
+})
+
+describe('buildCreateLocalSlice validate / mutate 記法 (ADR-0031)', () => {
+  afterEach(() => {
+    vi.restoreAllMocks()
+  })
+
+  const slice = createLocalSlice({
+    name: 'validated-panel',
+    initialState: panelInitialState,
+    reducers: {
+      set: {
+        validate: (root, payload: number) =>
+          root.counter.count < payload ? 'not enough' : null,
+        mutate: (state, action) => {
+          state.seen = action.payload
+        },
+      },
+      reset: {
+        mutate: (state) => {
+          state.seen = 0
+        },
+      },
+      plain: (state) => {
+        state.seen = 1
+      },
+      launch: {
+        prepare: (value: string) => ({
+          payload: Number(value),
+          meta: { throttleless: true as const },
+        }),
+        validate: (_root, payload) => (payload < 0 ? 'negative' : null),
+        mutate: (state, action) => {
+          state.seen = action.payload
+        },
+      },
+    },
+  })
+
+  const rootWithCount = (count: number) =>
+    createTestRootState<TestRoot>({
+      counter: { ...counterInitialState, count },
+      panel: panelInitialState,
+    })
+
+  it('validate は root を受け、拒否時は state を変えず result も console 出力も無い', () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined)
+    const error = vi.spyOn(console, 'error').mockImplementation(() => undefined)
+
+    expect(slice.actions.set.validate(rootWithCount(0), 1)).toBe('not enough')
+
+    const rejected = slice.reducer(undefined, {
+      ...slice.actions.set(1),
+      meta: { root: rootWithCount(0) },
+    })
+    expect(rejected).toBe(panelInitialState)
+    expect(rejected).not.toHaveProperty('result')
+    expect(warn).not.toHaveBeenCalled()
+    expect(error).not.toHaveBeenCalled()
+  })
+
+  it('validate が null なら mutate を適用する (createTestRootState の root で単体実行)', () => {
+    expect(
+      slice.reducer(undefined, {
+        ...slice.actions.set(2),
+        meta: { root: rootWithCount(3) },
+      }).seen,
+    ).toBe(2)
+    expect(
+      slice.reducer(undefined, {
+        ...slice.actions.launch('3'),
+        meta: { root: rootWithCount(3) },
+      }).seen,
+    ).toBe(3)
+    expectTypeOf(slice.actions.launch).parameters.toEqualTypeOf<
+      [value: string]
+    >()
+  })
+
+  it('rootReducer 配下では meta.root が注入され、適用後の synced で判定する', () => {
+    const wiring = createSynquxRootReducer({
+      isSyncedAction: kit.isSyncedAction,
+      syncedKey: 'counter',
+      synced: counterReducer,
+      locals: { panel: slice.reducer },
+    })
+
+    let root = wiring.rootReducer(undefined, { type: '@@INIT' })
+    root = wiring.rootReducer(root, slice.actions.set(1))
+    expect(root.panel.seen).toBe(-1)
+
+    root = wiring.rootReducer(root, boost(3))
+    root = wiring.rootReducer(root, slice.actions.set(2))
+    expect(root.panel.seen).toBe(2)
+  })
+
+  it('validate を持つ case は meta.root 無しで throw する (fail-fast)', () => {
+    expect(() => slice.reducer(undefined, slice.actions.set(1))).toThrow(
+      'requires meta.root',
+    )
+  })
+
+  it('validate 省略時は root を要求せず、validate は常に null', () => {
+    expect(slice.actions.reset.validate({} as TestRoot, undefined)).toBe(null)
+    expect(slice.reducer(undefined, slice.actions.reset()).seen).toBe(0)
+  })
+
+  it('型: creator の validate は TRoot / P で型付けされ、plain 記法には無い', () => {
+    expectTypeOf(slice.actions.set.validate)
+      .parameter(0)
+      .toEqualTypeOf<TestRoot>()
+    expectTypeOf(slice.actions.set.validate).parameter(1).toBeNumber()
+    expectTypeOf(slice.actions.set).parameters.toEqualTypeOf<
+      [payload: number]
+    >()
+    // RTK の ActionCreatorWithoutPayload (引数 void) に写る
+    expectTypeOf(slice.actions.reset).toBeCallableWith()
+    expectTypeOf(slice.actions.plain).not.toHaveProperty('validate')
+  })
+
+  it('型: validate と mutate の payload 注釈の食い違いは型エラー', () => {
+    const mismatch = createLocalSlice({
+      name: 'mismatch',
+      initialState: panelInitialState,
+      reducers: {
+        bad: {
+          validate: (_root, _payload: number) => null,
+          // @ts-expect-error validate の number と mutate の string が食い違う
+          mutate: (_state, _action: LocalAction<string, TestRoot>) => {},
+        },
+      },
+    })
+    expect(mismatch.name).toBe('mismatch')
+  })
+})
+
+describe('buildCreateLocalSlice validate / mutate 記法 (primitive state)', () => {
+  it('primitive state でも拒否は state を返す (RTK は undefined 返却を throw する)', () => {
+    const counter = createLocalSlice({
+      name: 'primitive',
+      initialState: 0,
+      reducers: {
+        set: {
+          validate: (root, payload: number) =>
+            root.counter.count < payload ? 'not enough' : null,
+          mutate: (_state, action) => action.payload,
+        },
+      },
+    })
+    const root = createTestRootState<TestRoot>({
+      counter: counterInitialState,
+      panel: panelInitialState,
+    })
+
+    expect(
+      counter.reducer(5, { ...counter.actions.set(1), meta: { root } }),
+    ).toBe(5)
+  })
+
+  it('型: prepare 付きは prepare の payload を validate / mutate に押し付ける', () => {
+    const mismatch = createLocalSlice({
+      name: 'prepared-mismatch',
+      initialState: panelInitialState,
+      reducers: {
+        bad: {
+          prepare: (value: string) => ({ payload: Number(value) }),
+          // @ts-expect-error prepare の number と mutate の string が食い違う
+          mutate: (_state, _action: LocalAction<string, TestRoot>) => {},
+        },
+      },
+    })
+    expect(mismatch.name).toBe('prepared-mismatch')
   })
 })

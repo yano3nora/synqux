@@ -14,7 +14,7 @@ import {
   vi,
 } from 'vitest'
 import { createMemoryHub } from '../testing/memory-hub.js'
-import type { LocalAction, SyncedActionMeta } from './action.js'
+import type { LocalAction, SyncedAction, SyncedActionMeta } from './action.js'
 import { defineSynqux } from './define-synqux.js'
 import { settle } from './test-fixtures.js'
 import type { SynquxState } from './slice.js'
@@ -262,5 +262,164 @@ describe('defineSynqux (end-to-end)', () => {
     })
 
     expect(localsSlice.reducer(undefined, { type: 'noop' }).seen).toBe(0)
+  })
+})
+
+describe('defineSynqux validate / mutate 記法 (ADR-0031)', () => {
+  beforeEach(() => {
+    vi.useFakeTimers()
+    vi.setSystemTime(new Date('2026-10-12T00:00:00.000Z'))
+  })
+
+  afterEach(() => {
+    vi.restoreAllMocks()
+    vi.useRealTimers()
+  })
+
+  const createValidatedClient = (
+    hub: ReturnType<typeof createMemoryHub>,
+    options?: {
+      automations?: Parameters<typeof definition.createSynqux>[0]['automations']
+    },
+  ) => {
+    const own = defineSynqux({ syncedKey: 'game' }).withTypes<{
+      synced: CountState
+    }>()
+    const add = own.createSyncedAction('game/increment', {
+      validate: (state, payload: number) => {
+        expectTypeOf(state).toEqualTypeOf<CountState>()
+        if (state.count + payload > 10) return 'over'
+        if (payload === 0) return { message: { text: 'zero' } }
+        return null
+      },
+      mutate: (state, action) => {
+        state.count += action.payload
+      },
+    })
+    const slice = createSlice({
+      name: 'game',
+      initialState: { result: null, count: 0 } as CountState,
+      reducers: {},
+      // 配線は consumer が明示する (自動配線しない)
+      extraReducers: (builder) => {
+        builder.addCase(add, add.reducer)
+      },
+    })
+    const sync = own.createSynqux({
+      transport: hub.createTransport(),
+      synced: slice.reducer,
+      locals: {},
+      automations: options?.automations,
+    })
+    const store = configureStore({
+      reducer: sync.rootReducer,
+      middleware: (getDefaultMiddleware) =>
+        getDefaultMiddleware().prepend(...sync.middlewares),
+    })
+
+    return { add, sync, store }
+  }
+
+  it('createSyncedAction の creator は validate / reducer を持ち、host 裁定で拒否と受理が分かれる', async () => {
+    const consoleError = vi
+      .spyOn(console, 'error')
+      .mockImplementation(() => undefined)
+    const hub = createMemoryHub()
+    const { add, sync, store } = createValidatedClient(hub)
+    expectTypeOf(add).parameters.toEqualTypeOf<[payload: number]>()
+    expect(add.validate({ result: null, count: 0 }, 11)).toBe('over')
+
+    const unsubscribe = await sync.subscribe({ store, groupId: 'validated' })
+
+    // string の拒否: log 専用 (state は不変、console.error に理由)
+    store.dispatch(add(11))
+    await settle()
+    expect(store.getState().game.count).toBe(0)
+    expect(consoleError).toHaveBeenCalledWith('over')
+
+    // object の拒否: message 付き error result が端末へ届く
+    store.dispatch(add(0))
+    await settle()
+    expect(store.getState().game.count).toBe(0)
+    expect(store.getState().game.result).toMatchObject({
+      type: 'error',
+      message: { text: 'zero' },
+    })
+
+    store.dispatch(add(2))
+    await settle()
+    expect(store.getState().game.count).toBe(2)
+    expect(store.getState().game.result?.type).toBe('success')
+
+    await unsubscribe()
+  })
+
+  it('定義の registry が automations の発行前判定へ配線され、拒否される request は流れない', async () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined)
+    const hub = createMemoryHub()
+    const { sync, store } = createValidatedClient(hub, {
+      automations: [
+        {
+          id: 'over',
+          retryMs: 100,
+          when: () => true,
+          action: () => ({
+            type: 'game/increment',
+            payload: 11,
+            meta: { hash: 'auto', dispatched: 0 },
+          }),
+        },
+      ],
+    })
+
+    const unsubscribe = await sync.subscribe({ store, groupId: 'auto' })
+    await vi.advanceTimersByTimeAsync(350)
+    await settle()
+
+    expect(hub.inspect.requests('auto')).toHaveLength(0)
+    expect(warn).toHaveBeenCalledTimes(1)
+    expect(warn.mock.calls[0]?.[0]).toContain('over')
+
+    await unsubscribe()
+  })
+
+  it('型: prepare 付きは prepare が payload を決め、validate のみ / mutate のみでも推論する', () => {
+    const own = defineSynqux({ syncedKey: 'game' }).withTypes<{
+      synced: CountState
+    }>()
+
+    const prepared = own.createSyncedAction('game/prepared', {
+      prepare: (label: string, value: number) => ({
+        payload: value,
+        meta: { label },
+      }),
+      validate: (_state, payload) => {
+        expectTypeOf(payload).toBeNumber()
+        return payload < 0 ? 'negative' : null
+      },
+      mutate: (state, action) => {
+        expectTypeOf(action.payload).toBeNumber()
+        state.count += action.payload
+      },
+    })
+    expectTypeOf(prepared).parameters.toEqualTypeOf<
+      [label: string, value: number]
+    >()
+    expect(prepared('x', 2).meta.label).toBe('x')
+    expect(prepared.validate({ result: null, count: 0 }, -1)).toBe('negative')
+
+    const mutateOnly = own.createSyncedAction('game/mutate-only', {
+      mutate: (state, action: SyncedAction<number>) => {
+        state.count += action.payload
+      },
+    })
+    expectTypeOf(mutateOnly).parameters.toEqualTypeOf<[payload: number]>()
+    expect(mutateOnly.validate({ result: null, count: 0 }, 2)).toBe(null)
+
+    // @ts-expect-error validate の number と mutate の string が食い違う (overload 不一致)
+    own.createSyncedAction('game/mismatch', {
+      validate: (_state, _payload: number) => null,
+      mutate: (_state, _action: SyncedAction<string>) => {},
+    })
   })
 })

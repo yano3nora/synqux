@@ -1,11 +1,13 @@
 import {
   createAction,
   type ActionCreatorWithPreparedPayload,
+  type Draft,
   type PayloadAction,
   type PrepareAction,
 } from '@reduxjs/toolkit'
 import { monotonicFactory, ulid } from 'ulid'
-import type { SynquxActionMeta } from './types.js'
+import { withErrorResult } from './results.js'
+import type { ResultMessage, SynquxActionMeta, SynquxSynced } from './types.js'
 
 /**
  * synced action の公開一意識別子 (ADR-0024)
@@ -82,6 +84,123 @@ export type LocalAction<
   meta?: { root?: TRoot } & TMeta
 }
 
+type IsAny<T> = 0 extends 1 & T ? true : false
+
+/** 「validate の第 2 引数が無い / 注釈されていない」の印 (推論の次候補へ倒す) */
+declare const UNSPECIFIED_PAYLOAD: unique symbol
+export type UnspecifiedPayload = typeof UNSPECIFIED_PAYLOAD
+
+/** validate 記法の validate 第 2 引数の型 (無い / any なら UnspecifiedPayload) */
+export type ValidatePayloadOf<TCase> = TCase extends {
+  validate: infer V extends (...args: any[]) => any
+}
+  ? Parameters<V> extends [any, infer PV, ...any[]]
+    ? IsAny<PV> extends true
+      ? UnspecifiedPayload
+      : PV
+    : UnspecifiedPayload
+  : UnspecifiedPayload
+
+type MutatePayloadOf<TCase> = TCase extends {
+  mutate: (state: any, action: infer A) => any
+}
+  ? A extends { payload: infer P }
+    ? P
+    : void
+  : void
+
+/**
+ * validate 記法の payload 推論 (ADR-0031 Decision 6): prepare → validate 第 2 引数
+ * → mutate の action 注釈の順。createSyncedSlice / buildCreateLocalSlice 共用
+ */
+export type CasePayloadOf<TCase> = TCase extends {
+  prepare: infer PA extends PrepareAction<any>
+}
+  ? ReturnType<PA>['payload']
+  : ValidatePayloadOf<TCase> extends UnspecifiedPayload
+    ? MutatePayloadOf<TCase>
+    : ValidatePayloadOf<TCase>
+
+/** synced state の Result 束縛から consumer の message 拡張型を逆引きする */
+type MessageOfSynced<TState> =
+  TState extends SynquxSynced<any, infer M extends ResultMessage>
+    ? M
+    : ResultMessage
+
+/**
+ * synced の validate の戻り (ADR-0031 Decision 2)。null なら適用できる。
+ * string は `{ log }` の短縮形で、UI 通知 (message) が要る拒否は
+ * withErrorResult の option と同じ形で返す
+ */
+export type SyncedRejection<TMessage extends ResultMessage = ResultMessage> =
+  | string
+  | { message?: TMessage; log?: string }
+
+/**
+ * 拒否条件 (ADR-0031)。UI / bot は dispatch 前に meta なしで呼び、生成 reducer と
+ * automations の発行前判定は meta 付きで呼ぶ。pure で軽く保つこと (UI が毎 render 呼ぶ)
+ */
+export type SyncedValidate<TState, P> = (
+  state: TState,
+  payload: P,
+  meta?: SyncedActionMeta,
+) => SyncedRejection<MessageOfSynced<TState>> | null
+
+/** validate 記法の適用部 (従来の case reducer そのもの。拒否は書かない) */
+export type SyncedMutate<TState, P> = (
+  state: Draft<TState>,
+  action: SyncedAction<P>,
+) => TState | void | Draft<TState>
+
+/** validate 記法の生成 creator に生える handler 群 */
+export type SyncedCaseHandlers<TState, P> = {
+  validate: SyncedValidate<TState, P>
+  /** 生成済み reducer。`builder.addCase(creator, creator.reducer)` で明示配線する */
+  reducer: SyncedMutate<TState, P>
+}
+
+/** plain 記法 (payload 直渡し) の creator 引数形。RTK PayloadActionCreator 互換 */
+export type PayloadArgs<P> = [P] extends [void]
+  ? []
+  : undefined extends P
+    ? [payload?: P]
+    : [payload: P]
+
+const toErrorResultOption = <TMessage extends ResultMessage>(
+  rejection: SyncedRejection<TMessage>,
+): { message?: TMessage; log?: string } =>
+  typeof rejection === 'string' ? { log: rejection } : rejection
+
+/**
+ * validate 記法から case reducer を生成する (createSyncedAction / createSyncedSlice 共用)。
+ * validate には immer draft をそのまま渡す — 同期的に読むだけの契約 (ADR-0031 Decision 2)
+ */
+export const createSyncedCaseReducer = <
+  TState extends SynquxSynced<any, any>,
+  P,
+>(definition: {
+  validate?: SyncedValidate<TState, P>
+  mutate: SyncedMutate<TState, P>
+}): SyncedCaseHandlers<TState, P> => {
+  const validate: SyncedValidate<TState, P> =
+    definition.validate ?? (() => null)
+
+  return {
+    validate,
+    reducer: (state, action) => {
+      const rejection = validate(state as TState, action.payload, action.meta)
+      if (rejection !== null) {
+        return withErrorResult(
+          state as TState,
+          action,
+          toErrorResultOption(rejection),
+        )
+      }
+      return definition.mutate(state, action)
+    },
+  }
+}
+
 /** prepare が返した meta から synqux の予約 field を除いた consumer 拡張部分 */
 export type PreparedMetaOf<PA extends PrepareAction<any>> =
   ReturnType<PA> extends { meta: infer M }
@@ -97,15 +216,14 @@ export type PreparedMetaOf<PA extends PrepareAction<any>> =
  * action 型を注釈しなくてよい)。RTK の PayloadActionCreator が持つ特殊な
  * 条件分岐 (any / unknown payload の推論細部) までは再現しない
  */
-export type CreateSyncedAction<TRoot = unknown> = {
+export type CreateSyncedAction<
+  TRoot = unknown,
+  TSynced extends SynquxSynced<any, any> = SynquxSynced<any, any>,
+> = {
   <P = void, T extends string = string>(
     type: T,
   ): ActionCreatorWithPreparedPayload<
-    [P] extends [void]
-      ? []
-      : undefined extends P
-        ? [payload?: P]
-        : [payload: P],
+    PayloadArgs<P>,
     P,
     T,
     never,
@@ -121,7 +239,50 @@ export type CreateSyncedAction<TRoot = unknown> = {
     ReturnType<PA> extends { error: infer E } ? E : never,
     PreparedMetaOf<PA> & SyncedActionMeta<TRoot>
   >
+  /**
+   * validate 記法 (ADR-0031)。prepare 付きは prepare の引数・戻りが payload を
+   * 決める (既存 prepare 記法と同じ)。prepare 無しは validate 第 2 引数と mutate の
+   * action 注釈から P を推論し、食い違いは型エラーになる
+   */
+  <PA extends PrepareAction<any>, T extends string = string>(
+    type: T,
+    definition: {
+      validate?: SyncedValidate<TSynced, ReturnType<PA>['payload']>
+      mutate: SyncedMutate<TSynced, ReturnType<PA>['payload']>
+      prepare: PA
+    },
+  ): ActionCreatorWithPreparedPayload<
+    Parameters<PA>,
+    ReturnType<PA>['payload'],
+    T,
+    ReturnType<PA> extends { error: infer E } ? E : never,
+    PreparedMetaOf<PA> & SyncedActionMeta<TRoot>
+  > &
+    SyncedCaseHandlers<TSynced, ReturnType<PA>['payload']>
+  <P = void, T extends string = string>(
+    type: T,
+    definition: {
+      validate?: SyncedValidate<TSynced, P>
+      mutate: SyncedMutate<TSynced, P>
+    },
+  ): ActionCreatorWithPreparedPayload<
+    PayloadArgs<P>,
+    P,
+    T,
+    never,
+    SyncedActionMeta<TRoot>
+  > &
+    SyncedCaseHandlers<TSynced, P>
 }
+
+/** createSyncedAction の第 2 引数 (runtime 用の緩い union) */
+export type SyncedActionDefinition =
+  | PrepareAction<unknown>
+  | {
+      validate?: SyncedValidate<SynquxSynced<any, any>, unknown>
+      mutate: SyncedMutate<SynquxSynced<any, any>, unknown>
+      prepare?: PrepareAction<unknown>
+    }
 
 /**
  * synced action creator を作る (RTK createAction の同期版、ADR-0024 / 0025)
@@ -142,9 +303,11 @@ export type CreateSyncedAction<TRoot = unknown> = {
  */
 export const createSyncedAction: CreateSyncedAction = ((
   type: string,
-  prepareAction?: PrepareAction<unknown>,
-) =>
-  createAction(type, (...args: unknown[]) => {
+  definition?: SyncedActionDefinition,
+) => {
+  const prepareAction =
+    typeof definition === 'function' ? definition : definition?.prepare
+  const creator = createAction(type, (...args: unknown[]) => {
     const prepared = prepareAction
       ? prepareAction(...args)
       : { payload: args[0] }
@@ -155,4 +318,9 @@ export const createSyncedAction: CreateSyncedAction = ((
         (prepared as { meta?: SynquxActionMeta }).meta,
       ),
     }
-  })) as CreateSyncedAction
+  })
+
+  return typeof definition === 'object'
+    ? Object.assign(creator, createSyncedCaseReducer(definition))
+    : creator
+}) as CreateSyncedAction

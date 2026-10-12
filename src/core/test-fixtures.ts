@@ -184,6 +184,7 @@ type ClientOptions = Partial<
     | 'mode'
     | 'stallAfterMs'
     | 'canRequest'
+    | 'validatorOf'
     | 'localSnapshots'
     | 'devDeterminismCheck'
     | 'automations'

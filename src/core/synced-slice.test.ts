@@ -224,3 +224,172 @@ describe('createSyncedSlice (end-to-end)', () => {
     expect(hub.inspect.requests('slice-group')[0]?.seq).toBe(1)
   })
 })
+
+describe('createSyncedSlice validate / mutate 記法 (ADR-0031)', () => {
+  const slice = kit.createSyncedSlice({
+    name: 'validated',
+    initialState: counterInitialState,
+    reducers: {
+      add: {
+        validate: (state, payload: number, meta) => {
+          if (state.count + payload > 10) return 'over'
+          // 時刻の条件は meta があるときだけ評価する (SPEC-0001 ガイドライン)
+          if (meta && meta.dispatched < 100)
+            return { message: { text: 'early' } }
+          return null
+        },
+        mutate: (state, action) => {
+          state.count += action.payload
+        },
+      },
+      reset: {
+        mutate: (state) => {
+          state.count = 0
+        },
+      },
+      launch: {
+        prepare: (label: string, value: number) => ({
+          payload: { label, value },
+          meta: { source: 'test' },
+        }),
+        validate: (_state, payload) => (payload.value < 0 ? 'negative' : null),
+        mutate: (state, action) => {
+          state.count = action.payload.value
+        },
+      },
+    },
+  })
+
+  it('string の拒否は log 専用の error result を積み、state を変えない', () => {
+    expect(slice.actions.add.validate(counterInitialState, 11)).toBe('over')
+
+    const rejected = slice.reducer(undefined, slice.actions.add(11))
+    expect(rejected.count).toBe(0)
+    expect(rejected.result).toMatchObject({ type: 'error', log: 'over' })
+    expect(rejected.result?.message).toBeUndefined()
+  })
+
+  it('object の拒否は withErrorResult の option として message を積む', () => {
+    const action = slice.actions.add(1)
+    action.meta.dispatched = 0
+
+    const rejected = slice.reducer(undefined, action)
+    expect(rejected.count).toBe(0)
+    expect(rejected.result).toMatchObject({
+      type: 'error',
+      message: { text: 'early' },
+    })
+  })
+
+  it('validate が null なら mutate を適用する', () => {
+    expect(slice.reducer(undefined, slice.actions.add(2)).count).toBe(2)
+  })
+
+  it('validate 省略時も creator は validate を持ち、常に null を返す', () => {
+    expect(slice.actions.reset.validate(counterInitialState, undefined)).toBe(
+      null,
+    )
+    expect(
+      slice.reducer({ ...counterInitialState, count: 5 }, slice.actions.reset())
+        .count,
+    ).toBe(0)
+    expectTypeOf(slice.actions.reset).parameters.toEqualTypeOf<[]>()
+  })
+
+  it('prepare 付きは prepare の引数・戻りを使い、payload は prepare から推論する', () => {
+    const action = slice.actions.launch('test', 3)
+    expectTypeOf(slice.actions.launch).parameters.toEqualTypeOf<
+      [label: string, value: number]
+    >()
+    expect(action.meta.source).toBe('test')
+    expect(slice.reducer(undefined, action).count).toBe(3)
+    expect(
+      slice.actions.launch.validate(counterInitialState, {
+        label: 'x',
+        value: -1,
+      }),
+    ).toBe('negative')
+  })
+
+  it('型: payload は validate 第 2 引数 → mutate 注釈の順に推論する', () => {
+    const inferred = kit.createSyncedSlice({
+      name: 'inferred',
+      initialState: counterInitialState,
+      reducers: {
+        fromValidate: {
+          validate: (_state, payload: number) => (payload < 0 ? 'neg' : null),
+          // slice 記法では mutate 内の action は注釈が無いと any (RTK の case
+          // reducer と同じ)。推論が効くのは生成 creator と validate の側
+          mutate: (state, action) => {
+            state.count += action.payload
+          },
+        },
+        fromMutate: {
+          validate: (_state) => null,
+          mutate: (state, action: SyncedAction<number | undefined>) => {
+            state.count += action.payload ?? 1
+          },
+        },
+      },
+    })
+
+    expectTypeOf(inferred.actions.fromValidate).parameters.toEqualTypeOf<
+      [payload: number]
+    >()
+    expectTypeOf(inferred.actions.fromValidate.validate)
+      .parameter(1)
+      .toBeNumber()
+    expectTypeOf(inferred.actions.fromMutate).parameters.toEqualTypeOf<
+      [payload?: number | undefined]
+    >()
+    expect(inferred.actions.fromValidate(1).payload).toBe(1)
+  })
+
+  it('型: validate と mutate の payload 注釈の食い違いは型エラー', () => {
+    const mismatch = kit.createSyncedSlice({
+      name: 'mismatch',
+      initialState: counterInitialState,
+      reducers: {
+        bad: {
+          validate: (_state, _payload: number) => null,
+          // @ts-expect-error validate の number と mutate の string が食い違う
+          mutate: (_state, _action: SyncedAction<string>) => {},
+        },
+      },
+    })
+    expect(mismatch.name).toBe('mismatch')
+  })
+
+  it('型: result を持たない state の slice には validate 記法を書けない', () => {
+    const withoutResult = kit.createSyncedSlice({
+      name: 'without-result',
+      initialState: { count: 0 },
+      reducers: {
+        bad: {
+          // @ts-expect-error 拒否は result で表現するため SynquxSynced 専用
+          mutate: (state: { count: number }) => {
+            state.count = 1
+          },
+        },
+      },
+    })
+    expect(withoutResult.name).toBe('without-result')
+  })
+})
+
+describe('createSyncedSlice validate / mutate 記法 (prepare の整合)', () => {
+  it('型: prepare 付きは prepare の payload を validate / mutate に押し付ける', () => {
+    const mismatch = kit.createSyncedSlice({
+      name: 'prepared-mismatch',
+      initialState: counterInitialState,
+      reducers: {
+        bad: {
+          prepare: (value: string) => ({ payload: Number(value) }),
+          // @ts-expect-error prepare の number と mutate の string が食い違う
+          mutate: (_state, _action: SyncedAction<string>) => {},
+        },
+      },
+    })
+    expect(mismatch.name).toBe('prepared-mismatch')
+  })
+})

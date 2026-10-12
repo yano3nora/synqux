@@ -13,7 +13,12 @@ import {
   createOrdering,
   type OrderingState,
 } from './ordering.js'
-import { generateActionHash, normalizeSyncedActionMeta } from './action.js'
+import {
+  generateActionHash,
+  normalizeSyncedActionMeta,
+  type SyncedAction,
+  type SyncedValidate,
+} from './action.js'
 import {
   createChannelEngine,
   type SynquxChannel,
@@ -329,6 +334,14 @@ export type CreateSynquxConfig<
 
   /** 何を request 化するか。consumer の synced domain action の判定述語 */
   isSyncedAction: (action: Action) => action is TAction
+
+  /**
+   * action type から validate 記法の validate を引く (ADR-0031 Decision 4)。
+   * 定義の配線フェーズが registry から渡す。automations は発行前にこれを評価し、
+   * 拒否される request を transport に流さない。裁定は従来どおり reducer の
+   * 試し実行のみ。primitive 方式では省略 (pre-check なし)
+   */
+  validatorOf?: (type: string) => SyncedValidate<TSynced, any> | undefined
 
   /** host が試し実行する判定器。通常 createSynquxRootReducer の返り値を渡す */
   rootReducer: Reducer<TRoot>
@@ -2210,8 +2223,17 @@ export const createSynqux = <
       subscriptionSession: SubscriptionSession,
       // replaceRules の再起動では発行時刻を引き継ぎ、retryMs 内の二重発行を避ける
       lastIssuedAt = new Map<string, number>(),
+      // validate で止まっている rule id。遷移時 1 回だけ warn するための状態
+      suppressedByValidate = new Set<string>(),
     ): void => {
       let active = true
+
+      // replaceRules で消えた rule の抑止状態を捨てる (同 id の再追加で初回 warn が出るように)
+      for (const id of suppressedByValidate) {
+        if (!automations.some((automation) => automation.id === id)) {
+          suppressedByValidate.delete(id)
+        }
+      }
 
       const evaluate = async (): Promise<void> => {
         if (!active || session !== subscriptionSession) {
@@ -2282,12 +2304,63 @@ export const createSynqux = <
             continue
           }
 
+          // 発行前判定 (ADR-0031 Decision 4): host は裁定者でもあるため、ここで
+          // 見る synced は直後の裁定で reducer が見る state と同じ。拒否が確定
+          // している request を transport に流さない (裁定の二重化ではない)
+          let issued = action
+          const validate = config.validatorOf?.(action.type)
+          if (validate) {
+            // pre-check と実 request の meta を揃えるため、ここで stamp した meta を
+            // そのまま dispatch する (metaSetter は既存 hash を尊重する)。dispatched
+            // は synced では request 化で serverNow に上書きされるが、standalone は
+            // そのまま適用されるので pre-check と同じ now を焼く
+            const meta = {
+              ...normalizeSyncedActionMeta(
+                (action as unknown as SyncedAction).meta,
+              ),
+              dispatched: now,
+            }
+            issued = { ...action, meta }
+            let rejection: ReturnType<typeof validate>
+            try {
+              rejection = validate(
+                synced,
+                (action as unknown as SyncedAction).payload,
+                {
+                  hash: meta.hash,
+                  dispatched: now,
+                  requestedBy:
+                    beforeTime.synqux.connections.selfId ?? undefined,
+                },
+              )
+            } catch (error) {
+              console.error(error)
+              continue
+            }
+
+            if (rejection !== null) {
+              // 止まり続ける間は出さず、「発行できる → 止まる」の遷移で 1 回だけ出す
+              if (!suppressedByValidate.has(automation.id)) {
+                suppressedByValidate.add(automation.id)
+                const reason =
+                  typeof rejection === 'string'
+                    ? rejection
+                    : (rejection.log ?? rejection.message?.text ?? action.type)
+                console.warn(
+                  `[synqux] Automation "${automation.id}" is suppressed by validate: ${reason}`,
+                )
+              }
+              continue
+            }
+          }
+          suppressedByValidate.delete(automation.id)
+
           lastIssuedAt.set(automation.id, now)
           try {
             // pushRequest の reject を含む非同期失敗は次回 retry に委ねる。
             void Promise.resolve(
               store.dispatch({
-                ...action,
+                ...issued,
                 [AUTOMATION_REQUESTED_AT]: now,
               }),
             ).catch(() => undefined)
@@ -2331,13 +2404,18 @@ export const createSynqux = <
         stop,
         restart: () => {
           stop()
-          startAutomationEngine(subscriptionSession, lastIssuedAt)
+          startAutomationEngine(
+            subscriptionSession,
+            lastIssuedAt,
+            suppressedByValidate,
+          )
         },
       }
 
       cleanups.push(() => {
         stop()
         lastIssuedAt.clear()
+        suppressedByValidate.clear()
       })
     }
 

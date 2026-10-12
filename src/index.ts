@@ -15,6 +15,8 @@ export * from './core/types.js'
 export {
   generateActionHash,
   type CreateSyncedAction,
+  type SyncedRejection,
+  type SyncedValidate,
   type LocalAction,
   type SyncedAction,
   type SyncedActionHash,
@@ -30,6 +32,8 @@ export {
   type CreateLocalSlice,
   type LocalActionOf,
   type LocalMatcherBuilder,
+  type LocalSliceCaseReducers,
+  type LocalValidate,
   type LocalReducerBuilder,
   type LocalUnknownAction,
   type WithLocalMeta,

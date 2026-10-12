@@ -73,6 +73,19 @@ describe('package smoke test', () => {
     }>()
   })
 
+  it('validate / mutate 記法の型 (SyncedValidate / SyncedRejection / LocalValidate) を公開する', () => {
+    type Synced = synqux.SynquxSynced<Action, { text: string; code?: number }>
+    expectTypeOf<
+      synqux.SyncedValidate<Synced, number>
+    >().returns.toEqualTypeOf<synqux.SyncedRejection<{
+      text: string
+      code?: number
+    }> | null>()
+    expectTypeOf<
+      synqux.LocalValidate<{ count: number }, string>
+    >().parameters.toEqualTypeOf<[root: { count: number }, payload: string]>()
+  })
+
   it('SynquxAutomation 型を main entry から公開する', () => {
     expectTypeOf<SynquxAutomation<{ count: number }, Action>>().toMatchTypeOf<{
       id: string

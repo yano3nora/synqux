@@ -10,11 +10,19 @@ import {
 } from '@reduxjs/toolkit'
 import {
   createSyncedAction,
+  createSyncedCaseReducer,
   normalizeSyncedActionMeta,
+  type CasePayloadOf,
   type CreateSyncedAction,
+  type PayloadArgs,
   type PreparedMetaOf,
   type SyncedAction,
+  type SyncedActionDefinition,
   type SyncedActionMeta,
+  type SyncedMutate,
+  type SyncedValidate,
+  type UnspecifiedPayload,
+  type ValidatePayloadOf,
 } from './action.js'
 import {
   createSynqux,
@@ -89,9 +97,22 @@ type SyncedSliceCaseReducer<TState> = (
 ) => TState | void | Draft<TState>
 
 /**
+ * validate 記法の case 定義 (ADR-0031)。拒否は result で表現するため、
+ * `result` を持つ state (SynquxSynced) の slice にだけ書ける
+ */
+type SyncedValidateMutateCase<TState> =
+  TState extends SynquxSynced<any, any>
+    ? {
+        validate?: SyncedValidate<TState, any>
+        mutate: SyncedMutate<TState, any>
+        prepare?: PrepareAction<any>
+      }
+    : never
+
+/**
  * createSyncedSlice の reducers に書ける case 定義。
- * plain case reducer と `{ prepare, reducer }` の 2 記法のみサポートする
- * (RTK 2.x の callback creators (create.asyncThunk 等) は非対応)
+ * plain case reducer / `{ prepare, reducer }` / `{ validate?, mutate, prepare? }`
+ * の 3 記法をサポートする (RTK 2.x の callback creators (create.asyncThunk 等) は非対応)
  */
 export type SyncedSliceCaseReducers<TState> = Record<
   string,
@@ -100,47 +121,78 @@ export type SyncedSliceCaseReducers<TState> = Record<
       prepare: PrepareAction<any>
       reducer: SyncedSliceCaseReducer<TState>
     }
+  | SyncedValidateMutateCase<TState>
+>
+
+/**
+ * validate 第 2 引数と mutate の action 注釈の食い違いを型エラーにする
+ * (RTK ValidateSliceCaseReducers と同じく、reducers 引数へ交差して期待型を押し付ける)
+ */
+export type ValidateSyncedCasePayloads<TState, TReducers> = {
+  [K in keyof TReducers]: TReducers[K] extends {
+    mutate: any
+    prepare: infer PA extends PrepareAction<any>
+  }
+    ? {
+        validate?: SyncedValidate<TState, ReturnType<PA>['payload']>
+        mutate: SyncedMutate<TState, ReturnType<PA>['payload']>
+      }
+    : TReducers[K] extends { mutate: any }
+      ? ValidatePayloadOf<TReducers[K]> extends UnspecifiedPayload
+        ? unknown
+        : { mutate: SyncedMutate<TState, ValidatePayloadOf<TReducers[K]>> }
+      : unknown
+}
+
+type PlainSyncedActionCreator<
+  P,
+  TType extends string,
+  TRoot,
+> = ActionCreatorWithPreparedPayload<
+  PayloadArgs<P>,
+  P,
+  TType,
+  never,
+  SyncedActionMeta<TRoot>
+>
+
+type PreparedSyncedActionCreator<
+  PA extends PrepareAction<any>,
+  TType extends string,
+  TRoot,
+> = ActionCreatorWithPreparedPayload<
+  Parameters<PA>,
+  ReturnType<PA>['payload'],
+  TType,
+  ReturnType<PA> extends { error: infer E } ? E : never,
+  PreparedMetaOf<PA> & SyncedActionMeta<TRoot>
 >
 
 /**
  * case 定義から生成される synced action creator の型を導出する。
  * plain 記法は case reducer の action 注釈 (PayloadAction<P> / SyncedAction<P>
  * どちらでも) から payload を推論し、prepare 記法は prepare の引数・戻りに従う。
+ * validate 記法は creator に `validate` が生える。
  * いずれも戻り action は required な SyncedActionMeta を持つ (生成時 stamp)
  */
 type SyncedSliceActionCreator<
   TCase,
   TType extends string,
   TRoot,
-> = TCase extends { prepare: infer PA extends PrepareAction<any> }
-  ? ActionCreatorWithPreparedPayload<
-      Parameters<PA>,
-      ReturnType<PA>['payload'],
-      TType,
-      ReturnType<PA> extends { error: infer E } ? E : never,
-      PreparedMetaOf<PA> & SyncedActionMeta<TRoot>
-    >
-  : TCase extends (state: any, action: infer A) => any
-    ? A extends { payload: infer P }
-      ? ActionCreatorWithPreparedPayload<
-          [P] extends [void]
-            ? []
-            : undefined extends P
-              ? [payload?: P]
-              : [payload: P],
-          P,
-          TType,
-          never,
-          SyncedActionMeta<TRoot>
-        >
-      : ActionCreatorWithPreparedPayload<
-          [],
-          void,
-          TType,
-          never,
-          SyncedActionMeta<TRoot>
-        >
-    : never
+  TState,
+> = TCase extends { mutate: any }
+  ? (TCase extends { prepare: infer PA extends PrepareAction<any> }
+      ? PreparedSyncedActionCreator<PA, TType, TRoot>
+      : PlainSyncedActionCreator<CasePayloadOf<TCase>, TType, TRoot>) & {
+      validate: SyncedValidate<TState, CasePayloadOf<TCase>>
+    }
+  : TCase extends { prepare: infer PA extends PrepareAction<any> }
+    ? PreparedSyncedActionCreator<PA, TType, TRoot>
+    : TCase extends (state: any, action: infer A) => any
+      ? A extends { payload: infer P }
+        ? PlainSyncedActionCreator<P, TType, TRoot>
+        : PlainSyncedActionCreator<void, TType, TRoot>
+      : never
 
 /**
  * RTK createSlice の synced 版 (ADR-0025 Amendment)。**この slice が定義する
@@ -163,7 +215,7 @@ export type CreateSyncedSlice<TRoot = unknown> = <
   /** action type の prefix。`synqux` (と `synqux/` 配下) は予約のため throw */
   name: TName
   initialState: TState
-  reducers: TReducers
+  reducers: TReducers & ValidateSyncedCasePayloads<TState, TReducers>
   /** 他所で定義された synced action (createSyncedAction 等) への追従 (RTK 同義) */
   extraReducers?: (builder: ActionReducerMapBuilder<TState>) => void
 }) => {
@@ -173,7 +225,8 @@ export type CreateSyncedSlice<TRoot = unknown> = <
     [K in keyof TReducers & string]: SyncedSliceActionCreator<
       TReducers[K],
       `${TName}/${K}`,
-      TRoot
+      TRoot,
+      TState
     >
   }
   getInitialState: () => TState
@@ -191,7 +244,7 @@ export type DefinedCreateSynquxConfig<
   TLocals extends Record<string, unknown>,
 > = Omit<
   CreateSynquxConfig<TRoot, TSynced, TAction>,
-  'isSyncedAction' | 'rootReducer' | 'selectSynced'
+  'isSyncedAction' | 'rootReducer' | 'selectSynced' | 'validatorOf'
 > & {
   /** 同期対象 reducer (構造上 1 つ。複数ドメインは合成して 1 reducer / slice に畳む) */
   synced: Reducer<TSynced>
@@ -208,9 +261,10 @@ export type SynquxDefinition<T extends SynquxTypes, TKey extends string> = {
    * type を registry へ登録する (定義 = 同期対象の宣言)。
    * `synqux/` 予約 prefix の type は定義時に throw で拒否する。
    * meta.root の型は any — root は配線フェーズまで未知のため定義側では型付けず、
-   * locals で読むときは LocalAction<P, 導出RootState> 注釈が型を与える (ADR-0026)
+   * locals で読むときは LocalAction<P, 導出RootState> 注釈が型を与える (ADR-0026)。
+   * validate 記法 (ADR-0031) の validate / reducer は T['synced'] で束縛される
    */
-  createSyncedAction: CreateSyncedAction<any>
+  createSyncedAction: CreateSyncedAction<any, T['synced']>
 
   /**
    * RTK createSlice の synced 版。各 case を { reducer, prepare } 記法へ変換
@@ -369,7 +423,12 @@ export const defineSynqux = <TKey extends string>(config: {
    */
   withTypes: <T2 extends SynquxTypes>() => SynquxDefinition<T2, TKey>
 } => {
-  const registry = new Set<string>()
+  // type → validate 記法の validate (無ければ undefined)。同一 type の再登録は
+  // 後勝ち (dev の HMR で creator module が再評価される経路)
+  const registry = new Map<
+    string,
+    SyncedValidate<SynquxSynced<any, any>, unknown> | undefined
+  >()
 
   // isMySucceededResult 等の内部束縛用。位置の宣言は syncedKey に一本化したため導出する
   const selectSynced = (root: Record<string, unknown>): unknown =>
@@ -381,10 +440,7 @@ export const defineSynqux = <TKey extends string>(config: {
   const isSyncedAction = (action: Action): boolean => registry.has(action.type)
 
   const definition = {
-    createSyncedAction: (
-      type: string,
-      prepareAction?: PrepareAction<unknown>,
-    ) => {
+    createSyncedAction: (type: string, definition?: SyncedActionDefinition) => {
       // synqux 内部 action (synqux/restored 等) の registry 汚染を定義時に
       // fail-fast で防ぐ。通れば内部 restore が request 化され同期が壊れる
       if (type.startsWith('synqux/')) {
@@ -393,13 +449,14 @@ export const defineSynqux = <TKey extends string>(config: {
         )
       }
 
-      registry.add(type)
-      return (
+      const creator = (
         createSyncedAction as (
           type: string,
-          prepareAction?: PrepareAction<unknown>,
-        ) => unknown
-      )(type, prepareAction)
+          definition?: SyncedActionDefinition,
+        ) => { validate?: SyncedValidate<SynquxSynced<any, any>, unknown> }
+      )(type, definition)
+      registry.set(type, creator.validate)
+      return creator
     },
 
     createSyncedSlice: (options: {
@@ -412,6 +469,11 @@ export const defineSynqux = <TKey extends string>(config: {
             prepare: PrepareAction<unknown>
             reducer: SyncedSliceCaseReducer<unknown>
           }
+        | {
+            validate?: SyncedValidate<SynquxSynced<any, any>, unknown>
+            mutate: SyncedMutate<SynquxSynced<any, any>, unknown>
+            prepare?: PrepareAction<unknown>
+          }
       >
       extraReducers?: (builder: ActionReducerMapBuilder<unknown>) => void
     }) => {
@@ -423,12 +485,30 @@ export const defineSynqux = <TKey extends string>(config: {
         )
       }
 
+      // validate 記法の生成物 (slice 生成後に creator へ validate を生やす)
+      const handlers = new Map<
+        string,
+        ReturnType<typeof createSyncedCaseReducer>
+      >()
+
       const reducers = Object.fromEntries(
         Object.entries(options.reducers).map(([key, caseDef]) => {
-          registry.add(`${options.name}/${key}`)
+          const type = `${options.name}/${key}`
+          const generated =
+            typeof caseDef === 'object' && 'mutate' in caseDef
+              ? createSyncedCaseReducer(caseDef)
+              : undefined
+          if (generated) {
+            handlers.set(key, generated)
+          }
+          registry.set(type, generated?.validate)
 
-          const caseReducer =
-            typeof caseDef === 'function' ? caseDef : caseDef.reducer
+          const caseReducer = generated
+            ? (generated.reducer as SyncedSliceCaseReducer<unknown>)
+            : typeof caseDef === 'function'
+              ? caseDef
+              : (caseDef as { reducer: SyncedSliceCaseReducer<unknown> })
+                  .reducer
           const prepare =
             typeof caseDef === 'function' ? undefined : caseDef.prepare
 
@@ -455,12 +535,18 @@ export const defineSynqux = <TKey extends string>(config: {
         }),
       )
 
-      return (createSlice as (config: unknown) => unknown)({
+      const slice = (
+        createSlice as (config: unknown) => { actions: Record<string, object> }
+      )({
         name: options.name,
         initialState: options.initialState,
         reducers,
         extraReducers: options.extraReducers,
       })
+      for (const [key, generated] of handlers) {
+        Object.assign(slice.actions[key]!, { validate: generated.validate })
+      }
+      return slice
     },
 
     isSyncedAction,
@@ -515,6 +601,8 @@ export const defineSynqux = <TKey extends string>(config: {
       const instance = createSynqux({
         ...rest,
         ...wire({ synced, locals }),
+        // automations の発行前判定 (ADR-0031 Decision 4) が registry を引く口
+        validatorOf: (type: string) => registry.get(type),
       } as never)
 
       return {
