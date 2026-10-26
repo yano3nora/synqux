@@ -24,6 +24,19 @@ export {
 } from './core/action.js'
 export { defineSynqux, type SynquxTypes } from './core/define-synqux.js'
 
+// host の外部 I/O を伴う request (ADR-0032)。createSyncedRequest は defineSynqux の
+// 戻りからのみ提供する (createSyncedAction と同じく registry 登録のため)
+export type {
+  CreateSyncedRequest,
+  InflightRequest,
+  InflightState,
+  SyncedRequest,
+  SyncedRequestAborted,
+  SyncedRequestDefinition,
+  SyncedRequestResolved,
+  WithInflight,
+} from './core/synced-request.js'
+
 // locals slice の型付け (ADR-0027)
 // TRoot は配線フェーズの生成物のため defineSynqux からは配らない —
 // consumer が RootState 導出後に buildCreateLocalSlice<TRoot, TMeta>() で束縛する
