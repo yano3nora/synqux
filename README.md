@@ -343,6 +343,46 @@ const synqux = createSynqux({
 - Contrast with automations: automations act **before** application (host derives the next action from a state predicate); listeners act **after** (reacting to an applied action). Effects receive no `dispatch` — if you want the next synced action, use automations; if you want local state to follow synced state, use `extraReducers` in a locals reducer.
 - Not exactly-once (host handover can double-fire or drop). Write effects idempotently. Rejected requests never apply, so they never fire.
 
+### Host-side external I/O (`createSyncedRequest`)
+
+**Concept.** "The host asks an external API (an AI, a scoring service) and every device applies the answer" fits neither automations (synchronous) nor listeners (no `dispatch`). A synced request splits it into three synced actions — `requested` / `resolved` / `aborted` — and lets the engine run the I/O on the host (ADR-0032).
+
+```ts
+// definition phase — the synced state must hold `inflight: {}`
+const ask = createSyncedRequest<{ text: string }, { answer: string }>({
+  key: 'ask',
+  request: { validate: (game, p) => (p.text.trim() ? null : 'empty question') },
+  resolve: {
+    mutate: (game, action, inflight) => {
+      game.log.push({ q: inflight.payload.text, a: action.payload.output.answer })
+    },
+  },
+  abort: { mutate: (game, action) => { game.notice = action.payload.reason } }, // 'timeout' | 'failed'
+  timeoutMs: 20_000,
+  perform: async ({ text }, { synced }) => ({ answer: await callAi(text) }), // host only
+})
+
+const gameSlice = createSyncedSlice({
+  name: 'game',
+  initialState: { result: null, inflight: {}, log: [], notice: null },
+  reducers: {},
+  extraReducers: ask.reducer,
+})
+
+// wiring phase
+createSynqux({ transport, synced: gameSlice.reducer, locals, requests: [ask] })
+
+dispatch(ask.requested({ text: 'How are sales?' }))
+```
+
+**Behavior.**
+
+- One request per `key` at a time: `requested` is rejected while `inflight[key]` is set. Read `ask.requested.validate` in the UI to disable the input.
+- `perform` runs on the host only, when `requested` applies, live only (same firing rules as listeners). Its result goes out as `resolved`; a throw goes out as `aborted` with `reason: 'failed'`.
+- The host aborts with `reason: 'timeout'` once `now >= requestedAt + timeoutMs`. A new host does not take over a running `perform`; it waits for the timeout.
+- `resolved` / `aborted` are rejected unless their `id` matches the ledger, so late, duplicated, and post-timeout results are dropped.
+- No retry, no cancellation of a running `perform`, no queue. Re-issue `requested` after `aborted` if you need a retry.
+
 ### Wait for a dispatch to apply (`dispatchAndWait`)
 
 **Concept.** On the sync path, `store.dispatch` only means "the request was written to the transport". When a thunk needs "proceed after the reset has applied", use `dispatchAndWait`.
@@ -607,7 +647,7 @@ Setup layer (touched only by the single setup file in your template):
 
 | export | description |
 | --- | --- |
-| `createSynqux(config)` | Creates a sync instance (core / primitive form — the definition's wiring factory wraps this). Returns `middlewares` / `rootReducer` (a stable function delegating to the current judge) / `replaceRootReducer` (swap the judge in place, dev HMR) / `replaceRules({ automations?, listeners? })` (swap rule sets in place, dev HMR) / `reducer` / `subscribe` / `unsubscribe` / `setRole` / `dispatchAndWait` / `channel` |
+| `createSynqux(config)` | Creates a sync instance (core / primitive form — the definition's wiring factory wraps this). Returns `middlewares` / `rootReducer` (a stable function delegating to the current judge) / `replaceRootReducer` (swap the judge in place, dev HMR) / `replaceRules({ automations?, listeners?, requests? })` (swap rule sets in place, dev HMR) / `reducer` / `subscribe` / `unsubscribe` / `setRole` / `dispatchAndWait` / `channel` |
 | `createSynquxRootReducer({ isSyncedAction, syncedKey, synced, locals })` | Serial rootReducer helper ("synced is pure, locals see earlier stages"). Primitive-style helper — the definition's wiring phase calls this internally; use directly only with hand-wired stores. Takes a `syncedKey` plus a single synced reducer, auto-stamps a default success result on synced actions (ADR-0013), and returns `rootReducer` / `selectSynced` / `isSyncedAction` to spread into the core `createSynqux` config |
 | `keepAcrossHmr(hot, key, create)` | Keeps a singleton (the instance, the store) in the bundler's `hot.data` across module re-evaluation; creates it every time when `hot` is undefined (production). The holder half of the dev HMR set with `replaceReducers` / `replaceRules` — reducers, automations, and listeners are swappable; middleware / transport modules need a full reload from the bundler side. Takes a `{ data }` object structurally (Vite's `import.meta.hot`; webpack's `module.hot` is not supported — its `data` starts undefined and persists only via `dispose`) |
 | `localStorageSnapshotStore()` | Default browser persistence for standalone mode. Pass to `localSnapshots` to use or replace explicitly |
@@ -619,7 +659,7 @@ Reducer helpers (game-developer layer; identical with or without sync):
 
 | export | description |
 | --- | --- |
-| `defineSynqux({ syncedKey }).withTypes<{ synced, message? }>()` | The definition phase (call once per app; `syncedKey` tells it — once — where the synced state mounts, and the root type is derived at wiring). Returns typed helpers plus the creator registry: `createSyncedSlice` (a `createSlice` whose actions are all synced actions) and `createSyncedAction` (a `createAction` for standalone / cross-slice actions) — both stamp `hash` (ulid) / `dispatched` at creation time, type `meta` as required, register the type (the only ways to define synced actions, ADR-0024 / ADR-0026), and accept the `{ validate?, mutate, prepare? }` notation whose creator exposes `validate` for UI / bots and whose automations are pre-checked before issuing (ADR-0031) — plus pre-bound result predicates, result helpers, and the wiring factory `createSynqux({ transport, synced, locals, ... })` (its instance adds `replaceReducers({ synced, locals })` for dev HMR — same input types as the wiring config) |
+| `defineSynqux({ syncedKey }).withTypes<{ synced, message? }>()` | The definition phase (call once per app; `syncedKey` tells it — once — where the synced state mounts, and the root type is derived at wiring). Returns typed helpers plus the creator registry: `createSyncedSlice` (a `createSlice` whose actions are all synced actions) and `createSyncedAction` (a `createAction` for standalone / cross-slice actions) — both stamp `hash` (ulid) / `dispatched` at creation time, type `meta` as required, register the type (the only ways to define synced actions, ADR-0024 / ADR-0026), and accept the `{ validate?, mutate, prepare? }` notation whose creator exposes `validate` for UI / bots and whose automations are pre-checked before issuing (ADR-0031). `createSyncedRequest` builds a host-side external I/O request from the same registry (ADR-0032) — plus pre-bound result predicates, result helpers, and the wiring factory `createSynqux({ transport, synced, locals, ... })` (its instance adds `replaceReducers({ synced, locals })` for dev HMR — same input types as the wiring config) |
 | `buildCreateLocalSlice<TRoot, TMeta>()` | `createSlice` factory for locals slices (ADR-0027). Runtime is RTK `createSlice` untouched; the type work makes `extraReducers` see `action.meta.root` (the post-apply root state) by **replacing** the meta's `root` (an intersection would collapse against the creators' `root?: any`). Bound once in the setup layer — `TRoot` is derived at wiring, so the definition structurally cannot supply it. Declared builder subset: `addCase` (creator / type string), `addMatcher` (guard / boolean), `addDefaultCase`; no `addAsyncThunk`. `TMeta` fields are not injected by synqux — declare them optional |
 | `isSucceededResult(synced)` / `isMySucceededResult(root)` | State predicates for "did the last applied synced action succeed / was it my request". `isSucceededResult` works in both synced (extraReducers matcher) and locals contexts — no hand-written hash comparison needed inside the same rootReducer chain. `isMySucceededResult` (from `defineSynqux` only) needs the root (`selfId` / mode), so it is structurally impossible to call from a synced reducer (determinism boundary). Pass the action being applied itself to `withResult` / `withErrorResult` / `generateResult` — the predicates rely on that contract |
 | `isDeliveredSyncedAction(action)` | Checks whether an action carries the complete request/response delivery metadata. Combine with the consumer's synced-domain matcher when needed |
@@ -659,6 +699,7 @@ Types (all contract types are exported from the main entry):
 | `Synqux` / `CreateSynquxConfig` / `SynquxSubscribeOptions` | `createSynqux` return value / config / `subscribe` options |
 | `SynquxAutomation` | Rule type for the `automations` config (host-driven auto dispatch, ADR-0015) |
 | `SynquxListener` | Rule type for `listeners`; `scope: 'all'` opts into local actions (live-only, ADR-0017 / ADR-0020) |
+| `SyncedRequest` / `CreateSyncedRequest` / `SyncedRequestDefinition` / `SyncedRequestResolved` / `SyncedRequestAborted` / `InflightRequest` / `InflightState` / `WithInflight` | Types for `createSyncedRequest` and the `requests` config; the synced state holds the ledger as `inflight: InflightState` (ADR-0032) |
 | `SynquxSnapshotPolicy` | Type for the `snapshot` config (`throttleMs` / `flushOn`, ADR-0030) |
 | `InspectionRecord` | What the host hands to `transport.inspectResponse` (contract 19, ADR-0030); the adapter adds the server-stamped `responsed` |
 | `SynquxRootState` / `SynquxState` / `PendingRequest` | Composed rootReducer state / internal slice state and pending request |

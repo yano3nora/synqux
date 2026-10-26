@@ -216,6 +216,13 @@ export type LocalActionOf<C, P = void> // 束縛済み CreateLocalSlice → Loca
  *   (ADR-0031) は creator に `validate` (SyncedValidate<T['synced'], P>) と
  *   `reducer` を生やす。配線は consumer が `builder.addCase(creator, creator.reducer)`
  *   と明示する (自動配線しない)
+ * - createSyncedRequest: host が外部 I/O をして結果を synced action にする request
+ *   (ADR-0032)。`{ key, request?, resolve, abort?, timeoutMs, perform }` から
+ *   `${key}/requested` / `resolved` / `aborted` の 3 creator (validate / mutate 記法)
+ *   と `reducer` (3 action の addCase) を作り、registry に登録する。
+ *   synced state は `inflight: InflightState` を持つこと (持たなければ型エラー)。
+ *   requested は同じ key の処理中を拒否し、resolved / aborted は台帳の id と
+ *   一致しなければ拒否する。配線は `createSynqux({ requests })`
  * - isSyncedAction: registry 由来の判定述語。配線フェーズが内部で接続するため
  *   通常は触らない (primitive 方式で core へ直接渡す場合に使う)。登録は creator
  *   定義モジュールの import 副作用なので creator の lazy import は禁止 (配達
@@ -320,6 +327,14 @@ export type CreateSynquxConfig<
    * effect 失敗の隔離を engine が担う。effect は冪等にし、dispatch しないこと
    */
   listeners?: SynquxListener<TSynced, TAction>[]
+  /**
+   * host の外部 I/O を伴う request (ADR-0032)。engine が request ごとに timeout の
+   * automation (`now >= requestedAt + timeoutMs` で aborted) と perform の host-only
+   * listener (requested の適用で perform し、resolved / aborted を開始時の session へ
+   * dispatch) を作り、consumer の automations の後ろ・listeners の前に並べる。
+   * rule id は `synqux/request/${key}/timeout` と `synqux/request/${key}/perform`
+   */
+  requests?: SyncedRequest<TSynced>[]
   /**
    * host 生存監視 (ADR-0016)。host は heartbeatIntervalMs (既定 30,000) ごとに
    * presence の lastSeenAt をサーバ時刻で更新し、他端末は staleThresholdMs
@@ -479,17 +494,19 @@ export type Synqux<TRoot, TAction = Action, TSynced = never> = {
   replaceRootReducer(next: Reducer<TRoot>): void
 
   /**
-   * automations / listeners を instance を生かしたまま差し替える (dev の HMR 用、TASK-260905)。
+   * automations / listeners / requests を instance を生かしたまま差し替える (dev の HMR 用、TASK-260905)。
    * 省略した側は据え置き。validation は createSynqux と同じで、失敗は throw し何も差し替えない。
    * automations は session が live なら engine を再起動する (rule id ごとの発行時刻は引き継ぎ、
    * retryMs 内の再発行を避ける。再起動直後に when を満たす rule が発行され得るのは
    * rejects-repeat 契約 ADR-0007 の範囲内)。listeners は次の適用から新 rule 群で発火する
    * (fire: 'persisted' で待機中の効果は捕捉済みの旧 closure が 1 回走る)。
+   * requests は両方の rule 群を作り直す (ADR-0032)。
    * middlewares / transport は据え置き (consumer 側で full reload に落とす)
    */
   replaceRules(next: {
     automations?: SynquxAutomation<TSynced, TAction>[]
     listeners?: SynquxListener<TSynced, TAction>[]
+    requests?: SyncedRequest<TSynced>[]
   }): void
 
   /**
@@ -1024,7 +1041,7 @@ type SnapshotEnvelope<TSynced> = {
 
 | subpath | 主な export | 対象 |
 | --- | --- | --- |
-| `synqux` | `createSynqux` / `createSynquxRootReducer` / `keepAcrossHmr` (HMR 一式の片割れ: hot.data への instance 保持。`replaceReducers` と対、TASK-260904) / `synquxReducer` / `synquxRestored` / reducer helpers / `generateActionHash` / `defineSynqux` (定義フェーズ。creator registry / 配線 factory を持ち、`createSyncedAction` / `createSyncedSlice` / `isMySucceededResult` はこの戻りからのみ提供、ADR-0026) / `buildCreateLocalSlice` (locals slice の meta.root 型付け。TRoot が配線フェーズ生成物のため定義非経由の standalone、ADR-0027) / `isDeliveredSyncedAction` / `isSynquxAction` / `isResultForPeer` / `isSucceededResult` / peer・phase・health selectors / `localStorageSnapshotStore` / `acceptsResponse` (transport 契約 18 の CAS 判定。adapter 実装者向け、ADR-0029) / 契約型 (`SyncedActionMeta` / `SyncedAction` / `LocalAction` / `LocalActionOf` / `SyncedValidate` / `SyncedRejection` / `LocalValidate` / `LocalSliceCaseReducers` (validate / mutate 記法の型、ADR-0031) / `SyncedActionHash` / `SynquxChannel` / `SynquxChannelOptions` / `SynquxChannelHandlers` / `SynquxSnapshotPolicy` / `InspectionRecord` 含む。channel handle 自体は instance の `synqux.channel()` から取得、ADR-0028) | セットアップ層 + reducer ヘルパー + consumer 型語彙 |
+| `synqux` | `createSynqux` / `createSynquxRootReducer` / `keepAcrossHmr` (HMR 一式の片割れ: hot.data への instance 保持。`replaceReducers` と対、TASK-260904) / `synquxReducer` / `synquxRestored` / reducer helpers / `generateActionHash` / `defineSynqux` (定義フェーズ。creator registry / 配線 factory を持ち、`createSyncedAction` / `createSyncedSlice` / `createSyncedRequest` / `isMySucceededResult` はこの戻りからのみ提供、ADR-0026 / ADR-0032) / `buildCreateLocalSlice` (locals slice の meta.root 型付け。TRoot が配線フェーズ生成物のため定義非経由の standalone、ADR-0027) / `isDeliveredSyncedAction` / `isSynquxAction` / `isResultForPeer` / `isSucceededResult` / peer・phase・health selectors / `localStorageSnapshotStore` / `acceptsResponse` (transport 契約 18 の CAS 判定。adapter 実装者向け、ADR-0029) / 契約型 (`SyncedActionMeta` / `SyncedAction` / `LocalAction` / `LocalActionOf` / `SyncedValidate` / `SyncedRejection` / `LocalValidate` / `LocalSliceCaseReducers` (validate / mutate 記法の型、ADR-0031) / `CreateSyncedRequest` / `SyncedRequest` / `SyncedRequestDefinition` / `SyncedRequestResolved` / `SyncedRequestAborted` / `InflightRequest` / `InflightState` / `WithInflight` (ADR-0032) / `SyncedActionHash` / `SynquxChannel` / `SynquxChannelOptions` / `SynquxChannelHandlers` / `SynquxSnapshotPolicy` / `InspectionRecord` 含む。channel handle 自体は instance の `synqux.channel()` から取得、ADR-0028) | セットアップ層 + reducer ヘルパー + consumer 型語彙 |
 | `synqux/react` | `useSynquxSubscription` のみ (読み取りは core selectors を typed useAppSelector へ。ADR-0022 / ADR-0023) | ゲーム開発者層 |
 | `synqux/testing` | `createMemoryHub` / `verifyActionIdempotency` / `assertActionIdempotency` / `createTestRootState` | consumer CI / 本 repo の simulation test |
 | `synqux/firebase` | `firebaseTransport(db, options?: { archivePrunedRequests?: boolean })` | Phase 2 で実装 |

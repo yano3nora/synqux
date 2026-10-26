@@ -41,6 +41,12 @@ import {
   type SynquxRootState,
 } from './root-reducer.js'
 import type { SynquxState } from './slice.js'
+import {
+  buildSyncedRequest,
+  type CreateSyncedRequest,
+  type SyncedRequestDefinition,
+  type WithInflight,
+} from './synced-request.js'
 import type { ResultMessage, SynquxActionMeta, SynquxSynced } from './types.js'
 
 /**
@@ -272,6 +278,13 @@ export type SynquxDefinition<T extends SynquxTypes, TKey extends string> = {
    * registry 登録を行う。生成 creator の action は全て synced action になる
    */
   createSyncedSlice: CreateSyncedSlice<any>
+
+  /**
+   * host が外部 I/O をして結果を synced action にする request (ADR-0032)。
+   * requested / resolved / aborted の 3 action をこの定義の registry に登録する。
+   * synced state は `inflight: {}` を持つこと。配線は `createSynqux({ requests })`
+   */
+  createSyncedRequest: CreateSyncedRequest<T['synced']>
 
   /**
    * synced domain action の判定述語 (registry 由来)。配線フェーズが内部で
@@ -548,6 +561,18 @@ export const defineSynqux = <TKey extends string>(config: {
       }
       return slice
     },
+
+    createSyncedRequest: (
+      requestDefinition: SyncedRequestDefinition<
+        WithInflight,
+        unknown,
+        unknown
+      >,
+    ) =>
+      buildSyncedRequest(
+        definition.createSyncedAction as CreateSyncedAction<any, WithInflight>,
+        requestDefinition,
+      ),
 
     isSyncedAction,
     syncedKey: config.syncedKey,

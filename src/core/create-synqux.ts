@@ -30,6 +30,7 @@ import { localStorageSnapshotStore } from './local-storage.js'
 import { isSynquxAction } from './matchers.js'
 import { selectIsHost, selectSelf } from './selectors.js'
 import { createSnapshotThrottle } from './snapshot-throttle.js'
+import { SYNCED_REQUEST_RULES, type SyncedRequest } from './synced-request.js'
 import {
   buildSnapshotPayload,
   canonicalStringify,
@@ -397,6 +398,12 @@ export type CreateSynquxConfig<
   listeners?: SynquxListener<TSynced, TAction>[]
 
   /**
+   * host が外部 I/O をして結果を synced action にする request (ADR-0032)。
+   * engine が timeout の automation と host の perform を内部で配線する
+   */
+  requests?: SyncedRequest<TSynced>[]
+
+  /**
    * host 生存監視 (ADR-0016)。host は heartbeatIntervalMs ごとに presence の
    * lastSeenAt をサーバ時刻で更新し、他端末は staleThresholdMs を超えて沈黙した
    * host を guest へ降格して host migration を促す (background tab の freeze 等で
@@ -634,6 +641,7 @@ export type Synqux<
   replaceRules(next: {
     automations?: SynquxAutomation<TSynced, TAction>[]
     listeners?: SynquxListener<TSynced, TAction>[]
+    requests?: SyncedRequest<TSynced>[]
   }): void
 
   /**
@@ -767,8 +775,48 @@ export const createSynqux = <
       }
     }
   }
-  let automations = config.automations ?? []
-  let listeners = config.listeners ?? []
+  // requests の rule は consumer の rule と同じ engine に載せる。listener は先頭に
+  // 置く。理由: 末尾は reload などの終端 listener の置き場 (ADR-0021 Decision 5)
+  let configAutomations = config.automations ?? []
+  let configListeners = config.listeners ?? []
+  let requests = config.requests ?? []
+  const composeAutomations = () => [
+    ...configAutomations,
+    ...requests.map(
+      (request) =>
+        request[SYNCED_REQUEST_RULES].automation as SynquxAutomation<
+          TSynced,
+          TAction
+        >,
+    ),
+  ]
+  const composeListeners = () => [
+    ...requests.map(
+      (request) =>
+        request[SYNCED_REQUEST_RULES].listener(
+          dispatchToCurrentSession,
+        ) as SynquxListener<TSynced, TAction>,
+    ),
+    ...configListeners,
+  ]
+  /** perform の結果は開始時の session にだけ流す (unsubscribe 後・別 session では捨てる) */
+  const dispatchToCurrentSession = () => {
+    const target = session
+    if (!target) {
+      return null
+    }
+
+    // 送信の失敗は記録だけする。結果が届かなければ timeout の aborted が拾う
+    return (action: Action) => {
+      if (session === target) {
+        void Promise.resolve(target.store.dispatch(action)).catch(
+          (error: unknown) => console.error(error),
+        )
+      }
+    }
+  }
+  let automations = composeAutomations()
+  let listeners = composeListeners()
   let hasAllScopeListeners = listeners.some(
     (listener) => listener.scope === 'all',
   )
@@ -3274,21 +3322,28 @@ export const createSynqux = <
       settleRootReducer()
     },
     replaceRules: (next) => {
-      // 両方を先に検証してから差し替える (片側だけ入れ替わる中途半端を作らない)
-      if (next.automations) {
-        validateAutomations(next.automations)
+      // 全部を先に検証してから差し替える (一部だけ入れ替わる中途半端を作らない)
+      const previous = { configAutomations, configListeners, requests }
+      configAutomations = next.automations ?? configAutomations
+      configListeners = next.listeners ?? configListeners
+      requests = next.requests ?? requests
+      const nextAutomations = composeAutomations()
+      const nextListeners = composeListeners()
+      try {
+        validateAutomations(nextAutomations)
+        validateListeners(nextListeners)
+      } catch (error) {
+        ;({ configAutomations, configListeners, requests } = previous)
+        throw error
       }
-      if (next.listeners) {
-        validateListeners(next.listeners)
-      }
-      if (next.listeners) {
-        listeners = next.listeners
+      if (next.listeners || next.requests) {
+        listeners = nextListeners
         hasAllScopeListeners = listeners.some(
           (listener) => listener.scope === 'all',
         )
       }
-      if (next.automations) {
-        automations = next.automations
+      if (next.automations || next.requests) {
+        automations = nextAutomations
         // engine は session の live 遷移後にだけ存在する。未起動なら次の起動が新 rule 群を読む
         automationEngine?.restart()
       }
