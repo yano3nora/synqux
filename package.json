@@ -95,7 +95,7 @@
     "node": ">=20"
   },
   "dependencies": {
-    "@yano3nora/ts-utils": "^0.37.1",
+    "@yano3nora/ts-utils": "^1.2.0",
     "ulid": "^3.0.2"
   }
 }
